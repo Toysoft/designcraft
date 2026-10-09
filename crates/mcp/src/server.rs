@@ -5,7 +5,7 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 use crate::backend::Backend;
-use crate::tools::{call_tool, tool_definitions};
+use crate::tools::{call_tool, tool_definitions, unknown_argument};
 
 /// The MCP revision we implement.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -20,7 +20,8 @@ const RESOURCE_NOT_FOUND: i64 = -32002;
 
 const INSTRUCTIONS: &str = "DesignCraft is a page-layout app (an InDesign clone). Coordinates are points in spread \
 space (y down; on a single-page spread the page's top-left is (0,0); a default Letter page is 612×792). Every action \
-is a command: find ids and parameters with list_commands and run them with execute (or several with batch). Typical \
+is a command: command_list discovers ids and parameters, command_run executes them, command_batch runs several, \
+doc_inspect shows the document and render_preview returns a PNG. Existing tools remain available. Typical \
 flow: new_document → execute frame.create {rect:[x0,y0,x1,y1], content:\"text\", text:\"…\"} → set_story_text / \
 execute type.char / style.paragraph.apply → render_page to look at the result. inspect_document lists pages, items \
 (ids, bounds), stories (overset) and styles. place_image puts a picture on the page.";
@@ -149,6 +150,9 @@ impl Server {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+                if let Some(message) = unknown_argument(name, &args) {
+                    return Err((INVALID_PARAMS, message));
+                }
                 Ok(call_tool(self.backend.as_mut(), name, &args).to_value())
             }
             "resources/list" => Ok(json!({"resources": [
