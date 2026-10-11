@@ -1572,7 +1572,18 @@ impl<'a> Ex<'a> {
             el.set("BindingLocation", sp.pages.iter().filter(|p| p.side == PageSide::Left).count());
             el.set("AllowPageShuffle", bool_s(sp.allow_shuffle));
         }
-        el.set("ItemTransform", "1 0 0 1 0 0");
+        // View › Rotate Spread is the rotation part of the spread's transform; pages and items stay in
+        // unrotated spread coordinates.
+        let rotation = if master { 0 } else { sp.pages.first().map_or(0, |p| p.view_rotation) };
+        el.set(
+            "ItemTransform",
+            match rotation {
+                1 => "0 1 -1 0 0 0",
+                2 => "-1 0 0 -1 0 0",
+                3 => "0 -1 1 0 0 0",
+                _ => "1 0 0 1 0 0",
+            },
+        );
         let based_on = sp.parent.as_ref().and_then(|i| i.based_on);
         for (i, pg) in sp.pages.iter().enumerate() {
             let name = if master { sp.parent.as_ref().map(|i| i.prefix.clone()).unwrap_or_default() } else { d.page_name(first_page + i) };

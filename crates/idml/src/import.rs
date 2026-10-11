@@ -163,6 +163,26 @@ fn parse_affine(s: Option<&str>) -> Affine {
     }
 }
 
+/// View › Rotate Spread from a `Spread` element's `ItemTransform`: quarter turns clockwise on
+/// screen (IDML y points down, so `0 1 -1 0` is one clockwise turn). The spread's items and
+/// pages stay in unrotated spread coordinates, so only the rotation part is read. Anything other
+/// than an exact quarter turn (identity, scale, other angles, malformed numbers) is no rotation.
+fn spread_view_rotation(s: Option<&str>) -> u8 {
+    let parsed: std::result::Result<Vec<f64>, _> = s.unwrap_or("").split_whitespace().take(7).map(str::parse::<f64>).collect();
+    let Some([a, b, c, d, _, _]) = parsed.ok().and_then(|v| <[f64; 6]>::try_from(v).ok()) else { return 0 };
+    let is = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    let quarter = |m: [f64; 4]| is(a, m[0]) && is(b, m[1]) && is(c, m[2]) && is(d, m[3]);
+    if quarter([0.0, 1.0, -1.0, 0.0]) {
+        1
+    } else if quarter([-1.0, 0.0, 0.0, -1.0]) {
+        2
+    } else if quarter([0.0, -1.0, 1.0, 0.0]) {
+        3
+    } else {
+        0
+    }
+}
+
 fn parse_point(s: Option<&str>) -> Option<Point> {
     let v = nums(s?);
     (v.len() >= 2).then(|| Point::new(v[0], v[1]))
@@ -1844,6 +1864,7 @@ impl<'r> Importer<'r> {
         let shift = Affine::translate((-min_x, -min_y));
         let show = e.get("ShowMasterItems") != Some("false");
         let first_abs: usize = self.spreads.iter().map(|s| s.pages.len()).sum();
+        let view_rotation = if master { 0 } else { spread_view_rotation(e.get("ItemTransform")) };
         let mut out_pages = Vec::new();
         for (i, (r, p)) in pages.iter().enumerate() {
             let pid = PageId(self.alloc());
@@ -1878,7 +1899,7 @@ impl<'r> Importer<'r> {
                 show_parent_items: show,
                 liquid: Default::default(),
                 transition: None,
-                view_rotation: 0,
+                view_rotation: if i == 0 { view_rotation } else { 0 },
             });
         }
         let overrides: Vec<Vec<String>> =
