@@ -4,7 +4,7 @@
 //! the 8 bounding-box handles resize (Shift keeps proportions, Alt from centre, Cmd scales content),
 //! empty-canvas drags make a marquee, double-clicking a text frame switches to the Type tool.
 
-use designcraft_doc::{ItemId, SpreadRef};
+use designcraft_doc::{Arrowhead, Content, Item, ItemId, SpreadRef, StrokeAlign};
 use designcraft_geom::{Affine, Point, Rect, Vec2};
 use serde_json::{Value, json};
 
@@ -28,6 +28,9 @@ enum Drag {
         start: Point,
         from: Rect,
         spread: SpreadRef,
+        stroke_pad: [f64; 2],
+        scaled_stroke: bool,
+        fixed_stroke: bool,
     },
     Rotate {
         center: Point,
@@ -178,12 +181,14 @@ fn resize_edges_rect(from: Rect, handle: usize, p: Point) -> Rect {
 }
 
 fn finish_resize(from: Rect, handle: usize, rect: Rect, m: Mods) -> Rect {
-    let rect = if m.shift && from.width() > 1e-9 && from.height() > 1e-9 {
-        apply_aspect(from, handle, rect, aspect_scale(from, handle, rect))
+    // Measure a centered drag from the center before choosing the aspect's driving axis.
+    let rect = if m.alt { apply_alt(from, handle, rect) } else { rect };
+    if m.shift && from.width() > 1e-9 && from.height() > 1e-9 {
+        let s = aspect_scale(from, handle, rect);
+        if m.alt { centered_rect(from, from.width() * s, from.height() * s) } else { apply_aspect(from, handle, rect, s) }
     } else {
         rect
-    };
-    if m.alt { apply_alt(from, handle, rect) } else { rect }
+    }
 }
 
 fn aspect_scale(from: Rect, handle: usize, rect: Rect) -> f64 {
@@ -222,17 +227,37 @@ fn apply_aspect(from: Rect, handle: usize, rect: Rect, s: f64) -> Rect {
             x0 = x1 - w;
             y0 = y1 - h;
         }
+        1 => {
+            x0 = from.center().x - w / 2.0;
+            x1 = from.center().x + w / 2.0;
+            y0 = y1 - h;
+        }
         2 => {
             x1 = x0 + w;
             y0 = y1 - h;
         }
-        3..=5 => {
+        3 => {
+            x1 = x0 + w;
+            y0 = from.center().y - h / 2.0;
+            y1 = from.center().y + h / 2.0;
+        }
+        4 => {
             x1 = x0 + w;
             y1 = y0 + h;
         }
-        6 | 7 => {
+        5 => {
+            x0 = from.center().x - w / 2.0;
+            x1 = from.center().x + w / 2.0;
+            y1 = y0 + h;
+        }
+        6 => {
             x0 = x1 - w;
             y1 = y0 + h;
+        }
+        7 => {
+            x0 = x1 - w;
+            y0 = from.center().y - h / 2.0;
+            y1 = from.center().y + h / 2.0;
         }
         _ => {
             x0 = x1 - w;
@@ -256,7 +281,16 @@ fn finish_snapped_resize(
     hit: &crate::Snap,
 ) -> Rect {
     if !mods.alt {
-        let mut to = crate::snap::nudge_edges(proposed, x_edges, y_edges, hit.delta);
+        // Dimension deltas grow the span's magnitude; reflected spans grow in the
+        // opposite direction. Position deltas already use spread coordinates.
+        let mut delta = hit.delta;
+        if hit.length_delta[0].is_some() {
+            delta.x *= proposed.width().signum();
+        }
+        if hit.length_delta[1].is_some() {
+            delta.y *= proposed.height().signum();
+        }
+        let mut to = crate::snap::nudge_edges(proposed, x_edges, y_edges, delta);
         if mods.shift && from.width() > 1e-9 && from.height() > 1e-9 {
             let s = if driver_x { (to.x1 - to.x0) / from.width() } else { (to.y1 - to.y0) / from.height() };
             if s.is_finite() {
@@ -267,8 +301,8 @@ fn finish_snapped_resize(
     }
     let mut w = proposed.x1 - proposed.x0;
     let mut h = proposed.y1 - proposed.y0;
-    w += centered_size_delta(x_edges, hit.delta.x, hit.length_delta[0]);
-    h += centered_size_delta(y_edges, hit.delta.y, hit.length_delta[1]);
+    w += centered_size_delta(w, x_edges, hit.delta.x, hit.length_delta[0]);
+    h += centered_size_delta(h, y_edges, hit.delta.y, hit.length_delta[1]);
     if mods.shift && from.width() > 1e-9 && from.height() > 1e-9 {
         if driver_x {
             let s = w / from.width();
@@ -285,14 +319,14 @@ fn finish_snapped_resize(
     if !(w.is_finite() && h.is_finite()) {
         return proposed;
     }
-    let c = from.center();
-    Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)
+    centered_rect(from, w, h)
 }
 
-/// Length match: add the difference once. Position match: the flagged edge moves and the other side mirrors.
-fn centered_size_delta(edges: [bool; 3], delta: f64, length_delta: Option<f64>) -> f64 {
+/// Length match: apply the difference once in the size's direction, preserving a crossed-center reflection.
+/// Position match: the flagged edge moves and the other side mirrors.
+fn centered_size_delta(size: f64, edges: [bool; 3], delta: f64, length_delta: Option<f64>) -> f64 {
     if let Some(diff) = length_delta.filter(|d| d.is_finite()) {
-        return diff;
+        return diff * size.signum();
     }
     let edge = axis_size_delta(edges, delta);
     if edge.is_finite() { edge * 2.0 } else { 0.0 }
@@ -313,16 +347,26 @@ fn axis_size_delta(edges: [bool; 3], delta: f64) -> f64 {
     }
 }
 
-fn apply_alt(from: Rect, handle: usize, rect: Rect) -> Rect {
-    let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
+fn centered_rect(from: Rect, w: f64, h: f64) -> Rect {
     let c = from.center();
-    let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-    let (hw, hh) = match handle {
-        1 | 5 => (from.width() / 2.0, (if handle == 1 { c.y - y0 } else { y1 - c.y })),
-        3 | 7 => ((if handle == 7 { c.x - x0 } else { x1 - c.x }), from.height() / 2.0),
-        _ => (hw.abs().max((c.x - x0).abs()).max((x1 - c.x).abs()), hh.abs().max((c.y - y0).abs()).max((y1 - c.y).abs())),
+    Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)
+}
+
+fn apply_alt(from: Rect, handle: usize, rect: Rect) -> Rect {
+    let c = from.center();
+    // Only the dragged side sets the half-size; the opposite side must not prevent shrinking.
+    let (x_edges, y_edges) = resize_edge_flags(handle);
+    let w = match x_edges {
+        [true, _, false] => 2.0 * (c.x - rect.x0),
+        [false, _, true] => 2.0 * (rect.x1 - c.x),
+        _ => from.width(),
     };
-    Rect::new(c.x - hw, c.y - hh, c.x + hw, c.y + hh)
+    let h = match y_edges {
+        [true, _, false] => 2.0 * (c.y - rect.y0),
+        [false, _, true] => 2.0 * (rect.y1 - c.y),
+        _ => from.height(),
+    };
+    centered_rect(from, w, h)
 }
 
 /// Left/center/right and top/center/bottom for a handle. Centers stay off.
@@ -358,6 +402,255 @@ fn single_stroke_pad(cx: &ToolContext) -> (f64, f64) {
     let path = it.bounds();
     let vis = it.visible_bounds();
     (positive_pad(vis.width() - path.width()), positive_pad(vis.height() - path.height()))
+}
+
+/// Ordinary resizing bakes a closed frame's path without changing its stroke.
+/// Text frames share this fixed-outset policy, although their Cmd content scale does not.
+fn single_fixed_stroke(cx: &ToolContext) -> bool {
+    if cx.selection.items.len() != 1 {
+        return false;
+    }
+    let Some(id) = cx.selection.items.first() else { return false };
+    let Some(it) = cx.doc.item(*id) else { return false };
+    // The captured pad omits the item's stroke transform. Only unit axis
+    // reflections and quarter-turns preserve it on both spread axes.
+    let [a, b, c, d, _, _] = it.xf.as_coeffs();
+    let unit = |v: f64| (v.abs() - 1.0).abs() <= 1e-9;
+    let zero = |v: f64| v.abs() <= 1e-9;
+    let unit_axes = (unit(a) && zero(b) && zero(c) && unit(d)) || (zero(a) && unit(b) && unit(c) && zero(d));
+    cx.doc.top_level_of(*id) == Some(*id)
+        && it.path.is_closed()
+        && matches!(it.content, Content::Unassigned | Content::Graphic(_) | Content::Text(_))
+        && it.stroke.weight.is_finite()
+        && it.stroke.weight >= 0.0
+        && it.xf.determinant().is_finite()
+        && it.xf.determinant().abs() > 1e-9
+        && unit_axes
+}
+
+/// Closed paths and graphic frames bake their Cmd content scale and can predict its stroke.
+/// Text and groups transform their stroke differently, including with Scale Strokes off.
+fn single_scaled_stroke(cx: &ToolContext) -> bool {
+    single_fixed_stroke(cx)
+        && cx
+            .selection
+            .items
+            .first()
+            .and_then(|id| cx.doc.item(*id))
+            .is_some_and(|it| matches!(it.content, Content::Unassigned | Content::Graphic(_)))
+}
+
+/// Zero outward stroke extent needs no stroke-scaling model: every selected
+/// item's committed bounds undergo the same diagonal resize. Include text,
+/// groups and multiple items only after checking all their original subtrees.
+/// A lone nested item is safe here only when its parent transform is identity.
+fn zero_outset_selection(cx: &ToolContext) -> bool {
+    if cx.selection.items.is_empty() || cx.selection.items.len() > 4096 {
+        return false;
+    }
+    let mut visited = 0;
+    cx.selection.items.iter().all(|id| {
+        let Some(loc) = cx.doc.find(*id) else { return false };
+        if cx.doc.parent_xf(&loc) != Affine::IDENTITY || (cx.selection.items.len() > 1 && cx.doc.top_level_of(*id) != Some(*id)) {
+            return false;
+        }
+        cx.doc.item(*id).is_some_and(|it| zero_outset_item(it, 0, &mut visited))
+    })
+}
+
+fn zero_outset_item(it: &Item, depth: usize, visited: &mut usize) -> bool {
+    *visited = visited.saturating_add(1);
+    if depth > 32
+        || *visited > 4096
+        || !it.stroke.weight.is_finite()
+        || it.stroke.weight < 0.0
+        || !it.xf.determinant().is_finite()
+        || it.xf.determinant().abs() <= 1e-9
+    {
+        return false;
+    }
+    let no_outset = it.stroke.is_none()
+        || (it.path.is_closed() && it.stroke.align == StrokeAlign::Inside)
+        || (it.stroke.weight == 0.0 && it.stroke.start == Arrowhead::None && it.stroke.end == Arrowhead::None);
+    no_outset && it.children().iter().all(|child| zero_outset_item(child, depth + 1, visited))
+}
+
+// Keep aligned with transform.resize's minimum absolute per-axis scale.
+const MIN_RESIZE_SCALE: f64 = 1e-3;
+
+fn fixed_min_lengths(from: Rect, pad: [f64; 2]) -> [f64; 2] {
+    if !(from.width().is_finite() && from.height().is_finite()) || from.width() <= 1e-9 || from.height() <= 1e-9 {
+        return pad;
+    }
+    [from.width() * MIN_RESIZE_SCALE + pad[0], from.height() * MIN_RESIZE_SCALE + pad[1]]
+        .map(|length| (length - 1e-12 * (1.0 + length.abs())).max(0.0))
+}
+
+fn scaled_visible_sizes(from: Rect, to: Rect, pad: [f64; 2]) -> Option<[f64; 2]> {
+    if !(from.width().is_finite() && from.height().is_finite() && to.width().is_finite() && to.height().is_finite())
+        || from.width() <= 1e-9
+        || from.height() <= 1e-9
+    {
+        return None;
+    }
+    let sx = (to.width().abs() / from.width()).max(MIN_RESIZE_SCALE);
+    let sy = (to.height().abs() / from.height()).max(MIN_RESIZE_SCALE);
+    let k = (sx * sy).sqrt();
+    let size = [from.width() * sx + pad[0] * k, from.height() * sy + pad[1] * k];
+    size.iter().all(|v| v.is_finite()).then_some(size)
+}
+
+fn scaled_min_lengths(from: Rect, to: Rect, pad: [f64; 2], shift: bool, x_edges: [bool; 3], y_edges: [bool; 3]) -> [f64; 2] {
+    let both = shift || (x_edges != [false; 3] && y_edges != [false; 3]);
+    let kx = if both { MIN_RESIZE_SCALE } else { (MIN_RESIZE_SCALE * (to.height().abs() / from.height()).max(MIN_RESIZE_SCALE)).sqrt() };
+    let ky = if both { MIN_RESIZE_SCALE } else { (MIN_RESIZE_SCALE * (to.width().abs() / from.width()).max(MIN_RESIZE_SCALE)).sqrt() };
+    // Candidate bounds can lose a few ulps when subtracting distant coordinates.
+    // The final solve still checks both actual scale and visible-size agreement.
+    [from.width() * MIN_RESIZE_SCALE + pad[0] * kx, from.height() * MIN_RESIZE_SCALE + pad[1] * ky]
+        .map(|length| (length - 1e-12 * (1.0 + length.abs())).max(0.0))
+}
+
+// Match the final solver's existing per-axis allowance. The independent
+// candidate minima stay unchanged; these bounds only filter a failed pair.
+fn coupled_x_range(base: [f64; 2], pad: [f64; 2], height: f64) -> crate::snap::CoupledRange {
+    use crate::snap::CoupledRange;
+    if base.iter().any(|v| !v.is_finite() || *v <= 1e-9) || pad.iter().any(|v| !v.is_finite() || *v < 0.0) || !height.is_finite() || height <= 0.0 {
+        return CoupledRange::Unresolved;
+    }
+    let f = MIN_RESIZE_SCALE - 1e-12;
+    let tolerance = |v: f64| 1e-12 * (1.0 + v.abs());
+    let floor = (base[1] + pad[1]) * f;
+    if !floor.is_finite() {
+        return CoupledRange::Unresolved;
+    }
+    if height < floor - tolerance(floor) {
+        return CoupledRange::Empty;
+    }
+    // sx=f: By*k^2 + Py*f*k - f*height = 0.
+    let q = pad[1] * f;
+    let denominator = q + (q * q + 4.0 * base[1] * f * height).sqrt();
+    if !denominator.is_finite() || denominator <= 0.0 {
+        return CoupledRange::Unresolved;
+    }
+    let k = 2.0 * f * height / denominator;
+    let lower = base[0] * f + pad[0] * k;
+    if !k.is_finite() || !lower.is_finite() {
+        return CoupledRange::Unresolved;
+    }
+    // sy=f: k=(height-By*f)/Py and sx=k^2/f. Py=0 gives no upper limit.
+    let upper = if pad[1] == 0.0 {
+        f64::INFINITY
+    } else {
+        let k = (height - base[1] * f) / pad[1];
+        let upper = base[0] * (k * k / f) + pad[0] * k;
+        if k < 0.0 || !upper.is_finite() {
+            return CoupledRange::Unresolved;
+        }
+        upper + tolerance(upper)
+    };
+    let lower = (lower - tolerance(lower)).max(0.0);
+    if lower <= upper { CoupledRange::Bounds([lower, upper]) } else { CoupledRange::Empty }
+}
+
+/// Solve visible target = path magnitude + original stroke pad * final scale.
+/// Shift gives a linear equation; one free axis gives a quadratic in sqrt(size).
+/// Two matched axes share a scale: a bounded monotone solve handles their coupling.
+fn solve_scaled_sizes(base: [f64; 2], other: [f64; 2], pad: [f64; 2], targets: [Option<f64>; 2], shift: bool, driver_x: bool) -> Option<[f64; 2]> {
+    let mut size = other;
+    if shift {
+        let axis = usize::from(!driver_x);
+        if let Some(target) = targets[axis] {
+            let k = target / (base[axis] + pad[axis]);
+            size = [base[0] * k, base[1] * k];
+        }
+    } else if let [Some(w), Some(h)] = targets {
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let mut lo = 0.0;
+        let mut hi = ((w / base[0]) * (h / base[1])).sqrt();
+        if !hi.is_finite() {
+            return None;
+        }
+        for _ in 0..64 {
+            let k = (lo + hi) / 2.0;
+            let needed = (((w - pad[0] * k).max(0.0) / base[0]) * ((h - pad[1] * k).max(0.0) / base[1])).sqrt();
+            if k < needed {
+                lo = k;
+            } else {
+                hi = k;
+            }
+        }
+        let k = (lo + hi) / 2.0;
+        size = [w - pad[0] * k, h - pad[1] * k];
+    } else {
+        for axis in 0..2 {
+            if let Some(target) = targets[axis] {
+                if target <= 0.0 {
+                    return None;
+                }
+                // The engine clamps the unmatched axis before scaling strokes.
+                if size[1 - axis] < base[1 - axis] * MIN_RESIZE_SCALE {
+                    size[1 - axis] = base[1 - axis] * MIN_RESIZE_SCALE;
+                }
+                let a = pad[axis] * (size[1 - axis] / base[1 - axis] / base[axis]).sqrt();
+                let root = 2.0 * target / ((a * a + 4.0 * target).sqrt() + a);
+                size[axis] = root * root;
+            }
+        }
+    }
+    (0..2).all(|axis| size[axis].is_finite() && size[axis] / base[axis] >= MIN_RESIZE_SCALE - 1e-12).then_some(size)
+}
+
+fn finish_scaled_snap(
+    from: Rect,
+    handle: usize,
+    proposed: Rect,
+    mods: Mods,
+    driver_x: bool,
+    x_edges: [bool; 3],
+    y_edges: [bool; 3],
+    hit: &crate::Snap,
+    pad: [f64; 2],
+    visible: [f64; 2],
+) -> Option<Rect> {
+    if hit.length_delta == [None; 2] {
+        return Some(finish_snapped_resize(from, handle, proposed, mods, driver_x, x_edges, y_edges, hit));
+    }
+    let targets = [hit.length_delta[0].map(|d| visible[0] + d), hit.length_delta[1].map(|d| visible[1] + d)];
+    let mut positions = hit.clone();
+    if targets[0].is_some() {
+        positions.delta.x = 0.0;
+    }
+    if targets[1].is_some() {
+        positions.delta.y = 0.0;
+    }
+    positions.length_delta = [None; 2];
+    let position_rect = finish_snapped_resize(from, handle, proposed, mods, driver_x, x_edges, y_edges, &positions);
+    let sizes = solve_scaled_sizes(
+        [from.width(), from.height()],
+        [position_rect.width().abs(), position_rect.height().abs()],
+        pad,
+        targets,
+        mods.shift,
+        driver_x,
+    )?;
+    let mut paths = hit.clone();
+    for (axis, span, flags) in [(0, proposed.width(), x_edges), (1, proposed.height(), y_edges)] {
+        if targets[axis].is_some() {
+            let diff = sizes[axis] - span.abs();
+            paths.length_delta[axis] = Some(diff);
+            let delta = if flags[0] { -diff } else { diff };
+            if axis == 0 {
+                paths.delta.x = delta;
+            } else {
+                paths.delta.y = delta;
+            }
+        }
+    }
+    let to = finish_snapped_resize(from, handle, proposed, mods, driver_x, x_edges, y_edges, &paths);
+    let actual = scaled_visible_sizes(from, to, pad)?;
+    (0..2).all(|axis| targets[axis].is_none_or(|target| (actual[axis] - target).abs() <= 1e-8 * (1.0 + target.abs()))).then_some(to)
 }
 
 fn positive_pad(v: f64) -> f64 {
@@ -399,8 +692,19 @@ impl Tool for SelectionTool {
                     // On a turned spread the canvas handle is another one of the spread's.
                     let turns = cx.layout.slot(loc.spread).map_or(0, |s| s.rotation as usize);
                     let handle = (h + 8 - 2 * turns) % 8;
-                    self.drag =
-                        Drag::Resize { handle, start: p, from: cx.layout.xf(loc.spread).inverse().transform_rect_bbox(b), spread: loc.spread };
+                    // Preview contexts contain the previous preview, while the engine resizes
+                    // the pointer-down document each time. Keep its stroke inputs here too.
+                    let (pad_x, pad_y) = single_stroke_pad(cx);
+                    let zero_outset = zero_outset_selection(cx);
+                    self.drag = Drag::Resize {
+                        handle,
+                        start: p,
+                        from: cx.layout.xf(loc.spread).inverse().transform_rect_bbox(b),
+                        spread: loc.spread,
+                        stroke_pad: [pad_x, pad_y],
+                        scaled_stroke: single_scaled_stroke(cx) || zero_outset,
+                        fixed_stroke: single_fixed_stroke(cx) || zero_outset,
+                    };
                     return vec![Action::Begin("Resize".into())];
                 }
                 // Cmd+Shift-click a parent item on a page: override it there and select the copy.
@@ -541,7 +845,7 @@ impl Tool for SelectionTool {
                     }
                     vec![Action::Preview("transform.move".into(), params)]
                 }
-                Drag::Resize { handle, start, from, spread } => {
+                Drag::Resize { handle, start, from, spread, stroke_pad, scaled_stroke, fixed_stroke } => {
                     let _ = start;
                     let pointer = cx.layout.to_spread(spread, p);
                     let raw = resize_edges_rect(from, handle, pointer);
@@ -552,7 +856,8 @@ impl Tool for SelectionTool {
                     // Command still scales content. It does not skip the snap.
                     if !distribute && cx.snap.any() {
                         let (mut x_edges, mut y_edges) = resize_edge_flags(handle);
-                        let driver_x = drives_x(handle, from, raw);
+                        let constraint = if ev.mods.alt { apply_alt(from, handle, raw) } else { raw };
+                        let driver_x = drives_x(handle, from, constraint);
                         if ev.mods.shift {
                             if driver_x {
                                 y_edges = [false, false, false];
@@ -561,25 +866,99 @@ impl Tool for SelectionTool {
                             }
                         }
                         let exclude = cx.selection.items.clone();
-                        let (pad_x, pad_y) = single_stroke_pad(cx);
+                        let [pad_x, pad_y] = stroke_pad;
                         let proposed = to;
-                        let mut hit = crate::snap::snap(
-                            cx,
-                            SnapRequest {
-                                spread,
-                                gesture: Gesture::Resize,
-                                rect: proposed,
-                                x_edges,
-                                y_edges,
-                                exclude: &exclude,
-                                copying: false,
-                                lengths: [axis_length(x_edges, proposed.width(), pad_x), axis_length(y_edges, proposed.height(), pad_y)],
-                                angle: None,
-                                radius: 0.0,
-                                pointer,
-                            },
-                        );
-                        to = finish_snapped_resize(from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, &hit);
+                        let scales_stroke = ev.mods.cmd && cx.scale_strokes;
+                        let predicted = if scales_stroke && scaled_stroke { scaled_visible_sizes(from, proposed, stroke_pad) } else { None };
+                        let dimensions_supported = if ev.mods.cmd { scaled_stroke } else { fixed_stroke };
+                        let lengths = if !dimensions_supported {
+                            // Only verified stroke policies or zero-outset selections can
+                            // advertise dimensions. Other policies still snap to positions.
+                            [None; 2]
+                        } else if scales_stroke {
+                            predicted.map_or([None; 2], |[w, h]| [axis_length(x_edges, w, 0.0), axis_length(y_edges, h, 0.0)])
+                        } else {
+                            [axis_length(x_edges, proposed.width(), pad_x), axis_length(y_edges, proposed.height(), pad_y)]
+                        };
+                        let minimum = if predicted.is_some() {
+                            scaled_min_lengths(from, proposed, stroke_pad, ev.mods.shift, x_edges, y_edges)
+                        } else if fixed_stroke {
+                            // Fixed outsets still require a path span at the command's
+                            // .001 scale floor, including ordinary text-frame resizing.
+                            fixed_min_lengths(from, stroke_pad)
+                        } else {
+                            stroke_pad
+                        };
+                        let request = |lengths| SnapRequest {
+                            spread,
+                            gesture: Gesture::Resize,
+                            rect: proposed,
+                            x_edges,
+                            y_edges,
+                            exclude: &exclude,
+                            copying: false,
+                            lengths,
+                            angle: None,
+                            radius: 0.0,
+                            pointer,
+                        };
+                        let snap = |lengths, minimum| crate::snap::snap_with_min_lengths(cx, request(lengths), minimum);
+                        let mut hit = snap(lengths, minimum);
+                        if let Some(visible) = predicted {
+                            // A corner with only one dimension match must keep the other
+                            // axis at its position-snapped size, not at the scale floor.
+                            if x_edges != [false; 3] && y_edges != [false; 3] && matches!(hit.length_delta, [Some(_), None] | [None, Some(_)]) {
+                                let matched = hit.length_delta.map(|delta| delta.is_some());
+                                let positions = crate::Snap {
+                                    delta: Vec2::new(if matched[0] { 0.0 } else { hit.delta.x }, if matched[1] { 0.0 } else { hit.delta.y }),
+                                    ..crate::Snap::default()
+                                };
+                                let positioned = finish_snapped_resize(from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, &positions);
+                                let constrained_minimum = scaled_min_lengths(
+                                    from,
+                                    positioned,
+                                    stroke_pad,
+                                    false,
+                                    if matched[0] { x_edges } else { [false; 3] },
+                                    if matched[1] { y_edges } else { [false; 3] },
+                                );
+                                if (0..2).any(|axis| hit.length_delta[axis].is_some_and(|delta| visible[axis] + delta < constrained_minimum[axis])) {
+                                    hit = snap(lengths, constrained_minimum);
+                                }
+                            }
+                            let mut solved =
+                                finish_scaled_snap(from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, &hit, stroke_pad, visible);
+                            if solved.is_none()
+                                && !ev.mods.shift
+                                && x_edges != [false; 3]
+                                && y_edges != [false; 3]
+                                && matches!(hit.length_delta, [Some(_), Some(_)])
+                                && let crate::snap::CoupledSearch::Matched((candidate, candidate_to)) = crate::snap::retry_complete_dimensions(
+                                    cx,
+                                    &request(lengths),
+                                    minimum,
+                                    |height| coupled_x_range([from.width(), from.height()], stroke_pad, height),
+                                    |candidate| {
+                                        finish_scaled_snap(
+                                            from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, candidate, stroke_pad, visible,
+                                        )
+                                    },
+                                )
+                            {
+                                hit = candidate;
+                                solved = Some(candidate_to);
+                            }
+                            if let Some(solved) = solved {
+                                to = solved;
+                            } else {
+                                // A coupled match or a position correction can make the final
+                                // scale unreachable. Retry position passes without dimensions.
+                                hit = snap([None; 2], minimum);
+                                to = finish_snapped_resize(from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, &hit);
+                            }
+                        } else {
+                            to = finish_snapped_resize(from, handle, proposed, ev.mods, driver_x, x_edges, y_edges, &hit);
+                        }
                         crate::snap::lay_dimension_guides(&mut hit.guides, cx.layout.xf(spread), proposed, to, x_edges, y_edges, hit.length_delta);
                         self.guides = hit.guides;
                     }
@@ -775,5 +1154,29 @@ fn handle_cursor(h: usize) -> Cursor {
         2 | 6 => Cursor::ResizeNeSw,
         1 | 5 => Cursor::ResizeV,
         _ => Cursor::ResizeH,
+    }
+}
+
+#[cfg(test)]
+mod complete_coupled_range_tests {
+    use super::coupled_x_range;
+    use crate::snap::CoupledRange;
+
+    #[test]
+    fn complete_range_enforces_both_floors_and_changes_with_visible_height() {
+        let a = coupled_x_range([100.0, 50.0], [4.0; 2], 80.0);
+        let b = coupled_x_range([100.0, 50.0], [4.0; 2], 70.0);
+        assert!(matches!(a, CoupledRange::Bounds([lo, hi]) if (lo - 0.25984007999998).abs() < 1e-8 && 0.25 < lo && 3.0 < hi));
+        assert!(matches!(b, CoupledRange::Bounds([lo, hi]) if 0.25 >= lo && 0.25 <= hi));
+        let small = coupled_x_range([100.0, 50.0], [4.0; 2], 0.06);
+        assert!(matches!(small, CoupledRange::Bounds([lo, hi]) if 0.10405 < lo && (hi - 0.635).abs() < 1e-8 && 3.0 > hi));
+    }
+
+    #[test]
+    fn complete_range_handles_zero_pad_and_nonfinite_inputs_explicitly() {
+        let zero = coupled_x_range([100.0, 50.0], [0.0; 2], 80.0);
+        assert!(matches!(zero, CoupledRange::Bounds([lo, hi]) if (lo - 0.1).abs() < 1e-8 && hi == f64::INFINITY));
+        assert!(matches!(coupled_x_range([100.0, 50.0], [4.0; 2], f64::NAN), CoupledRange::Unresolved));
+        assert!(matches!(coupled_x_range([100.0, 50.0], [4.0; 2], 0.01), CoupledRange::Empty));
     }
 }

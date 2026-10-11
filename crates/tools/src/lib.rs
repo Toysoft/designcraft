@@ -200,6 +200,8 @@ pub struct ToolContext<'a> {
     pub layer: designcraft_doc::LayerId,
     pub snap: SnapView,
     pub unit: Unit,
+    /// Whether resizing content also scales stroke weights.
+    pub scale_strokes: bool,
 }
 
 impl ToolContext<'_> {
