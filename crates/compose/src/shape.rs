@@ -82,6 +82,8 @@ pub struct ShapedPara {
     pub glyphs: Vec<Glyph>,
     /// Byte range of the paragraph text (without its `\n`).
     pub range: std::ops::Range<usize>,
+    /// Effective visible-source use, after automatic style overlays and local overrides.
+    pub optical_kerning: bool,
 }
 
 /// Context for substitutions (page number markers).
@@ -185,6 +187,35 @@ impl StyleTable<'_> {
     }
 }
 
+/// Resolve only markers that actually substitute text. The shaper and source-only
+/// diagnostics share the same empty/missing-value and fallback rules.
+pub(crate) fn replacement_text(sub: &SubstCtx, at: usize, c: char) -> Option<&str> {
+    if let Some(vi) = designcraft_doc::vars::var_index(c) {
+        return sub.vars.get(vi).filter(|v| !v.is_empty()).map(String::as_str);
+    }
+    match c {
+        story::PAGE_NUMBER | story::NEXT_PAGE_NUMBER | story::PREV_PAGE_NUMBER => Some(sub.page_name.as_deref().unwrap_or("#")),
+        story::SECTION_MARKER => Some(sub.section_marker.as_deref().unwrap_or("Section")),
+        designcraft_doc::XREF_MARK => sub.xrefs.get(&at).filter(|v| !v.is_empty()).map(String::as_str),
+        designcraft_doc::FOOTNOTE_REF | designcraft_doc::ENDNOTE_REF => Some(sub.notes.get(&at).map_or("#", String::as_str)),
+        _ => None,
+    }
+}
+
+/// Reference styles replace the run's named style, retaining its direct overrides.
+pub(crate) fn reference_props(styles: &Styles, base: &CharProps, fmt: &designcraft_doc::CharFormat, sub: &SubstCtx, endnote: bool) -> CharProps {
+    let mut reference = fmt.clone();
+    if endnote {
+        reference.over.position = Some(Position::Superscript);
+    } else {
+        if let Some(style) = &sub.note_style {
+            reference.style = style.clone();
+        }
+        reference.over.position = Some(sub.note_position);
+    }
+    styles.resolve_char(base, &reference)
+}
+
 /// Resolve and shape one paragraph.
 pub(crate) fn shape_para(
     db: &ScopedFonts<'_>,
@@ -202,6 +233,7 @@ pub(crate) fn shape_para(
 ) -> ShapedPara {
     let _ = pi;
     let mut glyphs = Vec::with_capacity(range.len());
+    let mut optical_kerning = false;
     // Nested line styles lie under nested and GREP styles (later overlays win).
     let mut overlays: Vec<(std::ops::Range<usize>, String)> = lines.to_vec();
     if !nested.is_empty() || !grep.is_empty() {
@@ -280,44 +312,37 @@ pub(crate) fn shape_para(
         }
         let is_ref = |c: char| c == designcraft_doc::FOOTNOTE_REF || c == designcraft_doc::ENDNOTE_REF;
         if !story.text[a..b].contains(is_ref) {
-            shape_run(db, &story.text, a..b, &props, auto_leading, style, sub, &mut glyphs);
+            shape_run(db, &story.text, a..b, &props, auto_leading, style, sub, &mut glyphs, &mut optical_kerning);
             continue;
         }
         // Footnote references take the reference position / character style; endnote references
         // are superscript.
-        let mut rf = fmt.clone();
-        if let Some(cs) = &sub.note_style {
-            rf.style = cs.clone();
-        }
-        rf.over.position = Some(sub.note_position);
-        let rprops = styles.resolve_char(&resolved_base, &rf);
+        let rprops = reference_props(styles, &resolved_base, fmt, sub, false);
         let rstyle = table.intern(db, &rprops);
         let renv = table.env_for(auto_leading, rstyle);
-        let mut ef = fmt.clone();
-        ef.over.position = Some(designcraft_doc::Position::Superscript);
-        let eprops = styles.resolve_char(&resolved_base, &ef);
+        let eprops = reference_props(styles, &resolved_base, fmt, sub, true);
         let estyle = table.intern(db, &eprops);
         let eenv = table.env_for(auto_leading, estyle);
         let mut k = a;
         for (i, m) in story.text[a..b].match_indices(is_ref) {
             let i = a + i;
             if k < i {
-                shape_run(db, &story.text, k..i, &props, auto_leading, style, sub, &mut glyphs);
+                shape_run(db, &story.text, k..i, &props, auto_leading, style, sub, &mut glyphs, &mut optical_kerning);
             }
             let e = i + m.len();
             if m.starts_with(designcraft_doc::ENDNOTE_REF) {
-                shape_run(db, &story.text, i..e, &eprops, eenv, estyle, sub, &mut glyphs);
+                shape_run(db, &story.text, i..e, &eprops, eenv, estyle, sub, &mut glyphs, &mut optical_kerning);
             } else {
-                shape_run(db, &story.text, i..e, &rprops, renv, rstyle, sub, &mut glyphs);
+                shape_run(db, &story.text, i..e, &rprops, renv, rstyle, sub, &mut glyphs, &mut optical_kerning);
             }
             k = e;
         }
         if k < b {
-            shape_run(db, &story.text, k..b, &props, auto_leading, style, sub, &mut glyphs);
+            shape_run(db, &story.text, k..b, &props, auto_leading, style, sub, &mut glyphs, &mut optical_kerning);
         }
     }
     collapse_tcy(&mut glyphs, sub.vertical);
-    ShapedPara { glyphs, range }
+    ShapedPara { glyphs, range, optical_kerning }
 }
 
 /// Tate-chu-yoko: in vertical text each run of marked glyphs takes one em along the line, its
@@ -439,9 +464,10 @@ fn shape_run(
     style: u32,
     sub: &SubstCtx,
     out: &mut Vec<Glyph>,
+    optical_kerning: &mut bool,
 ) {
     let start = out.len();
-    shape_run_raw(db, text, range, p, env, style, sub, out);
+    shape_run_raw(db, text, range, p, env, style, sub, out, optical_kerning);
     let run = &mut out[start..];
     let em = p.size * p.h_scale;
     for g in run.iter_mut().filter(|g| g.adv > 0.0 && !g.ch.is_control()) {
@@ -494,6 +520,7 @@ fn shape_run_raw(
     style: u32,
     sub: &SubstCtx,
     out: &mut Vec<Glyph>,
+    optical_kerning: &mut bool,
 ) {
     let primary = db.face(&p.font_family, &p.font_style);
     // The language picks the fallback for CJK characters the primary font lacks. Without
@@ -511,9 +538,9 @@ fn shape_run_raw(
     // Split into segments: font coverage changes and special characters (markers, tabs, breaks).
     let mut seg_start = range.start;
     let mut seg_face = primary.clone();
-    let flush = |a: usize, b: usize, face: &Arc<FontFace>, out: &mut Vec<Glyph>| {
+    let flush = |a: usize, b: usize, face: &Arc<FontFace>, out: &mut Vec<Glyph>, optical_kerning: &mut bool| {
         if a < b {
-            shape_segment(db, text, a..b, None, p, face, auto_leading, style, out, sub.vertical);
+            shape_segment(db, text, a..b, None, p, face, auto_leading, style, out, sub.vertical, optical_kerning);
         }
     };
     for (i, c) in text[range.clone()].char_indices() {
@@ -535,10 +562,22 @@ fn shape_run_raw(
             };
             let d = mode.map(c, &p.language);
             if d != c {
-                flush(seg_start, i, &seg_face, out);
+                flush(seg_start, i, &seg_face, out, optical_kerning);
                 seg_start = i + c.len_utf8();
                 let face = if primary.covers(d) { primary.clone() } else { fallback(d) };
-                shape_segment(db, text, i..i + c.len_utf8(), Some(d.encode_utf8(&mut [0; 4])), p, &face, auto_leading, style, out, sub.vertical);
+                shape_segment(
+                    db,
+                    text,
+                    i..i + c.len_utf8(),
+                    Some(d.encode_utf8(&mut [0; 4])),
+                    p,
+                    &face,
+                    auto_leading,
+                    style,
+                    out,
+                    sub.vertical,
+                    optical_kerning,
+                );
                 continue;
             }
         }
@@ -566,11 +605,13 @@ fn shape_run_raw(
                 | designcraft_doc::OBJECT_MARK
         ) || designcraft_doc::vars::var_index(c).is_some();
         if special {
-            flush(seg_start, i, &seg_face, out);
+            flush(seg_start, i, &seg_face, out, optical_kerning);
             seg_start = i + c.len_utf8();
-            if let Some(vi) = designcraft_doc::vars::var_index(c) {
-                match sub.vars.get(vi).filter(|v| !v.is_empty()) {
-                    Some(v) => shape_segment(db, text, i..i + c.len_utf8(), Some(v), p, &primary, auto_leading, style, out, sub.vertical),
+            if designcraft_doc::vars::var_index(c).is_some() {
+                match replacement_text(sub, i, c) {
+                    Some(v) => {
+                        shape_segment(db, text, i..i + c.len_utf8(), Some(v), p, &primary, auto_leading, style, out, sub.vertical, optical_kerning)
+                    }
                     None => {
                         let mut g = control_glyph(&primary, p, auto_leading, style, i, c);
                         g.adv = 0.0;
@@ -581,12 +622,8 @@ fn shape_run_raw(
             }
             match c {
                 story::PAGE_NUMBER | story::NEXT_PAGE_NUMBER | story::PREV_PAGE_NUMBER | story::SECTION_MARKER => {
-                    let s = if c == story::SECTION_MARKER {
-                        sub.section_marker.clone().unwrap_or_else(|| "Section".into())
-                    } else {
-                        sub.page_name.clone().unwrap_or_else(|| "#".into())
-                    };
-                    shape_segment(db, text, i..i + c.len_utf8(), Some(&s), p, &primary, auto_leading, style, out, sub.vertical);
+                    let s = replacement_text(sub, i, c);
+                    shape_segment(db, text, i..i + c.len_utf8(), s, p, &primary, auto_leading, style, out, sub.vertical, optical_kerning);
                 }
                 designcraft_doc::OBJECT_MARK => {
                     let mut g = control_glyph(&primary, p, auto_leading, style, i, c);
@@ -608,8 +645,10 @@ fn shape_run_raw(
                     }
                     out.push(g);
                 }
-                designcraft_doc::XREF_MARK => match sub.xrefs.get(&i).filter(|t| !t.is_empty()) {
-                    Some(t) => shape_segment(db, text, i..i + c.len_utf8(), Some(t), p, &primary, auto_leading, style, out, sub.vertical),
+                designcraft_doc::XREF_MARK => match replacement_text(sub, i, c) {
+                    Some(t) => {
+                        shape_segment(db, text, i..i + c.len_utf8(), Some(t), p, &primary, auto_leading, style, out, sub.vertical, optical_kerning)
+                    }
                     None => {
                         let mut g = control_glyph(&primary, p, auto_leading, style, i, c);
                         g.adv = 0.0;
@@ -617,8 +656,8 @@ fn shape_run_raw(
                     }
                 },
                 designcraft_doc::FOOTNOTE_REF | designcraft_doc::ENDNOTE_REF => {
-                    let s = sub.notes.get(&i).map_or("#", String::as_str);
-                    shape_segment(db, text, i..i + c.len_utf8(), Some(s), p, &primary, auto_leading, style, out, sub.vertical);
+                    let s = replacement_text(sub, i, c);
+                    shape_segment(db, text, i..i + c.len_utf8(), s, p, &primary, auto_leading, style, out, sub.vertical, optical_kerning);
                 }
                 _ => {
                     // Zero-width control glyph carrying metrics (tabs get their width at line layout).
@@ -639,12 +678,12 @@ fn shape_run_raw(
         let covered = c.is_whitespace() || c.is_control() || c == SOFT_HYPHEN || primary.covers(c);
         let face = if covered || is_mark(c) { if is_mark(c) { seg_face.clone() } else { primary.clone() } } else { fallback(c) };
         if face.id() != seg_face.id() {
-            flush(seg_start, i, &seg_face, out);
+            flush(seg_start, i, &seg_face, out, optical_kerning);
             seg_start = i;
             seg_face = face;
         }
     }
-    flush(seg_start, range.end, &seg_face, out);
+    flush(seg_start, range.end, &seg_face, out, optical_kerning);
 }
 
 type WordMap = HashMap<Box<str>, Arc<[ShapedGlyph]>>;
@@ -811,6 +850,7 @@ fn shape_segment(
     style: u32,
     out: &mut Vec<Glyph>,
     vertical: bool,
+    optical_kerning: &mut bool,
 ) {
     let _ = db;
     let (size, k, ascent, descent, leading, cap, xh, shift) = metrics(face, p, auto_leading);
@@ -843,6 +883,9 @@ fn shape_segment(
         upright.extend(std::iter::repeat_n(up, g.len()));
         shaped.extend(g.into_iter().map(|g| ShapedGlyph { cluster: g.cluster + r.start, ..g }));
     }
+    // Record the text actually shaped with its final properties (including reference styles).
+    // Empty replacements emit no glyphs; nonrendering marker branches bypass this path.
+    *optical_kerning |= matches!(p.kerning, Kerning::Optical) && !shaped.is_empty() && (replacement.is_some() || crate::overlay::used_text(src));
     // Upright glyphs fill the ideographic em box across the line.
     let (em_top, em_bottom) = face.em_box();
     let k_v = k * p.v_scale;

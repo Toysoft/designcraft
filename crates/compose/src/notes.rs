@@ -88,9 +88,16 @@ impl Notes {
         v
     }
 
+    /// The same generated body label is used for placed notes and source-only diagnostics.
+    pub fn body_label(&self, doc: &Document, k: usize) -> String {
+        let o = &doc.footnote_options;
+        let number = self.numbers.get(k).copied().unwrap_or(o.start_at);
+        format!("{}{}", o.label(number, true), o.separator)
+    }
+
     fn compose(&mut self, doc: &Document, k: usize, w: f64, f: &FrameSpec, opts: &ComposeOptions) -> (Arc<ComposedStory>, f64) {
         let o = &doc.footnote_options;
-        let label = format!("{}{}", o.label(self.numbers[k], true), o.separator);
+        let label = self.body_label(doc, k);
         let key = (k, label.clone(), w.to_bits());
         if let Some(c) = self.cache.get(&key) {
             return c.clone();

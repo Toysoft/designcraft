@@ -2,7 +2,7 @@
 //! fonts and glyphs, missing or low-resolution graphics, RGB content in print documents, empty
 //! text frames.
 
-use designcraft_compose::ComposedStory;
+use designcraft_compose::{ComposedStory, OpticalKerningUse};
 use designcraft_doc::{Content, Document, Intent, Item, SpreadRef};
 use designcraft_fonts::FaceRef;
 use serde::Serialize;
@@ -79,9 +79,18 @@ pub fn check(s: &Session, min_ppi: f64) -> Vec<Issue> {
     let db = designcraft_fonts::FontDb::global().scoped(d.font_scope);
     let mut missing_fonts: Vec<String> = Vec::new();
     let mut unsupported_typography = std::collections::BTreeSet::new();
+    let mut optical = OpticalKerningUse::NotUsed;
     let mut missing: Vec<(FaceRef, Vec<char>)> = Vec::new();
     for story in d.stories.values() {
         let cs = s.cache.get(d, story.id, None);
+        // Reuse the same substitution indices as Cache::get; child stories inherit them.
+        let opts = designcraft_compose::ComposeOptions {
+            running: (designcraft_compose::vars::has_vars(story) && designcraft_compose::vars::has_running(d, story))
+                .then(|| s.cache.running_index(d)),
+            xrefs: designcraft_compose::xref::has_xrefs(story).then(|| s.cache.xref_index(d)),
+            ..Default::default()
+        };
+        optical = optical.combine(designcraft_compose::source_optical_kerning(d, story, Some(&cs), &opts));
         missing_glyphs(&cs, &story.text, 0, &mut missing);
         if cs.is_overset() {
             let last = story.frames.last().copied();
@@ -145,6 +154,15 @@ pub fn check(s: &Session, min_ppi: f64) -> Vec<Issue> {
     }
     for f in missing_fonts {
         out.push(Issue { severity: "error", kind: "missingFont", message: format!("Missing font: {f}"), item: None, page: None });
+    }
+    match optical {
+        OpticalKerningUse::Used => {
+            unsupported_typography.insert("Optical kerning approximated by metrics".to_string());
+        }
+        OpticalKerningUse::Unresolved => {
+            unsupported_typography.insert("Optical kerning check incomplete: uncomposed text uses nested line styles".to_string());
+        }
+        OpticalKerningUse::NotUsed => {}
     }
     for message in unsupported_typography {
         out.push(Issue { severity: "warning", kind: "unsupportedTypography", message, item: None, page: None });
@@ -322,3 +340,11 @@ mod missing_glyph_tests {
         assert!(found[0].1.ends_with(" and 10 more"), "{}", found[0].1);
     }
 }
+
+#[cfg(test)]
+#[path = "preflight_review9_tests.rs"]
+mod preflight_review9_tests;
+
+#[cfg(test)]
+#[path = "preflight_optical_overset_tests.rs"]
+mod preflight_optical_overset_tests;

@@ -16,6 +16,7 @@ mod cache;
 pub mod hyphen;
 mod notes;
 mod overlay;
+pub use overlay::{OpticalKerningUse, source_optical_kerning};
 mod ruby;
 pub mod shape;
 pub mod table;
@@ -269,6 +270,12 @@ pub struct ComposedStory {
     pub overset_at: Option<usize>,
     pub styles: Vec<RunStyle>,
     pub text_len: usize,
+    /// Final effective Optical use per shaped paragraph; None means composition stopped first.
+    /// Preflight uses this only as a diagnostic, including final automatic line-style overrides.
+    pub optical_kerning: Vec<Option<bool>>,
+    /// Eligible source footnote references after final paragraph shaping, including line styles.
+    /// None means the paragraph was not shaped; retained only for stories with active footnotes.
+    pub footnote_references: Vec<Option<std::collections::HashSet<usize>>>,
 }
 
 impl ComposedStory {
@@ -344,6 +351,56 @@ pub struct ComposeOptions {
     pub xrefs: Option<Arc<xref::XrefIndex>>,
 }
 
+// Source-only label diagnostics mirror the compositor's paragraph-base resolution
+// without shaping or changing its inline layout path.
+fn source_paragraph_properties(
+    doc: &Document,
+    story: &Story,
+    pf: &designcraft_doc::ParaFormat,
+    prange: &Range<usize>,
+    context: StoryContext,
+) -> (ParaProps, designcraft_doc::CharProps) {
+    let (pp, mut base_chars) = doc.styles.resolve_para(pf);
+    // A blank paragraph has no glyphs: its separator supplies its character metrics.
+    if prange.is_empty() && story.text.as_bytes().get(prange.start) == Some(&b'\n') {
+        base_chars = doc.styles.resolve_char(&base_chars, story.format_after(prange.start));
+    } else if matches!(context, StoryContext::Outer)
+        && prange.is_empty()
+        && prange.start == story.len()
+        && story.text.ends_with('\n')
+        && (!pf.chars.is_empty() || pf.eof_inherited_chars.is_some())
+    {
+        // The EOF has no separator of its own. Keep the preceding run's live named
+        // style and apply only the persisted direct typing attrs above that style.
+        let fmt = designcraft_doc::CharFormat { style: story.char_format_at(prange.start).style.clone(), over: pf.chars.clone() };
+        base_chars = doc.styles.resolve_char(&base_chars, &fmt);
+    }
+    (pp, base_chars)
+}
+
+// The page context used by layout and by source-only diagnostics. No frame geometry is built.
+fn frame_page(
+    doc: &Document,
+    spread_ref: designcraft_doc::SpreadRef,
+    spread: Option<&designcraft_doc::Spread>,
+    item: &designcraft_doc::Item,
+) -> (Option<String>, Option<usize>, bool) {
+    match (spread_ref, spread) {
+        (designcraft_doc::SpreadRef::Doc(si), Some(sp)) => {
+            let c = item.bounds().center();
+            let pi = sp.page_at_x(c.x).unwrap_or(0);
+            let abs = doc.first_page_of_spread(si) + pi;
+            (Some(doc.page_name(abs)), Some(abs), sp.pages.get(pi).is_some_and(|p| p.side == designcraft_doc::PageSide::Left))
+        }
+        (designcraft_doc::SpreadRef::Parent(pi), Some(sp)) => {
+            let prefix = sp.parent.as_ref().map(|p| p.prefix.clone()).unwrap_or_else(|| "A".into());
+            let _ = pi;
+            (Some(prefix), None, false)
+        }
+        _ => (None, None, false),
+    }
+}
+
 /// Build the frame specs of a story from the document (geometry, wrap, page names, grid).
 pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
     let Some(st) = doc.story(sid) else { return vec![] };
@@ -373,20 +430,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
                 exclusions.push(Exclusion { rect: inner, mode: other.wrap.mode });
             }
         }
-        let (page_name, page, left_page) = match (loc.spread, spread) {
-            (designcraft_doc::SpreadRef::Doc(si), Some(sp)) => {
-                let c = item.bounds().center();
-                let pi = sp.page_at_x(c.x).unwrap_or(0);
-                let abs = doc.first_page_of_spread(si) + pi;
-                (Some(doc.page_name(abs)), Some(abs), sp.pages.get(pi).is_some_and(|p| p.side == designcraft_doc::PageSide::Left))
-            }
-            (designcraft_doc::SpreadRef::Parent(pi), Some(sp)) => {
-                let prefix = sp.parent.as_ref().map(|p| p.prefix.clone()).unwrap_or_else(|| "A".into());
-                let _ = pi;
-                (Some(prefix), None, false)
-            }
-            _ => (None, None, false),
-        };
+        let (page_name, page, left_page) = frame_page(doc, loc.spread, spread, item);
         // The page under the frame and its margins, in inner space (bounding boxes).
         let page_rect = match (loc.spread, spread) {
             (_, Some(sp)) => sp
@@ -558,6 +602,13 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
     let mut span_paras = vec![false; np];
     let mut split_paras = vec![false; np];
     'paras: while pi < np {
+        // Rewinding a keep chain discards diagnostics from abandoned paragraph layouts too.
+        out.optical_kerning.truncate(pi);
+        out.optical_kerning.push(None);
+        if notes.active() {
+            out.footnote_references.truncate(pi);
+            out.footnote_references.push(None);
+        }
         let prange = para_ranges[pi].clone();
         cur.pi = pi;
         cur.limits = Rc::clone(&limits);
@@ -762,23 +813,30 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 // A named list: carries on past other paragraphs (and from earlier stories).
                 let n = named_numbers.get(pi).copied().flatten().unwrap_or(1);
                 let label = pp.number_label(n);
-                prepend_label(db, &mut sp.glyphs, &label, prange.start, &base_chars, label_env, &mut table);
+                prepend_label(db, &mut sp, &label, prange.start, &base_chars, label_env, &mut table);
             }
             designcraft_doc::ListType::Numbers => {
                 list_counter = pp.start_at.map_or(list_counter.saturating_add(1), |s| s.max(1));
                 let label = pp.number_label(list_counter);
-                prepend_label(db, &mut sp.glyphs, &label, prange.start, &base_chars, label_env, &mut table);
+                prepend_label(db, &mut sp, &label, prange.start, &base_chars, label_env, &mut table);
             }
             designcraft_doc::ListType::Bullets => {
                 let label = pp.bullet_label();
-                prepend_label(db, &mut sp.glyphs, &label, prange.start, &base_chars, label_env, &mut table);
+                prepend_label(db, &mut sp, &label, prange.start, &base_chars, label_env, &mut table);
             }
             designcraft_doc::ListType::None => list_counter = 0,
         }
         if pi == 0
             && let Some(label) = &opts.label
         {
-            prepend_label(db, &mut sp.glyphs, label, prange.start, &base_chars, label_env, &mut table);
+            prepend_label(db, &mut sp, label, prange.start, &base_chars, label_env, &mut table);
+        }
+        // Include generated list and note-body labels in the final paragraph diagnostic.
+        if let Some(used) = out.optical_kerning.get_mut(pi) {
+            *used = Some(sp.optical_kerning);
+        }
+        if let Some(refs) = out.footnote_references.get_mut(pi) {
+            *refs = Some(sp.glyphs.iter().filter(|g| g.ch == designcraft_doc::FOOTNOTE_REF && g.len > 0).map(|g| g.byte).collect());
         }
         let mut glyphs = sp.glyphs;
         let bidi_text = bidi::paragraph_text(&mut glyphs, &story.text);
@@ -2669,7 +2727,7 @@ fn place(g: &Glyph, x: f64) -> PlacedGlyph {
 
 fn prepend_label(
     db: &ScopedFonts<'_>,
-    glyphs: &mut Vec<Glyph>,
+    para: &mut shape::ShapedPara,
     label: &str,
     at: usize,
     base: &designcraft_doc::CharProps,
@@ -2681,6 +2739,7 @@ fn prepend_label(
     tmp.insert(0, label);
     let styles = designcraft_doc::Styles::default();
     let shaped = shape::shape_para(db, &styles, &tmp, 0, 0..label.len(), base, env, &SubstCtx::default(), table, &[], &[], &[]);
+    para.optical_kerning |= shaped.optical_kerning;
     let mut pre: Vec<Glyph> = shaped
         .glyphs
         .into_iter()
@@ -2690,8 +2749,8 @@ fn prepend_label(
             g
         })
         .collect();
-    pre.append(glyphs);
-    *glyphs = pre;
+    pre.append(&mut para.glyphs);
+    para.glyphs = pre;
 }
 
 type LimitsKey = (usize, usize, usize, bool);
