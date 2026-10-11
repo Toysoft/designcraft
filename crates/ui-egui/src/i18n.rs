@@ -7,6 +7,7 @@ mod ar;
 mod it;
 mod ja;
 mod pt_br;
+mod ru;
 mod uk;
 
 /// Supported interface languages: (code, name in that language).
@@ -21,6 +22,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("pt-br", "Português (Brasil)"),
     ("it", "Italiano"),
     ("uk", "Українська"),
+    ("ru", "Русский"),
 ];
 
 /// English → [German, French, Spanish, Japanese, Simplified Chinese].
@@ -2837,6 +2839,7 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     static UKRAINIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static PORTUGUESE_BR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static ITALIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    static RUSSIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     if lang == "ar" {
         return ARABIC.get_or_init(|| ar::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
@@ -2856,6 +2859,9 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     if lang == "uk" {
         return UKRAINIAN.get_or_init(|| uk::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
+    if lang == "ru" {
+        return RUSSIAN.get_or_init(|| ru::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
+    }
     let Some(c) = column(lang) else { return s };
     TRANSLATIONS.get_or_init(|| TABLE.iter().copied().collect()).get(s).and_then(|row| row.get(c)).copied().unwrap_or(s)
 }
@@ -2864,6 +2870,9 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
 pub fn tr_context<'a>(lang: &str, s: &'a str, context: &str) -> &'a str {
     if lang == "uk" {
         return uk::CONTEXT.iter().find(|(key, scope, _)| *key == s && *scope == context).map_or_else(|| tr(lang, s), |(_, _, text)| text);
+    }
+    if lang == "ru" {
+        return ru::CONTEXT.iter().find(|(key, scope, _)| *key == s && *scope == context).map_or_else(|| tr(lang, s), |(_, _, text)| text);
     }
     tr(lang, s)
 }
@@ -3006,6 +3015,43 @@ mod tests {
         assert_eq!(style_name("uk", "My layout style"), "My layout style");
         assert_eq!(workspace_name("uk", "Essentials"), "Основне");
         assert_eq!(workspace_name("uk", "My workspace"), "My workspace");
+    }
+
+    #[test]
+    fn russian_catalog_covers_existing_keys_and_preserves_placeholders() {
+        let catalog: std::collections::HashMap<_, _> = ru::TABLE.iter().copied().collect();
+        assert_eq!(catalog.len(), ru::TABLE.len(), "duplicate Russian keys");
+        let mut keys = std::collections::HashSet::new();
+        keys.extend(TABLE.iter().map(|(key, _)| *key));
+        keys.extend(ar::TABLE.iter().map(|(key, _)| *key));
+        keys.extend(pt_br::TABLE.iter().map(|(key, _)| *key));
+        let stale: Vec<_> = catalog.keys().filter(|k| !keys.contains(*k)).collect();
+        assert!(stale.is_empty(), "Russian entries for unknown keys: {stale:?}");
+        let placeholders =
+            |s: &str| s.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name.to_owned())).collect::<Vec<_>>();
+        for (key, translation) in ru::TABLE {
+            assert!(!translation.trim().is_empty(), "empty {key}");
+            let mut source = placeholders(key);
+            let mut translated = placeholders(translation);
+            source.sort();
+            translated.sort();
+            assert_eq!(source, translated, "placeholders: {key}");
+        }
+        assert_eq!(tr_context("ru", "Columns", "table"), "Столбцы");
+        assert_eq!(tr("ru", "Columns"), "Колонки");
+        assert_eq!(tr_context("ru", "Group", "selection"), "Группа");
+        assert_eq!(tr("ru", "Group"), "Сгруппировать");
+        assert_eq!(tr("ru", "through"), "включительно");
+        assert_eq!(tr("ru", "up to"), "не включая");
+        assert!(!is_rtl("ru"));
+        assert_eq!(tr("ru", "Type"), "Текст");
+        assert_eq!(tr("ru", "Spread"), "Разворот");
+        assert_eq!(tr("ru", "Story"), "Текстовый материал");
+        assert_eq!(tr("ru", "Footer Rows"), "Строки нижнего колонтитула");
+        assert_eq!(style_name("ru", "[Basic Paragraph]"), "[Базовый абзац]");
+        assert_eq!(style_name("ru", "My layout style"), "My layout style");
+        assert_eq!(workspace_name("ru", "Essentials"), "Основная");
+        assert_eq!(workspace_name("ru", "My workspace"), "My workspace");
     }
 
     #[test]
