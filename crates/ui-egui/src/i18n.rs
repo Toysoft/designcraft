@@ -1175,6 +1175,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
         ["Show/Hide Baseline Grid", "Show/Hide Baseline Grid", "Show/Hide Baseline Grid", "Show/Hide Baseline Grid", "显示/隐藏基线网格"],
     ),
     (
+        "Show/Hide Document Grid",
+        ["Show/Hide Document Grid", "Show/Hide Document Grid", "Show/Hide Document Grid", "Show/Hide Document Grid", "显示/隐藏文档网格"],
+    ),
+    (
         "Show/Hide Frame Edges",
         ["Show/Hide Frame Edges", "Show/Hide Frame Edges", "Show/Hide Frame Edges", "Show/Hide Frame Edges", "显示/隐藏框架边缘"],
     ),

@@ -650,6 +650,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Set Visibility / Lock", "Установити видимість / блокування"),
     ("Show Panel", "Показати панель"),
     ("Show/Hide Baseline Grid", "Показати/приховати сітку базових ліній"),
+    ("Show/Hide Document Grid", "Показати/приховати сітку документа"),
     ("Show/Hide Frame Edges", "Показати/приховати межі фреймів"),
     ("Show/Hide Guides", "Показати/приховати напрямні"),
     ("Show/Hide Hidden Characters", "Показати/приховати приховані символи"),

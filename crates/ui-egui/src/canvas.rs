@@ -364,6 +364,46 @@ fn cursor_icon(c: Cursor) -> egui::CursorIcon {
     }
 }
 
+/// Render options for the canvas texture.
+fn screen_options(app: &DesignApp, layout: &CanvasLayout, preview: bool, ppp: f64) -> designcraft_render::RenderOptions {
+    designcraft_render::RenderOptions {
+        printing_only: preview,
+        greek_below_px: 3.0 * ppp,
+        highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
+        highlight_hj: !preview && app.session.prefs.highlight_hj,
+        condition_indicators: !preview,
+        note_indicators: !preview && app.session.prefs.show_note_anchors,
+        change_markup: !preview && app.session.prefs.show_added_text,
+        tag_markers: !preview && app.ui.tag_markers,
+        plate: app.ui.separation,
+        highlight_keeps: !preview && app.session.prefs.highlight_keeps,
+        highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
+        quality: app.ui.display_quality,
+        rich_black: app.ui.rich_black,
+        overprint_preview: app.ui.overprint_preview,
+        blend_space_view: !app.ui.proof_colors,
+        document_grid: if app.ui.document_grid && !preview { grid_areas(layout) } else { vec![] },
+        ..Default::default()
+    }
+}
+
+/// The area each spread's document grid covers, in spread coordinates: the full-width band of
+/// the pasteboard nearest that spread, the band in which `CanvasLayout::spread_at` (and so
+/// snapping) picks it.
+fn grid_areas(layout: &CanvasLayout) -> Vec<(designcraft_doc::SpreadRef, DRect)> {
+    let pb = layout.pasteboard;
+    let slots = &layout.slots;
+    slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let lo = i.checked_sub(1).and_then(|j| slots.get(j)).map_or(pb.y0, |prev| (prev.bounds.y1 + slot.bounds.y0) / 2.0);
+            let hi = slots.get(i + 1).map_or(pb.y1, |next| (slot.bounds.y1 + next.bounds.y0) / 2.0);
+            (slot.spread, slot.xf.inverse().transform_rect_bbox(DRect::new(pb.x0, lo, pb.x1, hi)))
+        })
+        .collect()
+}
+
 /// Keep the canvas texture current. Panning inside the overscanned region just shifts the
 /// texture; zooming shows the old texture scaled until the background render arrives; document
 /// edits render synchronously so editing never lags.
@@ -414,24 +454,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
         let w = (target.size.0 as f64 * ppp).round().max(1.0) as u32;
         let h = (target.size.1 as f64 * ppp).round().max(1.0) as u32;
         let view = Affine::scale(ppp) * Affine::scale(xf.zoom) * Affine::translate((-target.origin.x, -target.origin.y));
-        let opts = designcraft_render::RenderOptions {
-            printing_only: preview,
-            greek_below_px: 3.0 * ppp,
-            highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
-            highlight_hj: !preview && app.session.prefs.highlight_hj,
-            condition_indicators: !preview,
-            note_indicators: !preview && app.session.prefs.show_note_anchors,
-            change_markup: !preview && app.session.prefs.show_added_text,
-            tag_markers: !preview && app.ui.tag_markers,
-            plate: app.ui.separation,
-            highlight_keeps: !preview && app.session.prefs.highlight_keeps,
-            highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
-            quality: app.ui.display_quality,
-            rich_black: app.ui.rich_black,
-            overprint_preview: app.ui.overprint_preview,
-            blend_space_view: !app.ui.proof_colors,
-            ..Default::default()
-        };
+        let opts = screen_options(app, layout, preview, ppp);
         Some((st.doc.clone(), placed, w, h, view, opts))
     };
     // Synchronous path: document edits (keep editing crisp), first frame, or no worker.
@@ -527,24 +550,7 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
         * Affine::scale(ppp)
         * Affine::scale(sh.zoom)
         * Affine::translate((-sh.origin.x, -sh.origin.y));
-    let opts = designcraft_render::RenderOptions {
-        printing_only: preview,
-        greek_below_px: 3.0 * ppp,
-        highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
-        highlight_hj: !preview && app.session.prefs.highlight_hj,
-        condition_indicators: !preview,
-        note_indicators: !preview && app.session.prefs.show_note_anchors,
-        change_markup: !preview && app.session.prefs.show_added_text,
-        tag_markers: !preview && app.ui.tag_markers,
-        plate: app.ui.separation,
-        highlight_keeps: !preview && app.session.prefs.highlight_keeps,
-        highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
-        quality: app.ui.display_quality,
-        rich_black: app.ui.rich_black,
-        overprint_preview: app.ui.overprint_preview,
-        blend_space_view: !app.ui.proof_colors,
-        ..Default::default()
-    };
+    let opts = screen_options(app, layout, preview, ppp);
     let img = app.canvas.patcher.render(&new, &app.session.cache, &placed, (x1 - x0) as u32, (y1 - y0) as u32, view, &opts);
     let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels);
     if let Some(tex) = app.canvas.texture.as_mut() {
@@ -1796,6 +1802,54 @@ mod tests {
             right_click(&mut h, p);
             assert!(h.query_by_label("   Points").is_none());
         }
+    }
+
+    #[test]
+    fn document_grid_is_drawn_where_points_snap_to_it() {
+        use designcraft_tools::{SnapView, ToolContext};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let doc = app.session.active().unwrap().doc.clone();
+        let layout = CanvasLayout::new(&doc, false);
+        let sr = SpreadRef::Doc(0);
+        // Where the grid snaps a point in the first page (72 pt / 8 subdivisions = 9 pt).
+        let page = doc.spreads[0].pages[0].bounds();
+        let sel = Selection::default();
+        let cx = ToolContext {
+            doc: &doc,
+            selection: &sel,
+            cache: &app.session.cache,
+            layout: &layout,
+            zoom: 1.0,
+            layer: doc.layers[0].id,
+            snap: SnapView { snap_to_document_grid: true, zone_px: 20.0, ..SnapView::OFF },
+            unit: Unit::Points,
+        };
+        let (snapped, _) = designcraft_tools::snap::snap_point(&cx, sr, Point::new(page.x0 + 31.3, page.y0 + 47.9));
+        assert_eq!((snapped.x - page.x0, snapped.y - page.y0), (27.0, 45.0));
+        // Render 40 × 40 pt around it at 4 px/pt.
+        let scale = 4.0;
+        let corner = layout.xf(sr) * Point::new(snapped.x - 20.0, snapped.y - 20.0);
+        let view = Affine::scale(scale) * Affine::translate((-corner.x, -corner.y));
+        let placed: Vec<_> = layout.slots.iter().map(|s| designcraft_render::Placed { spread: s.spread, xf: s.xf }).collect();
+        let render = |app: &DesignApp| {
+            let opts = screen_options(app, &layout, false, 1.0);
+            designcraft_render::Renderer::new().render(&doc, &app.session.cache, &placed, 160, 160, view, &opts)
+        };
+        // The snapped point is at pixel (80, 80); halfway to the next line is 18 px further.
+        let darkest = |img: &designcraft_render::Rendered, xs: [u32; 2], ys: [u32; 2]| {
+            (xs[0]..xs[1]).flat_map(|x| (ys[0]..ys[1]).map(move |y| (x, y))).map(|(x, y)| img.pixel(x, y)[0]).min().unwrap()
+        };
+        let off = render(&app);
+        assert_eq!(darkest(&off, [78, 82], [60, 64]), 255, "no grid while it is hidden");
+        app.run("view.documentGrid", json!({})).unwrap();
+        let on = render(&app);
+        assert!(darkest(&on, [79, 81], [60, 64]) < 250, "a vertical line at the snapped x");
+        assert!(darkest(&on, [60, 64], [79, 81]) < 250, "a horizontal line at the snapped y");
+        assert_eq!(darkest(&on, [96, 100], [96, 100]), 255, "nothing between lines");
+        // Preview hides it.
+        app.ui.screen_mode = ScreenMode::Preview;
+        assert!(screen_options(&app, &layout, true, 1.0).document_grid.is_empty());
     }
 
     #[test]

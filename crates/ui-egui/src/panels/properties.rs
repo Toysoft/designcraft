@@ -345,7 +345,9 @@ fn document_sections(app: &mut DesignApp, ui: &mut Ui) {
     if bl != app.ui.baseline_grid {
         let _ = app.run("view.baselineGrid", json!({}));
     }
-    app.ui.document_grid = dg;
+    if dg != app.ui.document_grid {
+        let _ = app.run("view.documentGrid", json!({}));
+    }
     rule(ui);
     let (mut guides, mut locked, mut smart) = (app.ui.guides, app.ui.guides_locked, app.ui.smart_guides);
     section_row(ui, crate::i18n::tr(&app.ui.language, "Guides"), |ui| {

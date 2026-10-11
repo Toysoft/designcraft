@@ -98,6 +98,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "{alignEdges?, alignCenters?, smartDimensions?, smartSpacing?: bool, zone?: px} — what smart guides snap to and how close; returns the current values",
     ),
     ("view.baselineGrid", "Show/Hide Baseline Grid", Some("Cmd+Alt+'"), "{}"),
+    ("view.documentGrid", "Show/Hide Document Grid", Some("Cmd+'"), "{}"),
     ("view.textThreads", "Show/Hide Text Threads", Some("Cmd+Alt+Y"), "{}"),
     ("view.hiddenCharacters", "Show/Hide Hidden Characters", Some("Cmd+Alt+I"), "{}"),
     ("view.taggedFrames", "Show/Hide Tagged Frames", None, "{} — XML-tagged frames outlined in their tag colour"),
@@ -646,6 +647,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "ui:view.snapToDocumentGrid",
             "ui:view.smartGuides",
             "ui:view.baselineGrid",
+            "ui:view.documentGrid",
             "-",
             "ui:app.deleteAllGuides",
             "<",
@@ -1131,6 +1133,11 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         "view.snapToDocumentGrid" => flag(&mut app.ui.snap_to_document_grid),
         "view.smartGuides" => flag(&mut app.ui.smart_guides),
         "view.baselineGrid" => flag(&mut app.ui.baseline_grid),
+        "view.documentGrid" => {
+            // The grid is drawn into the canvas texture.
+            app.canvas.shown = None;
+            flag(&mut app.ui.document_grid)
+        }
         "view.textThreads" => flag(&mut app.ui.text_threads),
         "view.hiddenCharacters" => flag(&mut app.ui.hidden_characters),
         "view.taggedFrames" => flag(&mut app.ui.tagged_frames),
@@ -1766,6 +1773,7 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
         "view.snapToDocumentGrid" => app.ui.snap_to_document_grid,
         "view.smartGuides" => app.ui.smart_guides,
         "view.baselineGrid" => app.ui.baseline_grid,
+        "view.documentGrid" => app.ui.document_grid,
         "view.textThreads" => app.ui.text_threads,
         "view.hiddenCharacters" => app.ui.hidden_characters,
         "view.taggedFrames" => app.ui.tagged_frames,
@@ -2633,6 +2641,24 @@ mod tests {
         let bars: Vec<_> =
             (0_u8..2).map(|pane| ctx.memory(|memory| memory.area_rect(egui::Id::new(("task_bar", egui::ViewportId::ROOT, pane)))).unwrap()).collect();
         assert!(!bars[0].intersects(bars[1]), "each pane keeps its own bar: {bars:?}");
+    }
+
+    #[test]
+    fn show_document_grid_toggles_from_the_grids_and_guides_menu() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        let tree = menu_tree();
+        let mut items = vec![];
+        for (_, entries) in &tree {
+            walk(entries, &mut items);
+        }
+        assert!(items.iter().any(|(label, id, _)| id == "view.documentGrid" && label == "Show/Hide Document Grid"));
+        assert_eq!(shortcut_of(&app, "view.documentGrid").as_deref(), Some("Cmd+'"));
+        assert_eq!(checked(&app, "view.documentGrid", &json!({})), Some(false));
+        assert_eq!(run_ui(&mut app, "view.documentGrid", &json!({})).unwrap().unwrap(), json!(true));
+        assert!(app.ui.document_grid);
+        assert_eq!(checked(&app, "view.documentGrid", &json!({})), Some(true));
+        run_ui(&mut app, "view.documentGrid", &json!({})).unwrap().unwrap();
+        assert!(!app.ui.document_grid);
     }
 
     #[test]

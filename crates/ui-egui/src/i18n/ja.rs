@@ -649,6 +649,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Set Visibility / Lock", "表示・ロックを設定"),
     ("Show Panel", "パネルを表示"),
     ("Show/Hide Baseline Grid", "ベースライングリッドを表示・非表示"),
+    ("Show/Hide Document Grid", "ドキュメントグリッドを表示・非表示"),
     ("Show/Hide Frame Edges", "フレームの枠を表示・非表示"),
     ("Show/Hide Guides", "ガイドを表示・非表示"),
     ("Show/Hide Hidden Characters", "制御文字を表示・非表示"),

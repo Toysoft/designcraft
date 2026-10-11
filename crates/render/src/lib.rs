@@ -25,6 +25,7 @@ pub use vello_cpu;
 
 pub mod damage;
 mod fx;
+mod grid;
 
 /// How far (points) an object's soft effects reach outside its geometry.
 pub fn effect_outset(it: &Item) -> f64 {
@@ -154,6 +155,10 @@ pub struct RenderOptions {
     /// Screen: spreads with transparency are shown as blended in the document's blend space (a
     /// CMYK blend space keeps their colours in the working CMYK gamut).
     pub blend_space_view: bool,
+    /// View › Show Document Grid: the area (spread coordinates) of each listed spread that the
+    /// document grid covers, drawn behind or in front of the page items as the grid settings say
+    /// (screen view). Empty draws no grid.
+    pub document_grid: Vec<(SpreadRef, Rect)>,
 }
 
 /// View › Display Performance: how placed graphics and effects are drawn on screen.
@@ -191,6 +196,7 @@ impl Default for RenderOptions {
             rich_black: false,
             overprint_preview: false,
             blend_space_view: false,
+            document_grid: vec![],
         }
     }
 }
@@ -394,6 +400,11 @@ impl Renderer {
                 }
             }
         }
+        let grid_area = f.opts.document_grid.iter().find(|(r, _)| *r == sr).map(|(_, a)| *a);
+        let grid = &doc.settings.grid;
+        if let Some(area) = grid_area.filter(|_| grid.in_back) {
+            grid::draw(ctx, f, sp, grid, area);
+        }
         // Layers back to front; within each layer parent items first (document spreads only).
         for layer in doc.layers.iter().rev() {
             if !layer.visible || f.opts.printing_only && !layer.printable {
@@ -428,6 +439,9 @@ impl Renderer {
                     self.draw_item(ctx, f, it, Affine::IDENTITY, None);
                 }
             }
+        }
+        if let Some(area) = grid_area.filter(|_| !grid.in_back) {
+            grid::draw(ctx, f, sp, grid, area);
         }
     }
 
