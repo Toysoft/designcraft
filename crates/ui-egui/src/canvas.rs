@@ -230,8 +230,15 @@ fn mods(i: &egui::InputState, space: bool) -> Mods {
     Mods { shift: i.modifiers.shift, alt: i.modifiers.alt, cmd: i.modifiers.command, ctrl: i.modifiers.ctrl, space }
 }
 
-pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
-    let t = Tokens::get(ui.ctx());
+struct PreparedCanvas {
+    full: Rect,
+    screen: Rect,
+    rect: Rect,
+    rulers: bool,
+    response: egui::Response,
+}
+
+fn prepare(app: &mut DesignApp, ui: &mut egui::Ui) -> PreparedCanvas {
     let full = ui.available_rect_before_wrap();
     let rot = app.view().map_or(0, |v| v.rotation % 4);
     // Rulers measure the unrotated layout, so they hide while the view is rotated.
@@ -243,7 +250,75 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     if !app.view().is_some_and(|v| v.fitted) {
         fit(app, rect, "spread");
     }
-    handle_input(app, ui, &resp, rect);
+    PreparedCanvas { full, screen, rect, rulers, response: resp }
+}
+
+pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let canvas = prepare(app, ui);
+    handle_input(app, ui, &canvas.response, canvas.rect);
+    paint(app, ui, &canvas);
+}
+
+/// Both panes share one document and tool: dispatch input before painting either one.
+pub fn show_split(app: &mut DesignApp, ui: &mut egui::Ui, halves: [Rect; 2]) {
+    let mut panes = Vec::with_capacity(2);
+    for (k, half) in halves.into_iter().enumerate() {
+        let pane = k as u8;
+        app.switch_pane(pane);
+        // A new pane starts at the other pane's view.
+        if pane == 1 && app.view().is_none() {
+            app.switch_pane(0);
+            let v = app.view().copied();
+            app.switch_pane(1);
+            if let (Some(mut v), Some(m)) = (v, app.view_mut()) {
+                v.fitted = false;
+                *m = v;
+            }
+        }
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(half));
+        let canvas = prepare(app, &mut child);
+        panes.push((pane, child, canvas, None));
+    }
+    for (pane, child, canvas, input) in &mut panes {
+        app.switch_pane(*pane);
+        *input = begin_input(app, child, &canvas.response, canvas.rect, true);
+    }
+    for event in ui.input(|i| i.events.clone()) {
+        // A hover must not move keyboard ownership; each press uses its own position.
+        if let egui::Event::PointerButton { pos, pressed: true, .. } = &event
+            && let Some((pane, ..)) = panes.iter().find(|(_, _, canvas, _)| canvas.full.contains(*pos))
+        {
+            app.focus_pane = *pane;
+        }
+        let keyboard =
+            matches!(&event, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut | egui::Event::Key { .. });
+        let owner = app.focus_pane;
+        for (pane, child, canvas, input) in &mut panes {
+            if keyboard && *pane != owner {
+                continue;
+            }
+            if let Some(input) = input {
+                app.switch_pane(*pane);
+                input.event(app, child, &canvas.response, canvas.rect, event.clone());
+            }
+        }
+    }
+    for (pane, mut child, canvas, input) in panes {
+        app.switch_pane(pane);
+        if let Some(input) = input {
+            input.finish(app, &mut child, &canvas.response, canvas.rect);
+        }
+        paint(app, &mut child, &canvas);
+        // new_child leaves parent allocation to us; dropping it registers its final rect.
+        ui.advance_cursor_after_rect(child.min_rect());
+    }
+    app.switch_pane(app.focus_pane);
+}
+
+fn paint(app: &mut DesignApp, ui: &mut egui::Ui, canvas: &PreparedCanvas) {
+    let PreparedCanvas { full, screen, rect, rulers, response: resp } = canvas;
+    let (full, screen, rect, rulers) = (*full, *screen, *rect, *rulers);
+    let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let Some(&v) = app.view() else { return };
     let xf = Xf::new(rect, &v);
@@ -318,7 +393,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     draw_tool_overlays(app, &painter, &xf);
     if rulers {
         draw_rulers(app, ui, full, rect, &xf, &doc, &layout, &t);
-        ruler_units_menus(app, &resp, full, rect, &doc);
+        ruler_units_menus(app, resp, full, rect, &doc);
     }
     if let Some(r) = sel_rect
         && !preview
@@ -1343,12 +1418,8 @@ fn fmt_tick(v: f64) -> String {
 
 // Re-evaluate egui's click region at this event's position, using the same previous-pass
 // geometry. A frame's Response may already reflect a later move out of the widget.
-fn canvas_pointer_left_widget(ctx: &egui::Context, id: egui::Id, p: Pos2) -> bool {
+fn canvas_hit_widgets(ctx: &egui::Context, p: Pos2) -> Vec<egui::WidgetRect> {
     let widgets = ctx.viewport(|v| v.prev_pass.widgets.clone());
-    let Some(canvas) = widgets.get(id) else { return false };
-    if !canvas.enabled || !canvas.sense.senses_click() || !canvas.sense.senses_drag() {
-        return false;
-    }
     let radius = ctx.global_style().interaction.interact_radius;
     let (order, transforms) = ctx.memory(|m| (m.layer_ids().collect::<Vec<_>>(), m.to_global.clone()));
     let mut layers = widgets.layer_ids().collect::<Vec<_>>();
@@ -1393,6 +1464,15 @@ fn canvas_pointer_left_widget(ctx: &egui::Context, id: egui::Id, p: Pos2) -> boo
         })
         .collect::<Vec<_>>();
     close.retain(|widget| !hidden.contains(&widget.id));
+    close
+}
+
+fn canvas_pointer_left_widget(ctx: &egui::Context, id: egui::Id, p: Pos2) -> bool {
+    let Some(canvas) = ctx.viewport(|v| v.prev_pass.widgets.get(id).copied()) else { return false };
+    if !canvas.enabled || !canvas.sense.senses_click() || !canvas.sense.senses_drag() {
+        return false;
+    }
+    let close = canvas_hit_widgets(ctx, p);
     if close.iter().any(|widget| widget.id == id && widget.interact_rect.contains(p)) {
         return false;
     }
@@ -1420,6 +1500,35 @@ fn canvas_pointer_left_widget(ctx: &egui::Context, id: egui::Id, p: Pos2) -> boo
     !closest(true, true, f32::INFINITY).is_some_and(|widget| widget.id == id)
 }
 
+// A new press needs the winning click target, not held-gesture containment.
+// This is egui 0.36's hit_test_on_close decision restricted to a click-and-drag canvas.
+fn canvas_owns_press(ctx: &egui::Context, id: egui::Id, p: Pos2) -> bool {
+    let close = canvas_hit_widgets(ctx, p);
+    let closest = |click: bool, drag: bool, limit: f32| {
+        let mut best = None;
+        let mut distance = limit;
+        for widget in &close {
+            if widget.enabled && ((click && widget.sense.senses_click()) || (drag && widget.sense.senses_drag())) {
+                let d = widget.interact_rect.distance_sq_to_pos(p);
+                if d <= distance {
+                    distance = d;
+                    best = Some(*widget);
+                }
+            }
+        }
+        best
+    };
+    if closest(true, false, 0.0).is_some() {
+        // A direct drag-only widget on top suppresses the click below it too.
+        return closest(true, true, 0.0).is_some_and(|widget| widget.id == id);
+    }
+    if let Some(drag) = closest(false, true, 0.0) {
+        // A nearby click-and-drag canvas only overrides a containing drag background.
+        return closest(true, false, f32::INFINITY).is_some_and(|widget| widget.id == id && drag.interact_rect.contains_rect(widget.interact_rect));
+    }
+    closest(true, true, f32::INFINITY).is_some_and(|widget| widget.id == id)
+}
+
 // egui exposes a frame-wide click flag, so retain the eligible release history here.
 // Each release must be classified before a later pointer or text event is dispatched.
 #[derive(Clone, Copy, Default)]
@@ -1439,8 +1548,21 @@ impl CanvasClicks {
     }
 }
 
-fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
-    let Some(v) = app.view().copied() else { return };
+struct CanvasInput {
+    m: Mods,
+    keyboard: bool,
+    down: bool,
+    gesture: Option<(Pos2, Pos2, f64, bool)>,
+    clicks: CanvasClicks,
+    now: f64,
+    drag_threshold: f32,
+    click_duration: f64,
+    double_delay: f64,
+    ordered_presses: bool,
+}
+
+fn begin_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, ordered_presses: bool) -> Option<CanvasInput> {
+    let v = app.view().copied()?;
     let xf = Xf::new(rect, &v);
     let wants_text = app.session.wants_text();
     let space = ui.input(|i| i.key_down(egui::Key::Space)) && !wants_text && !ui.ctx().text_edit_focused();
@@ -1476,99 +1598,126 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             v.origin = Point::new(v.origin.x - d.x as f64 / v.zoom, v.origin.y - d.y as f64 / v.zoom);
         }
         ui.data_mut(|d| d.remove::<CanvasClicks>(clicks_id));
-        return;
+        return None;
     }
     // Ruler guides need the rulers (hidden while the view is rotated).
     if !space && xf.rot == 0 && guide_drag(app, ui, resp, rect, &xf) {
         ui.data_mut(|d| d.remove::<CanvasClicks>(clicks_id));
-        return;
+        return None;
     }
-    // Keep physical pointer, text and key events in their native order. egui's pointer
-    // flags summarize a whole frame, and latest_pos can already be a move after release.
-    let vi = app.view_info();
-    let send = |app: &mut DesignApp, kind, p, m| {
-        // Earlier pointer events may have panned or zoomed the view.
-        let Some(v) = app.view().copied() else { return };
-        let e = PointerEvent { kind, pos: Xf::new(rect, &v).to_canvas(p), mods: m };
-        let vi = app.view_info();
-        if let Err(err) = app.session.pointer(&e, vi) {
-            app.status(err.to_string());
-        }
-        app.after_engine();
-    };
     let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
     let gesture_id = egui::Id::new(("canvas_pointer_gesture", app.pane));
-    let mut clicks: CanvasClicks = ui.data(|d| d.get_temp(clicks_id)).unwrap_or_default();
-    let hold_id = egui::Id::new(("canvas_hold", app.pane));
-    let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
-    // (press origin, last held position, press time, active drag)
-    let mut gesture: Option<(Pos2, Pos2, f64, bool)> = ui.data(|d| d.get_temp(gesture_id));
     let (drag_threshold, click_duration, double_delay) =
         ui.ctx().options(|o| (o.input_options.max_click_dist, o.input_options.max_click_duration, o.input_options.max_double_click_delay));
-    let (now, evs) = ui.input(|i| (i.time, i.events.clone()));
+    Some(CanvasInput {
+        m,
+        keyboard: !ui.ctx().text_edit_focused() || resp.has_focus(),
+        down: ui.data(|d| d.get_temp(down_id)).unwrap_or(false),
+        gesture: ui.data(|d| d.get_temp(gesture_id)),
+        clicks: ui.data(|d| d.get_temp(clicks_id)).unwrap_or_default(),
+        now: ui.input(|i| i.time),
+        drag_threshold,
+        click_duration,
+        double_delay,
+        ordered_presses,
+    })
+}
+
+fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
+    let Some(mut input) = begin_input(app, ui, resp, rect, false) else { return };
+    for event in ui.input(|i| i.events.clone()) {
+        input.event(app, ui, resp, rect, event);
+    }
+    input.finish(app, ui, resp, rect);
+}
+
+fn send_pointer(app: &mut DesignApp, rect: Rect, kind: PointerKind, p: Pos2, m: Mods) {
+    // Earlier events may have changed the active pane's view.
+    let Some(v) = app.view().copied() else { return };
+    let e = PointerEvent { kind, pos: Xf::new(rect, &v).to_canvas(p), mods: m };
+    let vi = app.view_info();
+    if let Err(err) = app.session.pointer(&e, vi) {
+        app.status(err.to_string());
+    }
+    app.after_engine();
+}
+
+fn owns_press(ui: &egui::Ui, resp: &egui::Response, p: Pos2, ordered: bool) -> bool {
+    if !resp.enabled() {
+        return false;
+    }
+    if ordered && let Some(widget) = ui.ctx().viewport(|v| v.prev_pass.widgets.get(resp.id).copied()) {
+        return widget.enabled && widget.sense.senses_click() && widget.sense.senses_drag() && canvas_owns_press(ui.ctx(), resp.id, p);
+    }
     let primary = egui::PointerButton::Primary;
-    let owns_pointer = resp.hovered() || resp.clicked_by(primary) || resp.dragged_by(primary) || resp.drag_stopped_by(primary);
-    // Only the focused pane dispatches keys; all panes still finish their pointer events.
-    let mut keyboard = app.pane == app.focus_pane && (!ui.ctx().text_edit_focused() || resp.has_focus());
-    for e in evs {
+    resp.hovered() || resp.clicked_by(primary) || resp.dragged_by(primary) || resp.drag_stopped_by(primary)
+}
+
+impl CanvasInput {
+    fn event(&mut self, app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, e: egui::Event) {
+        let Some(v) = app.view().copied() else { return };
+        let xf = Xf::new(rect, &v);
+        let space = self.m.space;
+        let keyboard = self.keyboard && app.pane == app.focus_pane;
+        let hold_id = egui::Id::new(("canvas_hold", app.pane));
         match e {
             egui::Event::ModifiersChanged(modifiers) => {
-                m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
+                self.m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
             }
             egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers } => {
-                m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
+                self.m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
                 if pressed {
-                    if !space && owns_pointer && (if xf.rot == 0 { rect.contains(p) } else { resp.rect.contains(p) }) {
-                        send(app, PointerKind::Down, p, m);
-                        down = true;
-                        gesture = Some((p, p, now, false));
+                    if !space && (if xf.rot == 0 { rect.contains(p) } else { resp.rect.contains(p) }) && owns_press(ui, resp, p, self.ordered_presses)
+                    {
+                        send_pointer(app, rect, PointerKind::Down, p, self.m);
+                        self.down = true;
+                        self.gesture = Some((p, p, self.now, false));
                         ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
                         resp.request_focus();
-                        keyboard = app.pane == app.focus_pane;
+                        self.keyboard = app.pane == app.focus_pane;
                     } else {
                         // A press owned elsewhere interrupts this pane's click sequence.
-                        clicks = CanvasClicks::default();
+                        self.clicks = CanvasClicks::default();
                     }
-                } else if down {
-                    let clicked = gesture.is_some_and(|(origin, _, pressed_at, dragging)| {
-                        !dragging && p.distance(origin) <= drag_threshold && now - pressed_at <= click_duration
+                } else if self.down {
+                    let clicked = self.gesture.is_some_and(|(origin, _, pressed_at, dragging)| {
+                        !dragging && p.distance(origin) <= self.drag_threshold && self.now - pressed_at <= self.click_duration
                     });
-                    if clicked && clicks.release(p, now, drag_threshold, double_delay) {
-                        send(app, PointerKind::DoubleClick, p, m);
+                    if clicked && self.clicks.release(p, self.now, self.drag_threshold, self.double_delay) {
+                        send_pointer(app, rect, PointerKind::DoubleClick, p, self.m);
                     }
-                    send(app, PointerKind::Up, p, m);
-                    down = false;
-                    gesture = None;
+                    send_pointer(app, rect, PointerKind::Up, p, self.m);
+                    self.down = false;
+                    self.gesture = None;
                     ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
                 }
             }
             egui::Event::PointerMoved(p) => {
-                if down {
-                    if let Some((origin, last, pressed_at, dragging)) = gesture.as_mut() {
+                if self.down {
+                    if let Some((origin, last, pressed_at, dragging)) = self.gesture.as_mut() {
                         *dragging = *dragging
-                            || p.distance(*origin) > drag_threshold
-                            || now - *pressed_at > click_duration
+                            || p.distance(*origin) > self.drag_threshold
+                            || self.now - *pressed_at > self.click_duration
                             || canvas_pointer_left_widget(ui.ctx(), resp.id, p);
                         if *dragging && p != *last {
-                            send(app, PointerKind::Drag, p, m);
+                            send_pointer(app, rect, PointerKind::Drag, p, self.m);
                         }
                         *last = p;
                     }
                 } else if resp.hovered() && rect.contains(p) {
-                    send(app, PointerKind::Move, p, m);
+                    send_pointer(app, rect, PointerKind::Move, p, self.m);
                 }
             }
             egui::Event::WindowFocused(false) => {
-                m = Mods { space, ..Mods::default() };
-                keyboard = false;
+                self.m = Mods { space, ..Mods::default() };
+                self.keyboard = false;
             }
             egui::Event::Text(t) if keyboard && app.session.wants_text() => {
                 let _ = app.run("text.insert", json!({"text": t}));
             }
             egui::Event::Paste(t) if keyboard && app.session.wants_text() => {
-                // Formatted when the system clipboard still holds what was copied here;
-                // Shift (⇧⌘V) pastes without formatting.
-                let id = if m.shift { "edit.pasteWithoutFormatting" } else { "edit.paste" };
+                // Keep the public Paste command's formatting and history semantics.
+                let id = if self.m.shift { "edit.pasteWithoutFormatting" } else { "edit.paste" };
                 let _ = app.run(id, json!({"text": t}));
             }
             egui::Event::Copy | egui::Event::Cut if keyboard && app.session.wants_text() => {
@@ -1596,6 +1745,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                 };
                 if let Some(k) = k {
                     let m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space: false };
+                    let vi = app.view_info();
                     let handled = app.session.tool_key(k, m, vi).unwrap_or(false);
                     if !handled && k == ToolKey::Escape {
                         let _ = app.run("edit.deselectAll", json!({}));
@@ -1606,39 +1756,48 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             _ => {}
         }
     }
-    ui.data_mut(|d| {
-        d.insert_temp(down_id, down);
-        d.insert_temp(clicks_id, clicks);
-        if let Some(gesture) = gesture {
-            d.insert_temp(gesture_id, gesture);
-        } else {
-            d.remove::<(Pos2, Pos2, f64, bool)>(gesture_id);
-        }
-        d.insert_temp(modifiers_id, m);
-    });
-    // Power Zoom: holding the Hand tool still for half a second turns the press into one.
-    if down && app.session.tool_id() == "hand" && !m.alt {
-        let (now, origin, latest) = ui.input(|i| (i.time, i.pointer.press_origin(), i.pointer.latest_pos()));
-        let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
-        let still = origin.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
-        if !fired && still && now - start >= 0.5 {
-            let p = latest.unwrap_or(rect.center());
-            send(app, PointerKind::Up, p, m);
-            send(app, PointerKind::Down, p, Mods { alt: true, ..m });
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
-        } else {
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
-            if !fired {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+
+    fn finish(self, app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
+        let Self { m, down, gesture, clicks, .. } = self;
+        let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
+        let gesture_id = egui::Id::new(("canvas_pointer_gesture", app.pane));
+        let clicks_id = egui::Id::new(("canvas_clicks", app.pane));
+        let hold_id = egui::Id::new(("canvas_hold", app.pane));
+        let modifiers_id = egui::Id::new(("canvas_modifiers", app.pane));
+        ui.data_mut(|d| {
+            d.insert_temp(down_id, down);
+            d.insert_temp(clicks_id, clicks);
+            if let Some(gesture) = gesture {
+                d.insert_temp(gesture_id, gesture);
+            } else {
+                d.remove::<(Pos2, Pos2, f64, bool)>(gesture_id);
             }
+            d.insert_temp(modifiers_id, m);
+        });
+        // Power Zoom: holding the Hand tool still for half a second turns the press into one.
+        if down && app.session.tool_id() == "hand" && !m.alt {
+            let (now, origin, latest) = ui.input(|i| (i.time, i.pointer.press_origin(), i.pointer.latest_pos()));
+            let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
+            let still = origin.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
+            if !fired && still && now - start >= 0.5 {
+                let p = latest.unwrap_or(rect.center());
+                send_pointer(app, rect, PointerKind::Up, p, m);
+                send_pointer(app, rect, PointerKind::Down, p, Mods { alt: true, ..m });
+                ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
+            } else {
+                ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
+                if !fired {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        } else {
+            ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
         }
-    } else {
-        ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
+        if !down && let Some(p) = resp.hover_pos() {
+            send_pointer(app, rect, PointerKind::Move, p, m);
+        }
+        let _ = DVec2::ZERO;
     }
-    if !down && let Some(p) = resp.hover_pos() {
-        send(app, PointerKind::Move, p, m);
-    }
-    let _ = DVec2::ZERO;
 }
 
 /// View → Show Hidden Characters: ¶ paragraph ends, » tabs, · spaces, ¬ forced line breaks, # end of story.

@@ -166,9 +166,39 @@ pub fn flyout(app: &mut DesignApp, ctx: &egui::Context) {
             float_glyph(ui.painter(), float_r, t.text_dim);
             let head = egui::Rect::from_min_max(strip.min, egui::pos2(float_r.min.x - 2.0, strip.max.y));
             let hr = ui.interact(head, ui.id().with("flyhead"), Sense::drag());
-            let torn = hr.drag_stopped() && hr.total_drag_delta().is_some_and(|d| d.length() > 24.0);
-            if fr.clicked() || torn {
-                let at = if torn { ui.ctx().pointer_latest_pos().unwrap_or(pos) - vec2(20.0, 10.0) } else { pos - vec2(30.0, -30.0) };
+            let origin_id = hr.id.with(("press_origin", &id));
+            let (press_origin, release, canceled) = ui.input(|i| {
+                (
+                    i.pointer.press_origin(),
+                    i.events.iter().find_map(|event| match event {
+                        egui::Event::PointerButton { pos, pressed: false, .. } => Some(*pos),
+                        _ => None,
+                    }),
+                    // Menus can consume Escape from i.events before the flyout runs.
+                    i.raw.events.iter().any(|event| matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. })),
+                )
+            });
+            // egui clears the drag delta on release; retain the actual origin while held.
+            let torn_at = ui.data_mut(|data| {
+                if hr.drag_started() {
+                    data.remove::<egui::Pos2>(origin_id);
+                }
+                if hr.dragged()
+                    && let Some(origin) = press_origin
+                {
+                    data.insert_temp(origin_id, origin);
+                }
+                if hr.drag_stopped() {
+                    data.remove_temp::<egui::Pos2>(origin_id)
+                        .zip(release)
+                        .filter(|(origin, at)| !canceled && origin.distance(*at) > 24.0)
+                        .map(|(_, at)| at)
+                } else {
+                    None
+                }
+            });
+            if fr.clicked() || torn_at.is_some() {
+                let at = if let Some(at) = torn_at { at - vec2(20.0, 10.0) } else { pos - vec2(30.0, -30.0) };
                 float_panel(app, &id, at);
                 return;
             }

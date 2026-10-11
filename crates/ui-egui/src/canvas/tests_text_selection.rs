@@ -1638,6 +1638,51 @@ fn r15_split_fixture(pane: u8) -> Canvas {
     c
 }
 
+// Keep a real focused UI field outside the extracted split-canvas dispatcher.
+#[test]
+fn r51_focused_quick_apply_text_then_split_canvas_hover() {
+    let mut c = r15_split_fixture(0);
+    let before = r9_input_snapshot(&c);
+    let pane_before = (c.app.focus_pane, c.app.pane);
+    c.app.switch_pane(1);
+    let other_canvas = c.app.canvas_rect.unwrap();
+    c.app.switch_pane(pane_before.1);
+    // Derive the hover from the actual other-pane rectangle, not a screen coordinate.
+    let hover = other_canvas.shrink(1.0).right_top();
+    assert!(other_canvas.contains(hover));
+    c.app.run("app.palette", json!({})).unwrap();
+    // Match the existing Quick Apply focused-field fixture's three UI frames.
+    for _ in 0..3 {
+        assert!(r15_split_frame(&mut c, vec![]).is_empty());
+    }
+    assert!(c.app.split && c.app.session.wants_text());
+    assert!(c.ctx.text_edit_focused());
+    assert_eq!(c.app.ui.palette.as_deref(), Some(""));
+    let field_id = c.ctx.memory(|m| m.focused()).unwrap();
+    assert!(egui::TextEdit::load_state(&c.ctx, field_id).is_some());
+    let palette_rect = c.ctx.memory(|m| m.area_rect(egui::Id::new("palette"))).unwrap();
+    assert!(!palette_rect.contains(hover), "the trailing hover must be outside Quick Apply's content");
+    assert_eq!((c.app.focus_pane, c.app.pane), pane_before);
+    assert_eq!(r9_input_snapshot(&c), before);
+    assert!(c.app.synthetic.is_empty());
+
+    // One native batch: Text belongs to the actual field, followed only by canvas hover.
+    let events = vec![Event::Text("order51-field".into()), Event::PointerMoved(hover)];
+    assert!(r15_split_frame(&mut c, events).is_empty());
+    assert_eq!(c.app.ui.palette.as_deref(), Some("order51-field"), "the field receives Text exactly once");
+    assert!(c.ctx.text_edit_focused());
+    assert_eq!(c.ctx.memory(|m| m.focused()), Some(field_id), "hover cannot transfer field focus");
+    assert_eq!(c.ctx.input(|i| i.pointer.hover_pos()), Some(hover));
+    assert!(!c.ctx.input(|i| i.pointer.any_down()));
+    assert_eq!((c.app.focus_pane, c.app.pane), pane_before, "hover cannot switch keyboard panes");
+    assert_eq!(r9_input_snapshot(&c), before, "field input preserves the complete Doc, selection and both history stacks");
+    for pane in [0u8, 1] {
+        assert_eq!(c.ctx.data(|d| d.get_temp::<bool>(egui::Id::new(("canvas_pointer_down", pane)))), Some(false));
+    }
+    r9_input_finished(&c);
+    assert!(!c.app.session.tool_busy() && c.app.synthetic.is_empty());
+}
+
 #[test]
 fn r15_split_text_and_paste_dispatch_once_in_either_pane() {
     for pane in [0, 1] {
@@ -1824,4 +1869,270 @@ fn r47_split_same_pane_double_and_triple_click_controls() {
         assert_eq!(r8_full_doc(&c), before["doc"]);
         assert_eq!(r8_history(&c), before["history"]);
     }
+}
+
+// Physical batches preserve event order across split panes.
+fn r51_split_finished(c: &Canvas) {
+    r9_input_finished(c);
+    assert!(!c.ctx.input(|i| i.pointer.any_down()));
+    assert!(!c.app.session.tool_busy());
+    assert!(c.app.synthetic.is_empty());
+    for pane in [0u8, 1] {
+        assert_eq!(c.ctx.data(|d| d.get_temp::<bool>(egui::Id::new(("canvas_pointer_down", pane)))), Some(false));
+    }
+}
+
+fn r51_split_tail_case(clicked_pane: u8, tail_pane: u8, tail_click: bool) {
+    let mut batched = r47_split_click_fixture(1 - clicked_pane);
+    let mut serial = r47_split_click_fixture(1 - clicked_pane);
+    *serial.app.session.doc_mut().unwrap() = batched.app.session.doc().unwrap().clone();
+    serial.frame = batched.frame;
+    serial.story = batched.story;
+    serial.app.views = batched.app.views.clone();
+    serial.app.after_engine();
+    let before = r9_input_snapshot(&batched);
+    assert_eq!(r9_input_snapshot(&serial), before);
+    assert_eq!(batched.text(), "Hello brave world");
+    assert_eq!(batched.range(), 0..0);
+    assert_eq!((batched.app.focus_pane, batched.app.pane), (1 - clicked_pane, 1 - clicked_pane));
+    let point = r15_split_glyph(&mut batched, clicked_pane, 12);
+    let tail = r15_split_glyph(&mut batched, tail_pane, 0);
+    assert_eq!(r15_split_glyph(&mut serial, clicked_pane, 12), point);
+    assert_eq!(r15_split_glyph(&mut serial, tail_pane, 0), tail);
+    assert!(point.distance(tail) > batched.ctx.options(|o| o.input_options.max_click_dist));
+    let mut events = vec![Event::PointerMoved(point), button(point, true, Modifiers::NONE), button(point, false, Modifiers::NONE)];
+
+    // Establish the serial click target and its complete no-edit/history precondition.
+    for event in &events {
+        assert!(r15_split_frame(&mut serial, vec![event.clone()]).is_empty());
+    }
+    assert_eq!((serial.app.focus_pane, serial.app.pane), (clicked_pane, clicked_pane));
+    assert_eq!(serial.range(), 12..12);
+    assert_eq!(r8_full_doc(&serial), before["doc"]);
+    assert_eq!(r8_history(&serial), before["history"]);
+    r51_split_finished(&serial);
+    let mut reference = r9_input_reference(&serial);
+    reference.app.run("text.insert", json!({"text": "Z"})).unwrap();
+    assert!(r15_split_frame(&mut serial, vec![Event::Text("Z".into())]).is_empty());
+    assert_eq!(r9_input_snapshot(&serial), r9_input_snapshot(&reference));
+    assert_eq!(serial.text(), "Hello brave Zworld");
+    assert_eq!(serial.range(), 13..13);
+    let typed_doc = r8_full_doc(&serial);
+    let typed_history = r8_history(&serial);
+    events.push(Event::Text("Z".into()));
+    let mut tail_events = vec![Event::PointerMoved(tail)];
+    if tail_click {
+        tail_events.extend([button(tail, true, Modifiers::NONE), button(tail, false, Modifiers::NONE)]);
+    }
+    for event in &tail_events {
+        assert!(r15_split_frame(&mut serial, vec![event.clone()]).is_empty());
+    }
+    events.extend(tail_events);
+    let expected_pane = if tail_click { tail_pane } else { clicked_pane };
+    assert_eq!((serial.app.focus_pane, serial.app.pane), (expected_pane, expected_pane));
+    assert_eq!(serial.range(), if tail_click { 0..0 } else { 13..13 });
+    assert_eq!(r8_full_doc(&serial), typed_doc, "the trailing pointer input makes no document edit");
+    assert_eq!(r8_history(&serial), typed_history, "hover/click does not rewrite any history entry");
+
+    // The complete native batch is passed once through raw_input_hook + logic + ui.
+    assert!(r15_split_frame(&mut batched, events).is_empty());
+    let actual = r9_input_snapshot(&batched);
+    let expected = r9_input_snapshot(&serial);
+    let actual_focus = (batched.app.focus_pane, batched.app.pane);
+    let expected_focus = (serial.app.focus_pane, serial.app.pane);
+    for c in [&mut batched, &mut serial] {
+        r51_split_finished(c);
+        assert_eq!(r8_history(c)["undo"].as_array().unwrap().len(), before["history"]["undo"].as_array().unwrap().len() + 1);
+        assert!(r8_history(c)["redo"].as_array().unwrap().is_empty());
+        // Both paths conserve the complete original document and restore their
+        // exact post-input state on Redo.
+        r9_input_round_trip(c, &before);
+        r51_split_finished(c);
+    }
+    assert_eq!(actual, expected, "split batch differs from serial input: clicked pane {clicked_pane}, tail pane {tail_pane}, click {tail_click}");
+    assert_eq!(actual_focus, expected_focus, "a hover preserves focus; a later click transfers it");
+}
+
+#[test]
+fn r51_split_right_click_text_left_hover() {
+    r51_split_tail_case(1, 0, false);
+}
+
+#[test]
+fn r51_split_right_click_text_left_click() {
+    r51_split_tail_case(1, 0, true);
+}
+
+#[test]
+fn r51_split_left_click_text_right_hover() {
+    r51_split_tail_case(0, 1, false);
+}
+
+#[test]
+fn r51_split_left_click_text_right_click() {
+    r51_split_tail_case(0, 1, true);
+}
+
+#[test]
+fn r51_split_same_pane_tail_controls() {
+    for pane in [0, 1] {
+        for click in [false, true] {
+            r51_split_tail_case(pane, pane, click);
+        }
+    }
+}
+
+struct FlyoutHeaderDrag {
+    canvas: Canvas,
+    header_id: egui::Id,
+    flyout: egui::Rect,
+    end: Pos2,
+    before: serde_json::Value,
+    after_press: serde_json::Value,
+    canvas_down: bool,
+}
+
+// Use the real flyout header and retain its held drag for release or cancellation.
+fn r51_split_flyout_header_drag() -> FlyoutHeaderDrag {
+    let mut c = r15_split_fixture(1);
+    c.app.ui.control_bar = false;
+    c.app.ui.dock_expanded = false;
+    c.app.ui.open_panel = Some("info".into());
+    for _ in 0..3 {
+        assert!(r15_split_frame(&mut c, vec![]).is_empty());
+    }
+    assert!(c.app.split && c.app.ui.docking.is_none() && c.app.ui.floating.is_empty());
+    assert!(!c.ctx.text_edit_focused() && c.app.ui.dialog.is_none() && c.app.ui.palette.is_none());
+    assert!(c.app.native_shortcuts.is_empty() && c.app.synthetic.is_empty());
+
+    // dock::flyout's real Frame child and drag header, measured after full UI layout.
+    let flyout_id = egui::Id::new("panel_flyout");
+    let layer = egui::LayerId::new(egui::Order::Foreground, flyout_id);
+    let header_id = flyout_id.with(egui::IdSalt::new("child")).with("flyhead");
+    let header = c.ctx.viewport(|v| v.prev_pass.widgets.get(header_id).copied()).unwrap();
+    let flyout = c.ctx.memory(|m| m.area_rect(flyout_id)).unwrap();
+    assert_eq!(header.layer_id, layer);
+    assert!(header.enabled && header.sense.senses_drag() && !header.sense.senses_click());
+    let p = egui::pos2(header.interact_rect.left() + 1.0, header.interact_rect.center().y);
+    let radius = c.ctx.global_style().interaction.interact_radius;
+    assert!(header.interact_rect.contains(p) && flyout.contains(p));
+    assert!(p.x > flyout.left() && p.x - flyout.left() < radius);
+    let canvas_rect = c.app.canvas_rect.unwrap();
+    assert!(canvas_rect.shrink(radius).contains(p), "the measured header edge overlaps the real right canvas");
+    let canvas_ids = c.ctx.viewport(|v| {
+        let widgets = &v.prev_pass.widgets;
+        widgets
+            .layer_ids()
+            .flat_map(|layer| widgets.get_layer(layer))
+            .filter(|w| w.rect == canvas_rect && w.sense.senses_click() && w.sense.senses_drag())
+            .map(|w| w.id)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(canvas_ids.len(), 1);
+    let canvas_id = canvas_ids[0];
+
+    // Put byte 12 beneath the measured edge by panning only; start with caret 0.
+    let glyph = c.glyph(12);
+    let view = c.app.view_mut().unwrap();
+    assert_eq!(view.rotation, 0);
+    view.origin =
+        designcraft_geom::Point::new(view.origin.x + (glyph.x - p.x) as f64 / view.zoom, view.origin.y + (glyph.y - p.y) as f64 / view.zoom);
+    assert!(r15_split_frame(&mut c, vec![]).is_empty());
+    assert!(c.glyph(12).distance(p) < 0.1);
+    assert_eq!(c.range(), 0..0);
+    let before = r9_input_snapshot(&c);
+
+    // Use egui's actual winning hit records, not the candidate's ownership helper.
+    let assert_foreground_owner = |c: &Canvas| {
+        c.ctx.viewport(|v| {
+            assert!(v.hits.click.is_none(), "egui's top drag-only header suppresses the underlying click target");
+            let drag = v.hits.drag.unwrap();
+            assert_eq!((drag.id, drag.layer_id), (header_id, layer));
+            assert!(v.hits.contains_pointer.iter().any(|w| w.id == canvas_id), "containment alone does not confer ownership");
+            assert!(!v.interact_widgets.hovered.contains(&canvas_id));
+        });
+    };
+    assert!(r15_split_frame(&mut c, vec![Event::PointerMoved(p)]).is_empty());
+    assert_foreground_owner(&c);
+    assert_eq!(r9_input_snapshot(&c), before);
+    assert!(r15_split_frame(&mut c, vec![button(p, true, Modifiers::NONE)]).is_empty());
+    assert_foreground_owner(&c);
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.dragged), Some(header_id));
+    let after_press = r9_input_snapshot(&c);
+    let canvas_down = c.ctx.data(|d| d.get_temp::<bool>(egui::Id::new(("canvas_pointer_down", 1u8)))).unwrap();
+
+    // Complete the real tear-off before checking the document oracle.
+    let end = p + vec2(40.0, 0.0);
+    assert!(canvas_rect.contains(end) && end.distance(p) > 24.0);
+    assert!(r15_split_frame(&mut c, vec![Event::PointerMoved(end)]).is_empty());
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.dragged), Some(header_id));
+    FlyoutHeaderDrag { canvas: c, header_id, flyout, end, before, after_press, canvas_down }
+}
+
+// A foreground flyout drag must not also start the underlying split-canvas tool.
+#[test]
+fn r51_split_flyout_header_edge_preserves_document_selection() {
+    let FlyoutHeaderDrag { canvas: mut c, header_id, flyout, end, before, after_press, canvas_down } = r51_split_flyout_header_drag();
+    assert!(r15_split_frame(&mut c, vec![button(end, false, Modifiers::NONE)]).is_empty());
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.drag_stopped), Some(header_id));
+    assert!(c.app.ui.open_panel.is_none());
+    let layout = c.app.ui.docking.as_ref().unwrap();
+    let floated = layout.floating.iter().find(|f| f.panels.iter().any(|id| id == "info")).unwrap();
+    assert_eq!(&floated.rect[..2], &[end.x - 20.0, end.y - 10.0]);
+    let (_, at) = c.app.ui.floating.iter().find(|(id, _)| id == "info").unwrap();
+    assert!(egui::pos2(at[0], at[1]).distance(flyout.min) > 1.0, "the real panel moved into its floating position");
+    assert!(!c.ctx.input(|i| i.pointer.any_down()) && !c.app.session.tool_busy());
+    assert!(c.app.synthetic.is_empty());
+    r9_input_finished(&c);
+    for pane in [0u8, 1] {
+        assert_eq!(c.ctx.data(|d| d.get_temp::<bool>(egui::Id::new(("canvas_pointer_down", pane)))), Some(false));
+    }
+
+    assert_eq!(after_press["doc"], before["doc"]);
+    assert_eq!(after_press["history"], before["history"]);
+    let after = r9_input_snapshot(&c);
+    assert_eq!(after["doc"], before["doc"]);
+    assert_eq!(after["history"], before["history"]);
+    assert_eq!(after_press["selection"], before["selection"], "foreground press leaked into the canvas; canvas_down={canvas_down}");
+    assert!(!canvas_down, "the document tool must not capture a foreground-owned press");
+    assert_eq!(after, before, "tearing off a panel preserves the complete Doc, selection and both history stacks");
+}
+
+#[test]
+fn split_flyout_escape_and_release_cancels_tear_off() {
+    let FlyoutHeaderDrag { canvas: mut c, header_id, end, before, .. } = r51_split_flyout_header_drag();
+    let escape = |pressed| Event::Key { key: egui::Key::Escape, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    // Both events reach the full UI in the same frame: egui cancels this held drag.
+    assert!(r15_split_frame(&mut c, vec![escape(true), button(end, false, Modifiers::NONE)]).is_empty());
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.drag_stopped), Some(header_id));
+    assert!(c.ctx.viewport(|v| v.interact_widgets.dragged).is_none());
+    assert_eq!(c.app.ui.open_panel.as_deref(), Some("info"), "Escape must cancel tear-off even when release is in the same frame");
+    assert!(c.app.ui.docking.is_none() && c.app.ui.floating.is_empty());
+    let origin_id = header_id.with(("press_origin", "info"));
+    assert!(c.ctx.data(|d| d.get_temp::<Pos2>(origin_id)).is_none(), "cancellation must consume the held origin");
+    r51_split_finished(&c);
+    assert_eq!(r8_full_doc(&c), before["doc"]);
+    assert_eq!(r8_history(&c), before["history"]);
+    // Escape may switch tools or change selection through the existing global path.
+    // A later ordinary header drag must preserve that resulting state exactly.
+    let after_cancel = r9_input_snapshot(&c);
+    let header = c.ctx.viewport(|v| v.prev_pass.widgets.get(header_id).copied()).unwrap();
+    let retry = header.interact_rect.center();
+    let retry_end = retry + vec2(40.0, 0.0);
+    assert!(header.interact_rect.contains(retry));
+    assert!(c.app.canvas_rect.unwrap().contains(retry_end) && retry.distance(retry_end) > 24.0);
+    assert!(r15_split_frame(&mut c, vec![escape(false), Event::PointerMoved(retry)]).is_empty());
+    assert!(r15_split_frame(&mut c, vec![button(retry, true, Modifiers::NONE)]).is_empty());
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.dragged), Some(header_id));
+    // Also cover the final move and release coalesced into one frame.
+    assert!(r15_split_frame(&mut c, vec![Event::PointerMoved(retry_end), button(retry_end, false, Modifiers::NONE)]).is_empty());
+    assert_eq!(c.ctx.viewport(|v| v.interact_widgets.drag_stopped), Some(header_id));
+    assert!(c.app.ui.open_panel.is_none());
+    let floated = c.app.ui.docking.as_ref().unwrap().floating.iter().find(|f| f.panels.iter().any(|id| id == "info")).unwrap();
+    assert_eq!(&floated.rect[..2], &[retry_end.x - 20.0, retry_end.y - 10.0]);
+    let (_, at) = c.app.ui.floating.iter().find(|(id, _)| id == "info").unwrap();
+    assert_eq!(*at, [retry_end.x - 20.0, retry_end.y - 10.0]);
+    assert!(c.ctx.data(|d| d.get_temp::<Pos2>(origin_id)).is_none());
+    r51_split_finished(&c);
+    assert_eq!(r9_input_snapshot(&c), after_cancel, "the fresh successful drag preserves the post-Escape Doc, selection and both history stacks");
 }
