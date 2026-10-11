@@ -456,6 +456,31 @@ pub fn compose_story(doc: &Document, sid: StoryId, opts: &ComposeOptions) -> Com
     }
 }
 
+/// Compose the story of a text frame that is not a page item of the document, such as a text
+/// frame anchored inside another story. The frame spec comes from the item itself: no wrap
+/// exclusions, grid or page context. Returns `None` when `item` is not a text frame or its story
+/// is missing.
+pub fn compose_loose_frame(doc: &Document, item: &designcraft_doc::Item, opts: &ComposeOptions) -> Option<ComposedStory> {
+    let tf = item.text_frame()?;
+    let st = doc.story(tf.story)?;
+    let vertical = doc.frame_vertical(item);
+    let area = item.text_area();
+    let area = if vertical { Rect::new(0.0, 0.0, area.height(), area.width()) } else { area };
+    let spec = FrameSpec {
+        id: item.id,
+        area,
+        opts: tf.options.clone(),
+        vertical,
+        exclusions: vec![],
+        page_name: opts.page_name.clone(),
+        page: opts.page,
+        grid: None,
+        left_page: false,
+        page_rect: None,
+    };
+    Some(compose(doc, st, &[spec], opts))
+}
+
 const DEFAULT_TAB: f64 = 36.0;
 
 /// Compose `story` into `frames`.

@@ -575,7 +575,21 @@ impl Renderer {
                 ctx.pop_layer();
             }
             Content::Text(tf) => {
-                let cs = self.story(f, tf.story, page_name);
+                let mut cs = self.story(f, tf.story, page_name);
+                if cs.frame(it.id).is_none() {
+                    // A text frame anchored inside another story is not a page item, so the
+                    // document's frame list never reaches it: compose its story into this frame alone.
+                    let key = (tf.story, Some(format!("#loose{:?}", it.id)));
+                    cs = match self.stories.get(&key) {
+                        Some(c) => c.clone(),
+                        None => {
+                            let opts = designcraft_compose::ComposeOptions { page_name: page_name.map(str::to_string), ..Default::default() };
+                            let c = Arc::new(designcraft_compose::compose_loose_frame(doc, it, &opts).unwrap_or_default());
+                            self.stories.insert(key, c.clone());
+                            c
+                        }
+                    };
+                }
                 if let Some(ft) = cs.frame(it.id) {
                     match &tf.options.path {
                         Some(pt) => self.draw_path_text(ctx, f, &cs, ft, xf, bp, pt),
