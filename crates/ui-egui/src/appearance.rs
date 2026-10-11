@@ -241,25 +241,29 @@ fn theme_card(
                 paint_preview(ui.painter(), r, current);
                 ui.add_space(4.0);
                 for b in options {
-                    ui.horizontal(|ui| {
+                    // The whole row is the hover target, with the star at its right edge.
+                    ui.allocate_ui_with_layout(vec2(CARD_WIDTH - 16.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let row_hovered = ui.rect_contains_pointer(ui.max_rect());
                         let row = ui.radio(*b == current, crate::rtl::widget(ui, crate::i18n::tr(lang, b.label())));
                         if row.clicked() {
                             d.fields.insert(key.into(), json!(b.id()));
                         }
-                        let mut favorites = crate::theme_favorites::Favorites::from_value(d.fields.get("themeFavorites").unwrap_or(&Value::Null));
-                        if crate::theme_favorites::star(
-                            ui,
-                            favorites.contains(*b),
-                            row.hovered(),
-                            crate::i18n::tr(lang, "Add to favorites"),
-                            crate::i18n::tr(lang, "Remove from favorites"),
-                            crate::i18n::tr(lang, b.label()),
-                        )
-                        .clicked()
-                        {
-                            favorites.toggle(*b);
-                            d.fields.insert("themeFavorites".into(), json!(favorites));
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let mut favorites = crate::theme_favorites::Favorites::from_value(d.fields.get("themeFavorites").unwrap_or(&Value::Null));
+                            if crate::theme_favorites::star(
+                                ui,
+                                favorites.contains(*b),
+                                row_hovered,
+                                crate::i18n::tr(lang, "Add to favorites"),
+                                crate::i18n::tr(lang, "Remove from favorites"),
+                                crate::i18n::tr(lang, b.label()),
+                            )
+                            .clicked()
+                            {
+                                favorites.toggle(*b);
+                                d.fields.insert("themeFavorites".into(), json!(favorites));
+                            }
+                        });
                     });
                 }
             });
