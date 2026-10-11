@@ -114,7 +114,7 @@ impl Notes {
             label: Some(label),
             xrefs: opts.xrefs.clone(),
         };
-        let cs = crate::compose(doc, &self.notes[k].text, std::slice::from_ref(&spec), &nopts);
+        let cs = crate::compose_child(doc, &self.notes[k].text, std::slice::from_ref(&spec), &nopts);
         let h = cs.frames.first().and_then(|ft| ft.lines.last()).map_or(0.0, |l| l.baseline + l.descent);
         let v = (Arc::new(cs), h);
         self.cache.insert(key, v.clone());

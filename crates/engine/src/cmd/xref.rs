@@ -53,7 +53,7 @@ fn in_story_text(s: &Session) -> std::result::Result<(), String> {
 }
 
 /// The destination anchor from params, creating a paragraph anchor when needed.
-fn destination(d: &mut designcraft_doc::Document, p: &Value) -> Result<u64> {
+fn destination(d: &mut designcraft_doc::Document, p: &Value, source: StoryId, source_prepared: bool) -> Result<u64> {
     if let Some(a) = p.get("anchor").and_then(Value::as_u64) {
         return d.find_anchor(a).map(|_| a).ok_or_else(|| bad("xref.insert", format!("no anchor {a}")));
     }
@@ -67,7 +67,29 @@ fn destination(d: &mut designcraft_doc::Document, p: &Value) -> Result<u64> {
     } else {
         return Err(bad("xref.insert", "give `anchor`, `paragraph` or `story` + `para`"));
     };
-    d.paragraph_anchor(sid, pos).ok_or_else(|| bad("xref.insert", "could not anchor the paragraph"))
+    // Only a source that consumed the EOF stage has already restored this baseline.
+    // An earlier source caret still needs its same-story EOF destination prepared.
+    if sid == source && source_prepared {
+        return d.paragraph_anchor(sid, pos).ok_or_else(|| bad("xref.insert", "could not anchor the paragraph"));
+    }
+    // A newly created target marker consumes its own story's EOF stage. Reusing an
+    // anchor leaves that story untouched; paragraph_anchor still owns names and IDs.
+    let (at, fmt) = {
+        let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
+        let at = st.para_ranges().get(st.para_at(pos)).map(|r| r.start).ok_or_else(|| bad("xref.insert", "no such paragraph"))?;
+        let fmt = if st.text.get(at..).is_some_and(|text| text.starts_with(designcraft_doc::ANCHOR_MARK)) {
+            None
+        } else {
+            super::text::prepare_eof_marker(st, at, designcraft_doc::ANCHOR_MARK)
+        };
+        (at, fmt)
+    };
+    let target = d.paragraph_anchor(sid, pos).ok_or_else(|| bad("xref.insert", "could not anchor the paragraph"))?;
+    if let Some(fmt) = fmt {
+        let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
+        st.format_chars(at..at + designcraft_doc::ANCHOR_MARK.len_utf8(), |f| *f = fmt.clone());
+    }
+    Ok(target)
 }
 
 fn insert(s: &mut Session, p: &Value) -> Result<Value> {
@@ -78,9 +100,12 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad("xref.insert", format!("no cross-reference format `{format}`")));
         }
         let t = sel.text.ok_or_else(|| bad("xref.insert", "no insertion point"))?;
+        // Capture the typing stage before destination bookkeeping or selected replacement.
+        let st = d.story_mut(t.story).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
+        let len0 = st.len();
+        let fmt = super::text::prepare_eof_marker(st, t.range().start.min(len0), designcraft_doc::XREF_MARK);
         // A new paragraph anchor before the caret in the same story shifts the caret.
-        let len0 = d.story(t.story).map_or(0, |st| st.len());
-        let target = destination(d, &p)?;
+        let target = destination(d, &p, t.story, fmt.is_some())?;
         let mut t2 = t;
         if let Some((asid, apos)) = d.find_anchor(target)
             && asid == t.story
@@ -96,6 +121,9 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         st.delete(r.clone());
         st.insert_xref(r.start, CrossRef { target, format });
         let pos = r.start + designcraft_doc::XREF_MARK.len_utf8();
+        if let Some(fmt) = fmt {
+            st.format_chars(r.start..pos, |f| *f = fmt.clone());
+        }
         sel.text = Some(TextSel { anchor: pos, focus: pos, ..t2 });
         Ok(json!({"target": target, "pos": r.start}))
     })
@@ -107,7 +135,11 @@ fn create_anchor(s: &mut Session, p: &Value) -> Result<Value> {
         let t = sel.text.ok_or_else(|| bad("anchor.create", "no insertion point"))?;
         let st = d.story_mut(t.story).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
         let at = t.range().start.min(st.len());
+        let fmt = super::text::prepare_eof_marker(st, at, designcraft_doc::ANCHOR_MARK);
         let id = st.insert_anchor(at, &name);
+        if let Some(fmt) = fmt {
+            st.format_chars(at..at + designcraft_doc::ANCHOR_MARK.len_utf8(), |f| *f = fmt.clone());
+        }
         let pos = t.focus + designcraft_doc::ANCHOR_MARK.len_utf8();
         sel.text = Some(TextSel { anchor: pos, focus: pos, ..t });
         Ok(json!({"id": id}))

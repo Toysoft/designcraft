@@ -55,7 +55,7 @@ pub fn specs() -> Vec<CommandSpec> {
                         let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
                         let target = var_char(i).unwrap_or(' ').to_string();
                         while let Some(pos) = st.text.find(&target) {
-                            st.replace(pos..pos + target.len(), &value);
+                            super::text::replace_preserving_eof(st, pos..pos + target.len(), &value, true, false);
                         }
                         for k in i + 1..n {
                             let (from, to) = (var_char(k).unwrap_or(' ').to_string(), var_char(k - 1).unwrap_or(' ').to_string());

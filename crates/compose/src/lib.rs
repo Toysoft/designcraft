@@ -458,12 +458,24 @@ pub fn compose_story(doc: &Document, sid: StoryId, opts: &ComposeOptions) -> Com
 
 const DEFAULT_TAB: f64 = 36.0;
 
-/// Compose `story` into `frames`.
-pub fn compose(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &ComposeOptions) -> ComposedStory {
-    compose_with_db(doc, story, frames, opts, FontDb::global())
+// Child stories can share IDs with document stories. Callers carry the composition
+// context explicitly; neither IDs nor the presence of paragraph attrs identify an EOF stage.
+#[derive(Clone, Copy)]
+enum StoryContext {
+    Outer,
+    Child,
 }
 
-fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &ComposeOptions, db: &FontDb) -> ComposedStory {
+/// Compose an outer `story` into `frames`, including standalone story values.
+pub fn compose(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &ComposeOptions) -> ComposedStory {
+    compose_with_db(doc, story, frames, opts, FontDb::global(), StoryContext::Outer)
+}
+
+fn compose_child(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &ComposeOptions) -> ComposedStory {
+    compose_with_db(doc, story, frames, opts, FontDb::global(), StoryContext::Child)
+}
+
+fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &ComposeOptions, db: &FontDb, context: StoryContext) -> ComposedStory {
     let db = &db.scoped(doc.font_scope);
     let mut out = ComposedStory { story: story.id, rev: story.rev, text_len: story.text.len(), ..Default::default() };
     let mut styles_tab: Vec<RunStyle> = Vec::new();
@@ -570,6 +582,16 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
         // A blank paragraph has no glyphs: its separator supplies its character metrics.
         if prange.is_empty() && story.text.as_bytes().get(prange.start) == Some(&b'\n') {
             base_chars = doc.styles.resolve_char(&base_chars, story.format_after(prange.start));
+        } else if matches!(context, StoryContext::Outer)
+            && prange.is_empty()
+            && prange.start == story.len()
+            && story.text.ends_with('\n')
+            && (!pf.chars.is_empty() || pf.eof_inherited_chars.is_some())
+        {
+            // The EOF has no separator of its own. Keep the preceding run's live named
+            // style and apply only the persisted direct typing attrs above that style.
+            let fmt = designcraft_doc::CharFormat { style: story.char_format_at(prange.start).style.clone(), over: pf.chars.clone() };
+            base_chars = doc.styles.resolve_char(&base_chars, &fmt);
         }
         // A break character that ends the previous paragraph sends this one on, like a start option.
         let after_break = pi

@@ -349,6 +349,7 @@ mod tests {
             style: selected,
             para: if local_clear { clear_para } else { ParaAttrs::default() },
             chars: if local_clear { clear_chars } else { CharAttrs::default() },
+            eof_inherited_chars: None,
             table: None,
         };
         let layer = d.default_layer();

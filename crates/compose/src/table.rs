@@ -117,7 +117,7 @@ fn compose_cell(doc: &Document, cell: &Cell, w: f64, opts: &ComposeOptions, left
         left_page,
         page_rect: None,
     };
-    let cs = crate::compose(doc, &cell.text, std::slice::from_ref(&spec), opts);
+    let cs = crate::compose_child(doc, &cell.text, std::slice::from_ref(&spec), opts);
     let line_heights: Vec<f64> = cs
         .frames
         .first()

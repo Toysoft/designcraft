@@ -115,13 +115,27 @@ fn check_item(it: &Item) -> Result<()> {
     if ok { Ok(()) } else { Err(bad("anchored.insert", "text frames can't be anchored yet")) }
 }
 
-/// Anchor copies of `items` (in spread coordinates) at `pos` of `sid`; returns the end position.
-pub(crate) fn anchor_items(d: &mut Document, sid: StoryId, pos: usize, items: Vec<Item>, position: &AnchorPosition) -> Result<usize> {
+/// Anchor copies of `items` (in spread coordinates), replacing `range` of `sid`; returns the end position.
+pub(crate) fn anchor_items(
+    d: &mut Document,
+    sid: StoryId,
+    range: std::ops::Range<usize>,
+    items: Vec<Item>,
+    position: &AnchorPosition,
+) -> Result<usize> {
     let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
-    let mut at = pos.min(st.len());
+    let range = range.start.min(st.len())..range.end.min(st.len());
+    let start = range.start;
+    // Capture before deletion can expose genuine paragraph defaults as a blank EOF.
+    let fmt = if items.is_empty() { None } else { super::text::prepare_eof_marker(st, start, OBJECT_MARK) };
+    st.delete(range);
+    let mut at = start;
     for it in items {
         st.insert_object(at, AnchoredObject::new(it, position.clone()));
         at += OBJECT_MARK.len_utf8();
+    }
+    if let Some(fmt) = fmt {
+        st.format_chars(start..at, |f| *f = fmt.clone());
     }
     Ok(at)
 }
@@ -155,7 +169,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         for id in &ids {
             d.remove_item(*id)?;
         }
-        let end = anchor_items(d, sid, pos, items.clone(), &position)?;
+        let end = anchor_items(d, sid, pos..pos, items.clone(), &position)?;
         *sel = designcraft_doc::Selection::text(TextSel { story: sid, anchor: end, focus: end, frame: None, cell: None });
         Ok(json!({"story": sid.0, "pos": end}))
     })
@@ -221,7 +235,7 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let id = d.insert_item(spread, it, None)?;
         let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
-        st.delete(pos..pos + OBJECT_MARK.len_utf8());
+        super::text::delete_preserving_eof(st, pos..pos + OBJECT_MARK.len_utf8(), true);
         *sel = designcraft_doc::Selection::items(vec![id]);
         Ok(json!({"id": id.0}))
     })

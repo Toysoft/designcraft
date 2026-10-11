@@ -1514,6 +1514,7 @@ impl<'r> Importer<'r> {
             text,
             paras,
             chars,
+            slice_has_eof_stage: false,
             frames: vec![],
             direction: if e.find("StoryPreference").and_then(|p| p.get("StoryDirection")) == Some("RightToLeftDirection") {
                 designcraft_doc::TextDirection::RightToLeft
@@ -1534,6 +1535,7 @@ impl<'r> Importer<'r> {
         };
         st.fix_notes();
         st.fix_marks();
+        crate::eof_typing::restore(e, &mut st);
         // Drop anything inconsistent (e.g. a table sharing a paragraph with another).
         if st.check().is_err() {
             st.tables.retain(|_, _| false);
@@ -1668,7 +1670,7 @@ impl<'r> Importer<'r> {
                         let style = c.get("AppliedParagraphStyle").map(|r| self.para_style_ref(r)).unwrap_or_else(|| pf.style.clone());
                         let para = self.para_attrs(c);
                         let chars = self.char_attrs(c);
-                        let npf = ParaFormat { style, para, chars: CharAttrs::default(), table: None };
+                        let npf = ParaFormat { style, para, chars: CharAttrs::default(), eof_inherited_chars: None, table: None };
                         if b.fresh
                             && let Some(last) = b.paras.last_mut()
                         {

@@ -125,7 +125,22 @@ fn color_param(p: &Value) -> Option<[u8; 3]> {
 
 /// Rename (or with `None`, remove) a condition in every story's text, table cells included.
 fn rename_everywhere(d: &mut Document, from: &str, to: Option<&str>) {
+    fn fix_attrs(attrs: &mut designcraft_doc::CharAttrs, from: &str, to: Option<&str>) -> bool {
+        let Some(v) = &mut attrs.conditions else { return false };
+        if !v.iter().any(|x| x == from) {
+            return false;
+        }
+        match to {
+            Some(t) => v.iter_mut().filter(|x| *x == from).for_each(|x| *x = t.to_string()),
+            None => v.retain(|x| x != from),
+        }
+        if v.is_empty() {
+            attrs.conditions = None;
+        }
+        true
+    }
     fn fix(st: &mut Story, from: &str, to: Option<&str>) {
+        let revision_before = st.rev;
         let len = st.text.len();
         if st.chars.iter().any(|r| r.format.over.conditions.as_ref().is_some_and(|v| v.iter().any(|x| x == from))) {
             st.format_chars(0..len, |f| {
@@ -140,6 +155,16 @@ fn rename_everywhere(d: &mut Document, from: &str, to: Option<&str>) {
                 }
             });
         }
+        let mut paragraphs_changed = false;
+        for pf in &mut st.paras {
+            paragraphs_changed |= fix_attrs(&mut pf.chars, from, to);
+            if let Some(inherited) = &mut pf.eof_inherited_chars {
+                paragraphs_changed |= fix_attrs(inherited, from, to);
+            }
+        }
+        if paragraphs_changed && st.rev == revision_before {
+            st.rev = st.rev.wrapping_add(1);
+        }
         for t in st.tables.values_mut() {
             for c in &mut Arc::make_mut(t).cells {
                 fix(&mut c.text, from, to);
@@ -147,7 +172,13 @@ fn rename_everywhere(d: &mut Document, from: &str, to: Option<&str>) {
         }
     }
     for st in d.stories.values_mut() {
-        fix(Arc::make_mut(st), from, to);
+        let st = Arc::make_mut(st);
+        let staged_eof = st.text.ends_with('\n') && st.paras.last().is_some_and(|pf| !pf.chars.is_empty() || pf.eof_inherited_chars.is_some());
+        fix(st, from, to);
+        if staged_eof && let Some(pf) = st.paras.last_mut().filter(|pf| pf.chars.is_empty() && pf.eof_inherited_chars.is_none()) {
+            // Removing the stage's last condition must not revive the preceding LF's overrides.
+            pf.eof_inherited_chars = Some(designcraft_doc::CharAttrs::default());
+        }
     }
 }
 

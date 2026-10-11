@@ -397,11 +397,20 @@ fn apply_para(s: &mut Session, p: &Value) -> Result<Value> {
                     if clear {
                         f.para = ParaAttrs::default();
                         f.chars = CharAttrs::default();
+                        f.eof_inherited_chars = None;
                     }
                 });
                 if clear {
                     let (a, b) = (st.para_ranges()[st.para_at(r.start)].start, st.para_ranges()[st.para_at(r.end)].end);
                     st.format_chars(a..b, |f| f.over = CharAttrs::default());
+                    if t.cell.is_none()
+                        && r.end == st.len()
+                        && st.text.ends_with('\n')
+                        && let Some(pf) = st.paras.last_mut()
+                    {
+                        // Clearing an outer EOF still chooses an explicit empty typing format.
+                        pf.eof_inherited_chars = Some(CharAttrs::default());
+                    }
                 }
             }
         }

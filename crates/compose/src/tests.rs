@@ -989,7 +989,8 @@ fn check_kashida_justification(db: &FontDb, require_fallback: bool) {
     let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 260.0, 400.0), lid, text, pf).unwrap();
     // The Arabic is drawn from a fallback font when the database has one.
     d.settings.glyph_fallback = true;
-    let composed = |d: &Document| compose_with_db(d, d.story(sid).unwrap(), &frame_specs(d, sid), &ComposeOptions::default(), db);
+    let composed =
+        |d: &Document| compose_with_db(d, d.story(sid).unwrap(), &frame_specs(d, sid), &ComposeOptions::default(), db, StoryContext::Outer);
     let first = |d: &Document| composed(d).frames[0].lines[0].clone();
     let with = first(&d);
     assert!(composed(&d).frames[0].lines.len() > 1);

@@ -381,6 +381,24 @@ fn column_width(s: &Session, t: &TextSel) -> f64 {
     spec.and_then(|f| f.columns().first().map(|c| c.width())).unwrap_or(300.0)
 }
 
+// Capture only an existing blank EOF, before deleting a selection can expose a new one.
+fn insert_table_at_range(st: &mut designcraft_doc::Story, range: std::ops::Range<usize>, table: Table) -> usize {
+    let eof = if range.start == st.len() && st.text.ends_with('\n') { st.paras.last().cloned() } else { None };
+    let fmt = super::text::prepare_eof_marker(st, range.start, designcraft_doc::TABLE_ANCHOR);
+    st.delete(range.clone());
+    let anchor = st.insert_table(range.start, table);
+    if let Some(fmt) = fmt {
+        // The populated anchor paragraph keeps its baseline; its inserted bytes own the stage.
+        let end = st.len();
+        st.format_chars(anchor..end, |f| *f = fmt.clone());
+    }
+    if let (Some(eof), Some(pf)) = (eof, st.paras.last_mut()) {
+        // The generated final LF leaves a true blank EOF with its exact original paragraph format.
+        *pf = eof;
+    }
+    anchor
+}
+
 /// The direction of the paragraph at `offset` in `story`, as composition resolves it (its style
 /// chain, then local overrides). A table created there takes it.
 fn para_direction(d: &Document, story: StoryId, offset: usize) -> designcraft_doc::TextDirection {
@@ -405,15 +423,17 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         table.options.direction = para_direction(d, t.story, t.range().start);
         let st = d.story_mut(t.story).ok_or_else(|| bad("table.insert", "no story"))?;
         // Cells start with the paragraph format at the caret.
-        let pf = st.paras[st.para_at(t.range().start)].clone();
+        let mut pf = st.paras[st.para_at(t.range().start)].clone();
+        if t.range().start == st.len() && st.text.ends_with('\n') {
+            // A blank outer EOF carries typing attrs, not new cell defaults.
+            pf.chars = pf.eof_inherited_chars.take().unwrap_or_default();
+        }
         let cf = st.char_format_at(t.range().start).clone();
         for c in &mut table.cells {
             c.text.paras[0] = designcraft_doc::ParaFormat { table: None, ..pf.clone() };
             c.text.chars[0].format = cf.clone();
         }
-        let r = t.range();
-        st.delete(r.clone());
-        st.insert_table(r.start, table);
+        insert_table_at_range(st, t.range(), table);
         *sel = Selection::text(TextSel { story: t.story, anchor: 0, focus: 0, frame: t.frame, cell: Some(CellAddr { table: id, row: 0, col: 0 }) });
         Ok(json!({"story": t.story.0, "table": id}))
     })
@@ -437,12 +457,15 @@ fn convert_from_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let (a, b) = (ranges[pa].start, ranges[pb].end);
         let data: Vec<Vec<String>> = st.text[a..b].split('\n').map(|line| line.split(sep).map(|c| c.trim().to_string()).collect()).collect();
-        let pf = st.paras[pa].clone();
+        let mut pf = st.paras[pa].clone();
+        if a == st.len() && st.text.ends_with('\n') {
+            // Converting a blank outer EOF must use the same baseline as Create Table.
+            pf.chars = pf.eof_inherited_chars.take().unwrap_or_default();
+        }
         let cf = st.format_after(a).clone();
         let mut table = Table::from_strings(id, &data, width, &pf, &cf);
         table.options.direction = direction;
-        st.delete(a..b);
-        let anchor = st.insert_table(a, table);
+        let anchor = insert_table_at_range(st, a..b, table);
         *sel = Selection::text(TextSel::caret(t.story, anchor));
         Ok(json!({"table": id, "rows": data.len()}))
     })
@@ -454,7 +477,7 @@ fn convert_to_text(s: &mut Session, p: &Value) -> Result<Value> {
         let st = d.story_mut(g.story).ok_or_else(|| bad("table.convertToText", "no story"))?;
         let text = st.tables.get(&g.table).map(|t| t.plain_text()).unwrap_or_default();
         let a = st.table_anchor(g.table).ok_or_else(|| bad("table.convertToText", "no anchor"))?;
-        st.replace(a..a + designcraft_doc::TABLE_ANCHOR.len_utf8(), &text);
+        super::text::replace_preserving_eof(st, a..a + designcraft_doc::TABLE_ANCHOR.len_utf8(), &text, true, false);
         *sel = Selection::text(TextSel::caret(g.story, a + text.len()));
         ok()
     })
@@ -477,7 +500,7 @@ fn delete_table(s: &mut Session, p: &Value) -> Result<Value> {
         } else {
             a..end
         };
-        st.delete(r.clone());
+        super::text::delete_preserving_eof(st, r.clone(), true);
         *sel = Selection::text(TextSel::caret(g.story, r.start.min(st.len())));
         ok()
     })

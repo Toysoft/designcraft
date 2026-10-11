@@ -189,7 +189,9 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
             // Into the text at the insertion point (replacing the selection).
             let story = d.story_mut(t.story).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
             let r = t.range();
-            story.delete(r.clone());
+            super::text::prepare_formatted_insert(story, r.start, &imp.story.text);
+            // Empty placement can expose an EOF; nonempty formatted insertion owns its paragraph transfer.
+            super::text::delete_preserving_eof(story, r.clone(), imp.story.text.is_empty());
             let end = story.insert_story(r.start, &imp.story);
             sel.text = Some(TextSel { anchor: end, focus: end, ..t });
             t.story

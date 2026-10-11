@@ -44,7 +44,8 @@ fn copy_text(s: &mut Session) -> Result<Option<String>> {
     let st = s.doc()?;
     let Some(t) = st.selection.text.filter(|t| !t.is_caret()) else { return Ok(None) };
     let Some(story) = st.doc.text_story(t.story, t.cell) else { return Ok(None) };
-    let slice = story.extract(t.range());
+    let mut slice = story.extract(t.range());
+    slice.slice_has_eof_stage = t.cell.is_none() && t.range().end == story.len() && story.text.ends_with('\n');
     let text = plain(&slice);
     s.text_clipboard = Some((Arc::new(slice), text.clone()));
     Ok(Some(text))
@@ -64,10 +65,7 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
         let list: Vec<designcraft_doc::Item> = items.spreads.first().map(|sp| sp.items.iter().map(|i| (**i).clone()).collect()).unwrap_or_default();
         if !list.is_empty() && list.iter().all(|i| !i.is_text_frame()) {
             return s.edit(|d, sel| {
-                let st = d.story_mut(t.story).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
-                let r = t.range();
-                st.delete(r.start.min(st.len())..r.end.min(st.len()));
-                let end = super::anchored::anchor_items(d, t.story, r.start, list.clone(), &Default::default())?;
+                let end = super::anchored::anchor_items(d, t.story, t.range(), list.clone(), &Default::default())?;
                 sel.text = Some(designcraft_doc::TextSel { anchor: end, focus: end, ..t });
                 Ok(json!({"pos": end, "anchored": list.len()}))
             });
@@ -76,11 +74,17 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
     let use_clip = formatted && clip.as_ref().is_some_and(|(_, p)| text.as_ref().is_none_or(|x| x.replace("\r\n", "\n") == *p));
     // Footnotes, cross-references and tables only paste into story text, not cells or footnotes.
     if use_clip && let Some((slice, _)) = clip {
-        let slice = if t.cell.is_some() { strip_objects(&slice) } else { (*slice).clone() };
+        let mut slice = if t.cell.is_some() { strip_objects(&slice) } else { (*slice).clone() };
+        if t.cell.is_none() {
+            super::text::prepare_outer_formatted_slice(&mut slice);
+        }
         return s.edit(|d, sel| {
             let st = d.text_story_mut(t.story, t.cell).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
             let r = t.range();
             let r = r.start.min(st.len())..r.end.min(st.len());
+            if t.cell.is_none() {
+                super::text::prepare_formatted_insert(st, r.start, &slice.text);
+            }
             st.delete(r.clone());
             let end = st.insert_story(r.start, &slice);
             sel.text = Some(designcraft_doc::TextSel { anchor: end, focus: end, ..t });
@@ -93,6 +97,14 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
 
 fn strip_objects(st: &designcraft_doc::Story) -> designcraft_doc::Story {
     let mut out = st.clone();
+    // Child stories have no outer-EOF typing stage. Keep the copied runs and
+    // restore only the baseline of a slice known to end at its source's EOF.
+    if out.slice_has_eof_stage && out.text.ends_with('\n') {
+        if let Some(pf) = out.paras.last_mut() {
+            pf.chars = pf.eof_inherited_chars.take().unwrap_or_default();
+        }
+        out.slice_has_eof_stage = false;
+    }
     let marks = [designcraft_doc::FOOTNOTE_REF, designcraft_doc::XREF_MARK, designcraft_doc::TABLE_ANCHOR];
     while let Some(i) = out.text.find(marks) {
         let n = out.text[i..].chars().next().map_or(1, char::len_utf8);

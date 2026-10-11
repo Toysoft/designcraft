@@ -204,9 +204,17 @@ fn change(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let Some(st) = d.story_mut(sid) else { continue };
             for (range, new) in edits.iter().rev() {
-                st.replace(range.clone(), new);
+                super::text::replace_preserving_eof(st, range.clone(), new, true, false);
                 if !over.is_empty() && !new.is_empty() {
                     st.format_chars(range.start..range.start + new.len(), |f| f.over.merge(&over));
+                    if range.start + new.len() == st.len()
+                        && new.ends_with('\n')
+                        && let Some(pf) = st.paras.last_mut()
+                    {
+                        // Replacement already staged this EOF before applying the change attrs.
+                        // Merge only those attrs; restaging would promote typing attrs to defaults.
+                        pf.chars.merge(&over);
+                    }
                 }
                 count += 1;
             }

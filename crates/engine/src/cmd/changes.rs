@@ -21,7 +21,7 @@ pub(crate) fn mark_deleted(st: &mut Story, r: std::ops::Range<usize>) -> usize {
     let mut end = r.end;
     ins.sort_by_key(|x| std::cmp::Reverse(x.start));
     for x in ins {
-        st.delete(x.clone());
+        super::text::delete_preserving_eof(st, x.clone(), true);
         end -= x.len();
     }
     if end > r.start {
@@ -43,7 +43,7 @@ fn resolve(st: &mut Story, accept: bool) -> usize {
     let removed = ranges(st, remove);
     let n = removed.len() + ranges(st, keep).len();
     for r in removed {
-        st.delete(r);
+        super::text::delete_preserving_eof(st, r, true);
     }
     let len = st.len();
     st.format_chars(0..len, |f| {
@@ -68,7 +68,7 @@ fn one(s: &mut Session, p: &Value, accept: bool) -> Result<Value> {
             .ok_or_else(|| super::bad(id, "no change there"))?;
         // Accepting a deletion or rejecting an insertion removes the text; otherwise it stays, unmarked.
         if (mark == ChangeMark::Deleted) == accept {
-            st.delete(r.clone());
+            super::text::delete_preserving_eof(st, r.clone(), true);
         } else {
             st.format_chars(r.clone(), |f| f.over.change = None);
         }

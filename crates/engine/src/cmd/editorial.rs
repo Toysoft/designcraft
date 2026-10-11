@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let at = ts.anchor.max(ts.focus);
             s.edit(|d, sel| {
                 let story = d.story_mut(ts.story).ok_or_else(|| bad("note.new", "no such story"))?;
-                let fmt = story.char_format_at(at).clone();
+                let fmt = super::text::prepare_eof_marker(story, at, NOTE_MARK).unwrap_or_else(|| story.char_format_at(at).clone());
                 story.insert_with(at, &NOTE_MARK.to_string(), fmt);
                 let k = story.text[..at].matches(NOTE_MARK).count();
                 let n = Arc::make_mut(&mut story.editorial[k]);
@@ -56,7 +56,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.edit(|d, _| {
                 let st = d.story_mut(sid).ok_or_else(|| bad("note.delete", "no such story"))?;
                 let at = anchor(st, id).ok_or_else(|| bad("note.delete", format!("no note {id}")))?;
-                st.delete(at..at + NOTE_MARK.len_utf8());
+                super::text::delete_preserving_eof(st, at..at + NOTE_MARK.len_utf8(), true);
                 ok()
             })
         }),
@@ -73,7 +73,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     let st = d.story_mut(sid).ok_or_else(|| bad("note.convertToText", "no such story"))?;
                     let at = anchor(st, id).ok_or_else(|| bad("note.convertToText", format!("no note {id}")))?;
                     let text = st.editorial.iter().find(|n| n.id == id).map(|n| n.text.clone()).unwrap_or_default();
-                    st.replace(at..at + NOTE_MARK.len_utf8(), &text);
+                    super::text::replace_preserving_eof(st, at..at + NOTE_MARK.len_utf8(), &text, true, false);
                     ok()
                 })
             }

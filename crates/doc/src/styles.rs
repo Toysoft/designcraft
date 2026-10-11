@@ -729,6 +729,9 @@ impl Styles {
             cp.apply(&s.chars);
         }
         pp.apply(&p.para);
+        if let Some(inherited) = &p.eof_inherited_chars {
+            cp.apply(inherited);
+        }
         cp.apply(&p.chars);
         (pp, cp)
     }

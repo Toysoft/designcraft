@@ -40,7 +40,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     .nth(k)
                     .map(|(i, _)| i)
                     .ok_or_else(|| bad("endnote.delete", format!("endnote {id} has no reference in the text")))?;
-                st.delete(at..at + designcraft_doc::ENDNOTE_REF.len_utf8());
+                super::text::delete_preserving_eof(st, at..at + designcraft_doc::ENDNOTE_REF.len_utf8(), true);
                 ok()
             })
         }),
@@ -121,8 +121,12 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let style = d.endnote_options.para_style.clone();
         let story = d.story_mut(ts.story).ok_or_else(|| bad(ID, "no such story"))?;
+        let fmt = super::text::prepare_eof_marker(story, at, designcraft_doc::ENDNOTE_REF);
         let id = story.insert_endnote(at, &text, ParaFormat { style, ..Default::default() });
         let caret = at + designcraft_doc::ENDNOTE_REF.len_utf8();
+        if let Some(fmt) = fmt {
+            story.format_chars(at..caret, |f| *f = fmt.clone());
+        }
         if let Some(t) = &mut sel.text {
             (t.anchor, t.focus) = (caret, caret);
         }

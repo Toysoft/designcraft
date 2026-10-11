@@ -74,7 +74,8 @@ pub fn specs() -> Vec<CommandSpec> {
             let to = str_param(p, "to").unwrap_or("").to_string();
             s.edit(|d, _| {
                 let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
-                st.replace(a.min(st.len())..b.min(st.len()), &to);
+                let range = a.min(st.len())..b.min(st.len());
+                super::text::replace_preserving_eof(st, range, &to, true, false);
                 Ok(Value::Null)
             })
         }),

@@ -216,6 +216,26 @@ fn r7a_selection_soft_wrap_and_forced_break_keep_existing_hits() {
     }
 }
 
+#[test]
+fn r7a_selection_eof_blank_formats_existing_final_paragraph_data() {
+    let (mut s, fid, sid) = fixture("First\n", 400.0);
+    let l = line(&s, sid, 1);
+    assert!(l.range.is_empty() && l.glyphs.is_empty());
+    let start = point(&s, fid, &l, l.end_x);
+    let end = point(&s, fid, &l, l.end_x + 24.0);
+    pointer(&mut s, PointerKind::Down, start);
+    pointer(&mut s, PointerKind::Drag, end);
+    pointer(&mut s, PointerKind::Up, end);
+    assert_eq!(range(&s), 6..6, "EOF contains no newline to select");
+    let before = serde_json::to_value(&s.doc().unwrap().doc.story(sid).unwrap().chars).unwrap();
+    s.execute("type.char", &json!({"attrs": {"leading": {"kind": "points", "value": 40}, "size": 20}})).unwrap();
+    assert_eq!(serde_json::to_value(&s.doc().unwrap().doc.story(sid).unwrap().chars).unwrap(), before);
+    assert_eq!(s.doc().unwrap().doc.story(sid).unwrap().paras.last().unwrap().chars.size, Some(20.0));
+    assert!((line(&s, sid, 1).leading - 40.0).abs() < 1e-6, "EOF blank must use its persisted paragraph character overrides");
+    assert!(line(&s, sid, 1).ascent > l.ascent);
+    assert_eq!(range(&s), 6..6, "formatting changes no selectable bytes");
+}
+
 fn sidecar_bidi_fixture(text: &str, rtl_paragraph: bool) -> (Session, ItemId, StoryId) {
     const FAMILY: &str = "DC R7a Selection Sidecar Bidi";
     static ADDED: std::sync::Once = std::sync::Once::new();

@@ -1931,6 +1931,7 @@ impl<'a> Ex<'a> {
         for psr in self.story_paras(s) {
             el.push(psr);
         }
+        crate::eof_typing::attach(&mut el, s);
         el
     }
 
@@ -2396,7 +2397,9 @@ impl<'a> Ex<'a> {
         let mut el = El::new("ParagraphStyleRange").attr("AppliedParagraphStyle", names::style_self("ParagraphStyle", PARA_BUILTINS, &pf.style));
         let mut props = Vec::new();
         self.para_attrs(&mut el, &mut props, &pf.para);
-        self.char_attrs(&mut el, &mut props, &pf.chars);
+        let mut chars = pf.eof_inherited_chars.clone().unwrap_or_default();
+        chars.merge(&pf.chars);
+        self.char_attrs(&mut el, &mut props, &chars);
         with_props(el, props)
     }
 

@@ -255,7 +255,7 @@ fn apply_reps(doc: &mut designcraft_doc::Document, reps: &[Rep]) {
         let Some(st) = doc.story_mut(sid) else { continue };
         for r in mine {
             if r.start <= r.end && r.end <= st.text.len() {
-                st.replace(r.start..r.end, &r.text);
+                super::super::text::replace_preserving_eof(st, r.start..r.end, &r.text, true, false);
             }
         }
     }

@@ -70,9 +70,13 @@ pub struct ParaFormat {
     pub style: String,
     #[serde(default, skip_serializing_if = "ParaAttrs::is_empty")]
     pub para: ParaAttrs,
-    /// Paragraph-level character overrides are stored on the char runs; this holds nothing.
+    /// Paragraph character defaults; on a blank EOF, direct typing overrides.
     #[serde(default, skip_serializing_if = "CharAttrs::is_empty")]
     pub chars: CharAttrs,
+    /// Inherited paragraph defaults kept below the live character style when a blank EOF
+    /// uses chars for direct typing overrides. Restored when typing populates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eof_inherited_chars: Option<CharAttrs>,
     /// The table anchored in this paragraph (key into [`Story::tables`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<u64>,
@@ -80,7 +84,7 @@ pub struct ParaFormat {
 
 impl Default for ParaFormat {
     fn default() -> Self {
-        ParaFormat { style: BASIC_PARAGRAPH.into(), para: ParaAttrs::default(), chars: CharAttrs::default(), table: None }
+        ParaFormat { style: BASIC_PARAGRAPH.into(), para: ParaAttrs::default(), chars: CharAttrs::default(), eof_inherited_chars: None, table: None }
     }
 }
 
@@ -116,6 +120,10 @@ pub struct Story {
     pub text: String,
     pub paras: Vec<ParaFormat>,
     pub chars: Vec<CharRun>,
+    /// Transient formatted-slice provenance, set by outer-story editing commands.
+    /// A true source blank EOF carries a typing stage; clipped ranges and cells do not.
+    #[serde(skip)]
+    pub slice_has_eof_stage: bool,
     /// Text frames in thread order.
     pub frames: Vec<ItemId>,
     /// Column progression, independent of paragraph bidi direction and frame threading.
@@ -164,6 +172,7 @@ impl Story {
             text: String::new(),
             paras: vec![ParaFormat::default()],
             chars: vec![CharRun { len: 0, format: CharFormat::default() }],
+            slice_has_eof_stage: false,
             frames: vec![],
             direction: crate::TextDirection::LeftToRight,
             vertical: false,

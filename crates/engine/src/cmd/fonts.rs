@@ -133,12 +133,24 @@ fn replace(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         // Local formatting in every story (cells and footnotes too).
-        let fix = |st: &mut Story, changed: &mut usize| {
+        let fix = |st: &mut Story, changed: &mut usize, outer: bool| {
             let mut any = false;
             for r in &mut st.chars {
                 if swap(&mut r.format.over, &family, style.as_deref(), &to_family, to_style.as_deref()) {
                     any = true;
                     *changed += 1;
+                }
+            }
+            if outer
+                && st.text.ends_with('\n')
+                && let Some(pf) = st.paras.last_mut()
+            {
+                // C5 stores the blank EOF's typing format separately from its LF run.
+                for attrs in std::iter::once(&mut pf.chars).chain(pf.eof_inherited_chars.iter_mut()) {
+                    if swap(attrs, &family, style.as_deref(), &to_family, to_style.as_deref()) {
+                        any = true;
+                        *changed += 1;
+                    }
                 }
             }
             if any {
@@ -148,14 +160,14 @@ fn replace(s: &mut Session, p: &Value) -> Result<Value> {
         let ids: Vec<_> = d.stories.keys().copied().collect();
         for sid in ids {
             let Some(st) = d.story_mut(sid) else { continue };
-            fix(st, &mut changed);
+            fix(st, &mut changed, true);
             for t in st.tables.values_mut() {
                 for c in &mut Arc::make_mut(t).cells {
-                    fix(&mut c.text, &mut changed);
+                    fix(&mut c.text, &mut changed, false);
                 }
             }
             for n in &mut st.notes {
-                fix(&mut Arc::make_mut(n).text, &mut changed);
+                fix(&mut Arc::make_mut(n).text, &mut changed, false);
             }
         }
         Ok(json!({"changed": changed}))

@@ -154,7 +154,7 @@ fn placeholder_remove(s: &mut Session, p: &Value) -> Result<Value> {
                 if let Some(st) = d.story_mut(story) {
                     let end = end.min(st.text.len());
                     let start = start.min(end);
-                    st.replace(start..end, "");
+                    super::text::delete_preserving_eof(st, start..end, true);
                 }
                 let removed = end.saturating_sub(start);
                 shift_after(d, story, end, -(removed as isize));
@@ -494,7 +494,7 @@ fn add_placeholder(d: &mut Document, sel: &Selection, p: &Value, name: &str) -> 
                 designcraft_doc::floor_char_boundary(&text, at.min(text.len()))
             };
             if let Some(st) = d.story_mut(story) {
-                st.replace(at..at, &marker);
+                super::text::replace_preserving_eof(st, at..at, &marker, true, false);
             }
             shift_after(d, story, at, marker.len() as isize);
             PlaceholderAnchor::Text { story, start: at, end: at.saturating_add(marker.len()) }

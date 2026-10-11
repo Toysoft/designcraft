@@ -936,11 +936,27 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         }
         "app.rubyDialog" => {
             let Some(st) = app.session.active() else { return Some(Err("no document open".into())) };
-            let cur = st.selection.text.and_then(|t| {
-                let story = st.doc.text_story(t.story, t.cell)?;
-                let at = if t.range().is_empty() { t.range().start } else { t.range().start + 1 };
-                story.char_format_at(at).over.ruby.clone()
+            let staged_eof = st.selection.text.is_some_and(|t| {
+                t.cell.is_none()
+                    && t.is_caret()
+                    && st.doc.story(t.story).is_some_and(|story| {
+                        t.focus == story.len()
+                            && story.text.ends_with('\n')
+                            && story.paras.last().is_some_and(|pf| !pf.chars.is_empty() || pf.eof_inherited_chars.is_some())
+                    })
             });
+            let cur = if staged_eof {
+                match app.session.execute("type.selectionAttrs", &json!({})) {
+                    Ok(attrs) => attrs["chars"]["ruby"].as_str().map(str::to_owned),
+                    Err(e) => return Some(Err(e.to_string())),
+                }
+            } else {
+                st.selection.text.and_then(|t| {
+                    let story = st.doc.text_story(t.story, t.cell)?;
+                    let at = if t.range().is_empty() { t.range().start } else { t.range().start + 1 };
+                    story.char_format_at(at).over.ruby.clone()
+                })
+            };
             app.ui.dialog = Some(crate::dialogs::Dialog::new("ruby", json!({"text": cur.unwrap_or_default()})));
             Ok(Value::Null)
         }
@@ -3615,3 +3631,7 @@ mod tests {
         assert!(!open, "an open submenu closes when its row becomes fully clipped");
     }
 }
+
+#[cfg(test)]
+#[path = "menus/tests_eof_readers.rs"]
+mod eof_readers_tests;
