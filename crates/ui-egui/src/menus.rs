@@ -2115,9 +2115,17 @@ pub fn shortcuts(app: &mut DesignApp, ctx: &egui::Context) {
         return;
     }
     let typing = app.session.wants_text();
-    let events = ctx.input(|i| i.events.clone());
+    let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers | egui::Modifiers::COMMAND));
     for e in events {
-        let egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } = e else { continue };
+        // egui-winit turns Ctrl+C/X/V (no native menu bar: Linux, Windows) and the Copy/Cut/Paste
+        // keys into clipboard events with no key event, so read them back as ⌘C/⌘X/⌘V (#492).
+        let (key, modifiers) = match e {
+            egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } => (key, modifiers),
+            egui::Event::Copy => (egui::Key::C, mods),
+            egui::Event::Cut => (egui::Key::X, mods),
+            egui::Event::Paste(_) => (egui::Key::V, mods),
+            _ => continue,
+        };
         // Command shortcuts.
         let mut fired: Option<String> = None;
         let all = effective_shortcuts(app);
@@ -2946,6 +2954,35 @@ mod tests {
         assert_eq!(app.session.tool_id(), "selection", "V switches tools straight after drawing");
         frame(&mut app, key(egui::Key::F));
         assert_eq!(app.session.tool_id(), "rectangleFrame");
+    }
+
+    #[test]
+    fn clipboard_events_run_copy_cut_and_paste_on_objects() {
+        // Without a native menu bar, egui-winit delivers Ctrl+C/X/V as Copy/Cut/Paste events (#492).
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        app.session.execute("frame.create", &json!({"rect": [36, 36, 200, 200]})).unwrap();
+        app.run("edit.selectAll", json!({})).unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut crate::DesignApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+        };
+        let items = |app: &crate::DesignApp| app.session.active().unwrap().doc.spreads.iter().map(|s| s.items.len()).sum::<usize>();
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Copy]);
+        frame(&mut app, vec![egui::Event::Paste("anything".into())]);
+        assert_eq!(items(&app), 2, "Ctrl+C, Ctrl+V duplicated the frame");
+        frame(&mut app, vec![egui::Event::Cut]);
+        assert_eq!(items(&app), 1, "Ctrl+X removed the pasted frame");
     }
 
     #[test]
