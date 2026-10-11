@@ -17,6 +17,7 @@ pub mod hyphen;
 mod notes;
 mod overlay;
 mod ruby;
+mod sea;
 pub mod shape;
 pub mod table;
 pub mod vars;
@@ -680,6 +681,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 // The same spacing, hyphenation and breaker as the layout below.
                 let mut gl = sp.glyphs.clone();
                 apply_desired_spacing(&mut gl, &pp);
+                sea::apply_word_breaks(&mut gl, &story.text);
                 let hy = hyphenation_points(&story.text, &gl, &pp, &hyph_exceptions, &foreign_ranges(doc, story, prange.clone(), &base_chars));
                 let breaks = if pp.composer == Composer::SingleLine || gl.iter().any(|g| g.ch == '\t') || gl.len() > 4000 {
                     let tab = |j: usize, x: f64, i: usize| {
@@ -762,6 +764,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
         );
         bidi::resolve_mirroring(&mut glyphs, &bidi_info);
         apply_desired_spacing(&mut glyphs, &pp);
+        sea::apply_word_breaks(&mut glyphs, &story.text);
         let hyph_after = hyphenation_points(&story.text, &glyphs, &pp, &hyph_exceptions, &foreign_ranges(doc, story, prange.clone(), &base_chars));
         let base_size = base_chars.size;
         let base_leading = match base_chars.leading {
@@ -1480,6 +1483,7 @@ fn spacing_for(pp: &ParaProps, base_size: f64) -> Spacing {
         hyph_zone: if pp.align.is_justified() { 0.0 } else { pp.hyph_zone },
         optical: pp.optical_margin,
         korean_char_breaks: pp.korean_char_breaks,
+        ..Spacing::default()
     }
 }
 
@@ -2260,7 +2264,10 @@ fn layout_line(
     // a line whose last tab is a right, centre, character or right-indent tab is not justified.
     let seg = last_tab.map_or(0, |(i, _)| i + 1);
     let seg_justifies = last_tab.is_none_or(|(_, left)| left);
-    let spaces: Vec<usize> = line.iter().enumerate().skip(seg).filter(|(_, g)| g.is_space() && !g.no_break).map(|(i, _)| i).collect();
+    // Word spaces, and the gaps between words written without one (not the gap ending the line).
+    let last_glyph = line.len().saturating_sub(1);
+    let spaces: Vec<usize> =
+        line.iter().enumerate().skip(seg).filter(|&(i, g)| (g.is_space() || (g.word_gap && i < last_glyph)) && !g.no_break).map(|(i, _)| i).collect();
     let align = match pp.align {
         Align::TowardsSpine => {
             if left_page {
@@ -2318,7 +2325,7 @@ fn layout_line(
                     .enumerate()
                     .take(line.len() - 1)
                     .skip(seg)
-                    .filter(|(_, g)| !g.locked_advance || g.break_after != Some(false))
+                    .filter(|&(i, g)| (!g.locked_advance || g.break_after != Some(false)) && !sea::attached(&line, i))
                     .map(|(i, _)| i)
                     .collect();
                 if !gaps.is_empty() {
@@ -2547,7 +2554,10 @@ fn distribute(line: &[Glyph], spaces: &[usize], extra: f64, sp: &Spacing, add: &
         .iter()
         .map(|&i| {
             let g = &line[i];
-            if g.ch != ' ' && !(g.ch == '\u{3000}' && g.ideographic_space_elastic) {
+            if g.word_gap {
+                // A gap between words written without a space stretches, and never shrinks.
+                if stretch { sp.gap_stretch(g) } else { 0.0 }
+            } else if g.ch != ' ' && !(g.ch == '\u{3000}' && g.ideographic_space_elastic) {
                 0.0
             } else if stretch {
                 g.space * (sp.word_max - sp.word_desired).max(0.0)
@@ -2558,12 +2568,18 @@ fn distribute(line: &[Glyph], spaces: &[usize], extra: f64, sp: &Spacing, add: &
         .collect();
     // Letter gaps: between visible glyphs (not after the line's last glyph).
     let last_box = line.iter().rposition(|g| !g.is_space() && g.adv > 0.0).unwrap_or(0);
-    let is_box = |i: usize, g: &Glyph| i < last_box && !g.is_space() && g.adv > 0.0 && (!g.locked_advance || g.break_after != Some(false));
+    // Never between a letter and the marks set on it.
+    let is_box = |i: usize, g: &Glyph| {
+        i < last_box && !g.is_space() && g.adv > 0.0 && (!g.locked_advance || g.break_after != Some(false)) && !sea::attached(line, i)
+    };
+    // Text written without spaces stretches between its words when the line has any, not between
+    // its letters.
+    let word_gaps = spaces.iter().any(|&i| line.get(i).is_some_and(|g| g.word_gap));
     let letter: Vec<f64> = line
         .iter()
         .enumerate()
         .map(|(i, g)| {
-            if !is_box(i, g) {
+            if !is_box(i, g) || (stretch && word_gaps && sea::is_sea(g.ch) && !g.word_gap) {
                 0.0
             } else if stretch {
                 g.space * (sp.letter_max - sp.letter_desired).max(0.0)

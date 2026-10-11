@@ -42,6 +42,8 @@ unicode-bidi = "0.3"
 unicode-script = "0.5"
 unicode-bidi-mirroring = "0.4"
 unicode-segmentation = "1"
+# Word boundaries for Thai, Lao, Khmer and Myanmar (compiled data; builds for wasm).
+icu_segmenter = "2.3"
 caseless = "0.2"
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 tempfile = "3"

@@ -48,6 +48,9 @@ pub struct Glyph {
     pub space: f64,
     /// Resolved CJK boundary constraint, independent of glyph outlines.
     pub break_after: Option<bool>,
+    /// A word ends after this glyph with no space to show it (Thai, Lao, Khmer, Myanmar; see
+    /// [`crate::sea`]): a place to break and, in justified text, a place that takes extra space.
+    pub word_gap: bool,
     pub cjk_hang: f64,
     pub ideographic_space_elastic: bool,
     pub character_alignment: designcraft_doc::cjk::CharacterAlignment,
@@ -783,6 +786,7 @@ fn control_glyph(face: &Arc<FontFace>, p: &CharProps, auto_leading: TypeEnv, sty
         tcy_offset: [p.tate_chu_yoko_x_offset, p.tate_chu_yoko_y_offset],
         space: face.advance(face.glyph_for(' ')) * k * p.h_scale,
         break_after: None,
+        word_gap: false,
         cjk_hang: 0.0,
         ideographic_space_elastic: false,
         character_alignment: p.character_alignment,
@@ -901,6 +905,7 @@ fn shape_segment(
             tcy_offset: [p.tate_chu_yoko_x_offset, p.tate_chu_yoko_y_offset],
             space,
             break_after: None,
+            word_gap: false,
             cjk_hang: 0.0,
             ideographic_space_elastic: false,
             character_alignment: p.character_alignment,
@@ -948,5 +953,6 @@ pub(crate) fn hyphen_after(g: &Glyph) -> Glyph {
     h.byte = g.byte + g.len;
     h.len = 0;
     h.ch = '-';
+    h.word_gap = false;
     h
 }

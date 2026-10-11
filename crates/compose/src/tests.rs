@@ -2771,3 +2771,210 @@ fn empty_paragraphs_get_no_bullet_or_number() {
         assert_eq!(list_labels(&cs, LABEL_CHARS), ["1.", "", "2.", ""], "list `{name}`");
     }
 }
+
+// ---------- Thai, Lao, Khmer, Myanmar: words written without spaces ----------
+//
+// Fonts: the bundled document fonts have no Thai glyphs, so these tests draw every Thai character
+// as Source Serif 4's .notdef box (marks too: a box with an advance). The shaper still puts a base
+// and its marks in one cluster, and `byte`/`len` are the text's, which is all line breaking and
+// justification look at. `thai_marks_never_letter_spaced` also runs with fallback fonts on, which
+// draws real Thai glyphs (marks without an advance) where a system font has them.
+
+const THAI: &str = "ผู้ซื้อสามารถตรวจสอบประวัติเครื่องได้ทุกขั้นตอนโดยร้านจะบันทึกผลการตรวจสอบแบตเตอรี่หน้าจอคีย์บอร์ดและสถานะการล็อกไว้อย่างละเอียดก่อนส่งมอบให้ลูกค้าทุกครั้ง";
+
+/// Word boundaries of `text` from ICU's dictionary: the only places a line may end inside Thai text.
+fn icu_word_boundaries(text: &str) -> Vec<usize> {
+    icu_segmenter::WordSegmenter::new_dictionary(Default::default()).segment_str(text).collect()
+}
+
+fn thai_story(text: &str, width: f64, para: ParaAttrs, fallback: bool) -> ComposedStory {
+    let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, width, 5000.0), para);
+    d.settings.glyph_fallback = fallback;
+    compose_story(&d, sid, &ComposeOptions::default())
+}
+
+fn justified() -> ParaAttrs {
+    ParaAttrs { align: Some(Align::LeftJustified), ..Default::default() }
+}
+
+#[test]
+fn thai_breaks_at_word_boundaries() {
+    let words = icu_word_boundaries(THAI);
+    // The paragraph composer's glue (justified) and penalties (ragged), and the single-line composer.
+    let single = ParaAttrs { composer: Some(designcraft_doc::Composer::SingleLine), ..justified() };
+    for para in [justified(), ParaAttrs::default(), single] {
+        for width in [100.0, 150.0, 230.0] {
+            let cs = thai_story(THAI, width, para.clone(), false);
+            let lines = all_lines(&cs);
+            assert!(lines.len() >= 5, "{width}: {} lines", lines.len());
+            let shown = || lines.iter().map(|l| &THAI[l.range.clone()]).collect::<Vec<_>>().join(" / ");
+            for l in &lines {
+                let end = l.range.end;
+                assert!(words.contains(&end), "{width}: a line ends inside a word at byte {end}: {}", shown());
+                assert!(!THAI[end..].chars().next().is_some_and(sea::is_sea_mark), "{width}: a line ends between a base and its mark: {}", shown());
+                assert!(l.end_x <= l.x1 + 0.5, "{width}: line overflows: {} > {}", l.end_x, l.x1);
+            }
+            // The words the breaker used to tear (ขั้น|ตอน, แบตเ|ตอรี่, ไว้อ|ย่าง) stay whole, and
+            // so does the stretch where the dictionary alone loses its place (ผลก|า|รตร|วจส|อบ).
+            for word in ["ขั้นตอน", "แบตเตอรี่", "อย่าง", "บันทึก", "ผลการตรวจสอบ"]
+            {
+                for (at, _) in THAI.match_indices(word) {
+                    assert!(!lines.iter().any(|l| l.range.end > at && l.range.end < at + word.len()), "{width}: {word} is broken: {}", shown());
+                }
+            }
+            if para.align.is_some() {
+                for l in &lines[..lines.len() - 1] {
+                    assert!((l.end_x - l.x1).abs() < 0.6, "{width}: justified line ends at {} not {}", l.end_x, l.x1);
+                }
+            }
+        }
+    }
+}
+
+/// Each line's steps from a glyph to the next one: ((its byte, its place in its cluster), the next
+/// glyph's byte, the x distance). A base and its marks are one cluster: they share `byte`, and
+/// only the first glyph has a length.
+fn glyph_steps(cs: &ComposedStory) -> Vec<Vec<((usize, usize), usize, f64)>> {
+    let line = |l: &&Line| {
+        let mut k = 0;
+        let step = |w: &[PlacedGlyph]| {
+            let s = ((w[0].byte, k), w[1].byte, w[1].x - w[0].x);
+            k = if w[1].byte == w[0].byte && w[1].len == 0 { k + 1 } else { 0 };
+            s
+        };
+        l.glyphs.windows(2).map(step).collect()
+    };
+    all_lines(cs).iter().map(line).collect()
+}
+
+#[test]
+fn thai_marks_never_letter_spaced() {
+    // The word ends the composer uses (THAI starts its story, so story bytes).
+    let words = sea::word_boundaries(THAI);
+    for fallback in [false, true] {
+        // The natural steps: the whole paragraph on one ragged line.
+        let natural: HashMap<(usize, usize), f64> =
+            glyph_steps(&thai_story(THAI, 5000.0, ParaAttrs::default(), fallback)).concat().into_iter().map(|s| (s.0, s.2)).collect();
+        let cs = thai_story(THAI, 150.0, justified(), fallback);
+        let lines = all_lines(&cs);
+        assert!(lines.len() >= 3, "{}", lines.len());
+        let (mut marks, mut widened) = (0, 0);
+        for (l, steps) in lines.iter().zip(glyph_steps(&cs)).take(lines.len() - 1) {
+            assert!((l.end_x - l.x1).abs() < 0.6, "justified line ends at {} not {}", l.end_x, l.x1);
+            // A line of several words takes the space between them, none of it between the
+            // letters of a word; a line of one word spreads its letters (Single Word
+            // Justification). Neither puts any between a base and its marks.
+            let several = steps.iter().any(|s| words.contains(&s.1));
+            for (from, next, d) in steps {
+                let nat = natural[&from];
+                if next == from.0 {
+                    marks += 1;
+                    assert!((d - nat).abs() < 1e-6, "a mark is {d} from its base at byte {next}, not {nat} (fallback {fallback})");
+                } else if several && !words.contains(&next) {
+                    assert!((d - nat).abs() < 1e-6, "letter spacing inside a word at byte {next}: {d}, not {nat} (fallback {fallback})");
+                } else if d > nat + 0.1 {
+                    widened += 1;
+                }
+            }
+        }
+        assert!(marks >= 20 && widened >= 10, "{marks} marks, {widened} gaps widened");
+        // A line of one word for certain: the frame takes one เครื่อง but not two.
+        let text = "เครื่อง เครื่อง เครื่อง";
+        let natural = glyph_steps(&thai_story(text, 5000.0, ParaAttrs::default(), fallback)).concat();
+        let word: f64 = natural.iter().take_while(|s| s.1 < "เครื่อง".len()).map(|s| s.2).sum();
+        let cs = thai_story(text, word * 1.6, justified(), fallback);
+        let first = &all_lines(&cs)[0];
+        assert_eq!(&text[first.range.clone()], "เครื่อง ");
+        assert!((first.end_x - first.x1).abs() < 0.6, "the word fills the line: {} of {}", first.end_x, first.x1);
+        let natural: HashMap<(usize, usize), f64> = natural.into_iter().map(|s| (s.0, s.2)).collect();
+        let (mut marks, mut widened) = (0, 0);
+        for &(from, next, d) in &glyph_steps(&cs)[0] {
+            let nat = natural[&from];
+            if next == from.0 {
+                marks += 1;
+                assert!((d - nat).abs() < 1e-6, "a mark is {d} from its base at byte {next}, not {nat} (fallback {fallback})");
+            } else if d > nat + 0.1 {
+                widened += 1;
+            }
+        }
+        assert_eq!((marks, widened), (2, 4), "รื่ keeps its two marks; the four gaps between the letters open");
+    }
+}
+
+#[test]
+fn latin_paragraph_unchanged() {
+    // The line ends and widths LOREM had before lines broke at word gaps (the frames of
+    // `justified_lines_fill_the_measure` and `line_ranges_partition_the_story`): text without
+    // Thai, Lao, Khmer or Myanmar composes exactly as it did.
+    let lines = |align: Align, width: f64| {
+        let (d, sid, _) = doc_with(LOREM, Rect::new(0.0, 0.0, width, 2000.0), ParaAttrs { align: Some(align), ..Default::default() });
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        all_lines(&cs).iter().map(|l| (l.range.end, (l.end_x * 1000.0).round() / 1000.0)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines(Align::LeftJustified, 220.0),
+        [(39, 220.0), (79, 220.0), (116, 220.0), (153, 220.0), (194, 220.0), (237, 220.0), (274, 220.0), (291, 80.52)]
+    );
+    assert_eq!(
+        lines(Align::Left, 200.0),
+        [(36, 192.252), (70, 179.616), (103, 181.692), (133, 170.124), (170, 194.808), (208, 185.748), (246, 192.996), (283, 193.968), (291, 37.248)]
+    );
+}
+
+#[test]
+fn mixed_thai_latin() {
+    // No hyphenation, so that MacBook breaks nowhere.
+    let text = "เครื่อง MacBook Air M2 ผ่านการตรวจสอบ";
+    let words = icu_word_boundaries(text);
+    let thai = |b: usize, back: bool| if back { text[..b].chars().next_back() } else { text[b..].chars().next() }.is_some_and(sea::is_sea);
+    for align in [Align::LeftJustified, Align::Left] {
+        let (mut at_space, mut at_gap) = (0, 0);
+        for width in [70.0, 100.0] {
+            let cs = thai_story(text, width, ParaAttrs { align: Some(align), hyphenate: Some(false), ..Default::default() }, false);
+            let lines = all_lines(&cs);
+            for l in &lines[..lines.len() - 1] {
+                let end = l.range.end;
+                let shown = &text[l.range.clone()];
+                if shown.ends_with(' ') {
+                    at_space += 1;
+                } else {
+                    assert!(
+                        words.contains(&end) && thai(end, true) && thai(end, false),
+                        "{width}: “{shown}” ends neither at a space nor between Thai words"
+                    );
+                    at_gap += 1;
+                }
+            }
+        }
+        assert!(at_space >= 2 && at_gap >= 2, "{align:?}: {at_space} lines end at a space, {at_gap} between Thai words");
+    }
+    assert_eq!(
+        all_lines(&thai_story(text, 70.0, ParaAttrs { hyphenate: Some(false), ..justified() }, false))
+            .iter()
+            .map(|l| &text[l.range.clone()])
+            .collect::<Vec<_>>(),
+        ["เครื่อง ", "MacBook Air ", "M2 ผ่าน", "การตรวจ", "สอบ"]
+    );
+}
+
+#[test]
+fn thai_lines_keep_signs_vowels_and_punctuation_with_their_words() {
+    // Word boundaries are not all places to break: ICU reports one before ๆ and around brackets,
+    // quotes and full stops. No line starts with a repetition or abbreviation sign, a vowel
+    // written after its consonant or closing punctuation, and none ends with opening punctuation
+    // or a vowel written before its consonant. (Every frame takes the longest unbreakable run.)
+    let text = "เด็กๆชอบไป(ประเทศไทย)และพูดว่า“สวัสดีครับ”กับคนต่างๆในกรุงเทพฯเสมอ.ราคา100บาทต่อ5คนเท่านั้น";
+    for para in [justified(), ParaAttrs::default()] {
+        for width in (200..=300).step_by(10) {
+            let cs = thai_story(text, width as f64, para.clone(), false);
+            let lines = all_lines(&cs);
+            for l in &lines[..lines.len() - 1] {
+                let (before, after) = (text[..l.range.end].chars().next_back().unwrap(), text[l.range.end..].chars().next().unwrap());
+                let shown = &text[l.range.clone()];
+                assert!(!"ๆฯะาำ)”.,".contains(after), "{width}: the line after “{shown}” starts with {after}");
+                assert!(!"(“เแโใไ".contains(before), "{width}: “{shown}” ends with {before}");
+                assert!(!(before.is_ascii_digit() || after.is_ascii_digit()), "{width}: “{shown}” breaks next to a figure");
+            }
+        }
+    }
+}
