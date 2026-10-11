@@ -390,12 +390,17 @@ impl<'r> Importer<'r> {
         if let Some(ix) = top.iter().find(|e| e.local() == "Index") {
             self.index_topics_of(ix, &[]);
         }
-        // Stories (ids first so frames can reference them).
+        // Stories (ids first so frames, including text frames anchored inside other stories,
+        // can reference any of them).
+        let mut story_els: Vec<(StoryId, &El)> = Vec::new();
         for e in top.iter().filter(|e| e.local() == "Story") {
             let id = StoryId(self.alloc());
             if let Some(s) = e.get("Self") {
                 self.story_ids.insert(s.to_string(), id);
             }
+            story_els.push((id, e));
+        }
+        for (id, e) in story_els {
             let story = self.story(id, e);
             self.stories.insert(id, story);
         }
@@ -1765,10 +1770,9 @@ impl<'r> Importer<'r> {
                         b.push(&designcraft_doc::FOOTNOTE_REF.to_string(), &rcf);
                     }
                     // Not supported yet: skip their content entirely.
-                    "Rectangle" | "Oval" | "Polygon" | "GraphicLine" | "Group" => {
-                        // An anchored object (text frames inside stories aren't supported yet).
-                        let has_text = c.find_all("TextFrame").next().is_some();
-                        if !has_text && let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY) {
+                    "Rectangle" | "Oval" | "Polygon" | "GraphicLine" | "Group" | "TextFrame" => {
+                        // An anchored object: a shape, a text frame, or a group holding them.
+                        if let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY) {
                             use designcraft_doc::anchored::AnchorAlign as A;
                             let set = c.find("AnchoredObjectSetting");
                             let get = |k: &str| set.and_then(|s| s.num(k)).unwrap_or(0.0);
@@ -1810,7 +1814,7 @@ impl<'r> Importer<'r> {
                             b.push(&designcraft_doc::OBJECT_MARK.to_string(), cf);
                         }
                     }
-                    "Properties" | "Note" | "TextFrame" | "StoryPreference" | "InCopyExportOption" | "TextVariableInstance" => {}
+                    "Properties" | "Note" | "StoryPreference" | "InCopyExportOption" | "TextVariableInstance" => {}
                     _ => self.walk_story(c, b, pf, pchars, cf, brk),
                 },
                 Node::Pi(t, v) if t == "ACE" => {
