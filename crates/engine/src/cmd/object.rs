@@ -489,7 +489,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r]|{top?,left?,bottom?,right?} (pt; null array entries or omitted edges unchanged), verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -1446,6 +1446,19 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::String(c)) if st.doc.swatch(c).is_some() => Some(c.clone()),
         Some(v) => return Err(bad(ID, format!("no swatch {v}"))),
     };
+    let mut inset_edges = [None; 4];
+    if let Some(edges) = p.get("inset").and_then(Value::as_object) {
+        for (key, edge) in ["top", "left", "bottom", "right"].into_iter().zip(&mut inset_edges) {
+            if let Some(value) = edges.get(key) {
+                *edge = Some(
+                    value
+                        .as_f64()
+                        .filter(|v| v.is_finite())
+                        .ok_or_else(|| bad("object.textFrameOptions", format!("inset.{key} must be a finite number")))?,
+                );
+            }
+        }
+    }
     let p = p.clone();
     s.edit(|d, _| {
         for id in &ids {
@@ -1469,6 +1482,11 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
                     }
                 }
                 _ => {}
+            }
+            for (edge, value) in o.inset.iter_mut().zip(inset_edges) {
+                if let Some(value) = value {
+                    *edge = value;
+                }
             }
             for (k, which) in [("verticalJustification", 0), ("firstBaseline", 1), ("autoSize", 2), ("columnsKind", 3)] {
                 if let Some(v) = p.get(k).cloned() {
@@ -2446,6 +2464,82 @@ mod line_end_tests {
 mod named_target_tests {
     use super::*;
 
+    #[test]
+    fn column_rule_tint_swatch_matches_equivalent_process_ink_on_screen_and_pdf() {
+        use designcraft_color::{Color, Swatch, SwatchValue};
+        let mut session = Session::new();
+        session.execute("file.new", &json!({"pages": 1})).unwrap();
+        session
+            .edit(|doc, _| {
+                doc.swatches.push(Swatch {
+                    name: "K30 tint".into(),
+                    value: SwatchValue::Tint { base: "[Black]".into(), tint: 0.3 },
+                    locked: false,
+                    named: true,
+                    hidden: false,
+                });
+                doc.swatches.push(Swatch::color("K30 process", Color::cmyk(0.0, 0.0, 0.0, 0.3)));
+                Ok(())
+            })
+            .unwrap();
+        for (x, color) in [(20, "K30 tint"), (240, "K30 process")] {
+            let frame = session.execute("frame.create", &json!({"rect": [x, 20, x + 200, 220], "content": "text"})).unwrap();
+            session
+                .execute(
+                    "object.textFrameOptions",
+                    &json!({"ids": [frame["id"]], "columns": 2, "gutter": 20,
+                "inset": 10, "columnRule": true, "columnRuleWeight": 4, "columnRuleColor": color}),
+                )
+                .unwrap();
+        }
+        let doc = &session.doc().unwrap().doc;
+        let mut renderer = designcraft_render::Renderer::new();
+        renderer.threads = 0;
+        let screen = renderer.render_page(doc, &session.cache, 0, 1.0, false, &Default::default()).unwrap();
+        assert_eq!(screen.pixel(120, 100), screen.pixel(340, 100), "named tint and equivalent process ink must agree");
+        assert!(screen.pixel(120, 100)[0] > 100 && screen.pixel(120, 100)[0] < 245);
+        let pdf = designcraft_pdf::export_pdf(doc, &session.cache, &Default::default()).unwrap();
+        let page = designcraft_render::render_pdf_page(&pdf, 0, 792).unwrap();
+        let at = |x: usize| page.data()[100 * page.width() as usize + x];
+        assert_eq!(at(120), at(340), "PDF must preserve named tint ink");
+        assert!(at(120).r > 100 && at(120).r < 245 && at(120).a > 200);
+    }
+
+    #[test]
+    fn column_rules_render_on_screen_and_pdf_and_undo() {
+        for vertical in [false, true] {
+            let mut session = Session::new();
+            session.execute("file.new", &json!({"pages": 1})).unwrap();
+            let frame = session.execute("frame.create", &json!({"rect": [20, 20, 220, 220], "content": "text"})).unwrap();
+            let id = ItemId(frame["id"].as_u64().unwrap());
+            session.execute("object.textFrameOptions", &json!({"ids": [id], "columns": 2, "gutter": 20, "inset": 10, "vertical": vertical})).unwrap();
+            let before = session.doc().unwrap().doc.clone();
+            assert!(session.execute("object.textFrameOptions", &json!({"ids": [id], "columnRule": true, "columnRuleWeight": -1})).is_err());
+            assert_eq!(*session.doc().unwrap().doc, *before, "invalid weight must leave settings untouched");
+            session
+                .execute("object.textFrameOptions", &json!({"ids": [id], "columnRule": true, "columnRuleWeight": 4, "columnRuleColor": "[Black]"}))
+                .unwrap();
+            let (x, y) = if vertical { (100, 120) } else { (120, 100) };
+            let doc = &session.doc().unwrap().doc;
+            let mut renderer = designcraft_render::Renderer::new();
+            renderer.threads = 0;
+            let screen = renderer.render_page(doc, &session.cache, 0, 1.0, false, &Default::default()).unwrap();
+            // Color-managed 100% K renders near RGB 52 rather than ideal sRGB zero.
+            assert!(screen.pixel(x, y)[0] < 100, "enabled rule must draw on screen (vertical={vertical}, pixel={:?})", screen.pixel(x, y));
+            assert_eq!(screen.pixel(25, 25), [255, 255, 255, 255], "rules respect the text inset");
+            let pdf = designcraft_pdf::export_pdf(doc, &session.cache, &Default::default()).unwrap();
+            let page = designcraft_render::render_pdf_page(&pdf, 0, 792).unwrap();
+            let pixel = page.data()[y as usize * page.width() as usize + x as usize];
+            assert!(pixel.r < 100 && pixel.a > 200, "PDF must retain the same column rule");
+            session.execute("edit.undo", &json!({})).unwrap();
+            assert_eq!(*session.doc().unwrap().doc, *before);
+            let off = renderer.render_page(&session.doc().unwrap().doc, &session.cache, 0, 1.0, false, &Default::default()).unwrap();
+            assert_eq!(off.pixel(x, y), [255, 255, 255, 255], "undo removes the visible rule");
+            session.execute("edit.redo", &json!({})).unwrap();
+            assert!(session.doc().unwrap().doc.item(id).unwrap().text_frame().unwrap().options.column_rule);
+        }
+    }
+
     /// With a text caret (or nothing) selected, a command given `ids` failed
     /// with "command `object.textFrameOptions` is not available right now: nothing selected".
     #[test]
@@ -2521,6 +2615,82 @@ mod column_rule_tests {
         // One undo step.
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(opts(&s), before);
+    }
+}
+
+#[cfg(test)]
+mod text_frame_inset_tests {
+    use super::*;
+
+    fn mixed_frame_session() -> (Session, [ItemId; 2]) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let frames = [20, 260].map(|x| {
+            let frame = s.execute("frame.create", &json!({"rect": [x, 20, x + 220, 220], "content": "text"})).unwrap();
+            ItemId(frame["id"].as_u64().unwrap())
+        });
+        s.execute(
+            "object.textFrameOptions",
+            &json!({"ids": [frames[0]], "columns": 3, "gutter": 18, "inset": [2, 4, 6, 8], "verticalJustification": "center"}),
+        )
+        .unwrap();
+        s.execute(
+            "object.textFrameOptions",
+            &json!({"ids": [frames[1]], "columns": 2, "gutter": 12, "inset": [10, 20, 30, 40], "verticalJustification": "bottom"}),
+        )
+        .unwrap();
+        s.execute("selection.set", &json!({"ids": frames})).unwrap();
+        (s, frames)
+    }
+
+    #[test]
+    fn partial_insets_preserve_each_frames_other_edges_and_legacy_forms_undo() {
+        for (inset, expected_insets) in [
+            (json!({"top": 2}), [[2.0, 4.0, 6.0, 8.0], [2.0, 20.0, 30.0, 40.0]]),
+            (json!({"left": 9, "right": 13}), [[2.0, 9.0, 6.0, 13.0], [10.0, 9.0, 30.0, 13.0]]),
+            (json!(6), [[6.0; 4]; 2]),
+            (json!([1, 3, 5, 7]), [[1.0, 3.0, 5.0, 7.0]; 2]),
+        ] {
+            let (mut s, frames) = mixed_frame_session();
+            let st = s.doc().unwrap();
+            let before = st.doc.clone();
+            let selection = st.selection.clone();
+            let undo_len = st.history.undo.len();
+            s.execute("object.textFrameOptions", &json!({"inset": inset})).unwrap();
+            let mut expected = (*before).clone();
+            for (id, insets) in frames.into_iter().zip(expected_insets) {
+                expected.item_mut(id).unwrap().text_frame_mut().unwrap().options.inset = insets;
+            }
+            assert_eq!(*s.doc().unwrap().doc, expected);
+            assert_eq!(s.doc().unwrap().selection, selection);
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo_len + 1);
+            s.execute("edit.undo", &json!({})).unwrap();
+            assert_eq!(*s.doc().unwrap().doc, *before);
+            assert_eq!(s.doc().unwrap().selection, selection);
+            assert_eq!(s.doc().unwrap().history.undo.len(), undo_len);
+            s.execute("edit.redo", &json!({})).unwrap();
+            assert_eq!(*s.doc().unwrap().doc, expected);
+            assert_eq!(s.doc().unwrap().selection, selection);
+        }
+    }
+
+    #[test]
+    fn invalid_partial_inset_rejects_the_whole_edit_before_mutation() {
+        for invalid in [json!("bad"), Value::Null] {
+            let (mut s, _) = mixed_frame_session();
+            let st = s.doc().unwrap();
+            let before = st.doc.clone();
+            let selection = st.selection.clone();
+            let revision = st.revision;
+            let undo_len = st.history.undo.len();
+            let error = s.execute("object.textFrameOptions", &json!({"columns": 4, "inset": {"top": 11, "left": invalid}})).unwrap_err();
+            assert!(error.to_string().contains("inset.left must be a finite number"));
+            let st = s.doc().unwrap();
+            assert!(std::sync::Arc::ptr_eq(&st.doc, &before));
+            assert_eq!(st.selection, selection);
+            assert_eq!(st.revision, revision);
+            assert_eq!(st.history.undo.len(), undo_len);
+        }
     }
 }
 

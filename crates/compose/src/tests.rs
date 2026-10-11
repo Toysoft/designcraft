@@ -101,6 +101,29 @@ fn columns_fill_left_to_right() {
 }
 
 #[test]
+fn column_rules_follow_insets_fixed_width_and_rtl_columns() {
+    let (mut d, sid, fid) = doc_with("", Rect::new(0.0, 0.0, 220.0, 220.0), ParaAttrs::default());
+    let options = &mut d.item_mut(fid).unwrap().text_frame_mut().unwrap().options;
+    options.inset = [10.0; 4];
+    options.columns = 3;
+    options.gutter = 20.0;
+    options.column_rule = true;
+    options.column_rule_weight = 4.0;
+    options.columns_kind = designcraft_doc::ColumnsKind::FixedWidth;
+    options.column_width = 40.0;
+    for rtl in [false, true] {
+        d.story_mut(sid).unwrap().direction =
+            if rtl { designcraft_doc::TextDirection::RightToLeft } else { designcraft_doc::TextDirection::LeftToRight };
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        let mut rules: Vec<_> = cs.frame(fid).unwrap().decos.iter().map(|deco| deco.rect).collect();
+        rules.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+        assert_eq!(rules, [Rect::new(58.0, 10.0, 62.0, 210.0), Rect::new(118.0, 10.0, 122.0, 210.0)]);
+    }
+    d.item_mut(fid).unwrap().text_frame_mut().unwrap().options.column_rule = false;
+    assert!(compose_story(&d, sid, &ComposeOptions::default()).frame(fid).unwrap().decos.is_empty());
+}
+
+#[test]
 fn centered_text_is_centered() {
     let (d, sid, _) = doc_with("Hello", Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs { align: Some(Align::Center), ..Default::default() });
     let cs = compose_story(&d, sid, &ComposeOptions::default());
@@ -352,6 +375,15 @@ fn keep_with_next_moves_a_heading() {
     let n = lines_per_column(h);
     let body = "Body text that follows the heading.";
     let (mut d, sid, _) = keep_doc(n - 1, &["Heading", body], h);
+    let first = d.story(sid).unwrap().frames[0];
+    let lid = d.default_layer();
+    let (second, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(500.0, 0.0, 900.0, h), lid, "", ParaFormat::default()).unwrap();
+    d.thread(first, second).unwrap();
+    for frame in [first, second] {
+        let options = &mut d.item_mut(frame).unwrap().text_frame_mut().unwrap().options;
+        options.columns = 2;
+        options.column_rule = true;
+    }
     let cs = compose_story(&d, sid, &ComposeOptions::default());
     assert_eq!(column_of_para(&cs, n - 1), vec![0], "without keeps the heading ends column 0");
     d.story_mut(sid).unwrap().paras[n - 1].para.keep_with_next = Some(1);
@@ -359,6 +391,8 @@ fn keep_with_next_moves_a_heading() {
     assert_eq!(column_of_para(&cs, n - 1), vec![1]);
     assert_eq!(column_of_para(&cs, n), vec![1]);
     assert_eq!(column_of_para(&cs, n - 2), vec![0]);
+    assert_eq!(cs.frames.iter().map(|frame| frame.decos.len()).collect::<Vec<_>>(), [1, 1], "keep rollback must retain every frame's rule");
+    assert!(cs.frame(second).unwrap().lines.is_empty(), "empty trailing frames still draw their column rules");
 }
 
 #[test]

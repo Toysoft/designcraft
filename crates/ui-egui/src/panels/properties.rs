@@ -1170,8 +1170,11 @@ fn text_frame_section(app: &mut DesignApp, ui: &mut Ui) {
         let _ = app.run("object.textFrameOptions", json!({"gutter": v}));
     }
     let ow = (b.max.x - 8.0) - (b.min.x + 164.0);
-    if place(ui, sub(b, 164.0, 0.5, ow, 20.0), |ui| outline_button(ui, crate::i18n::tr(&app.ui.language, "Options"), ow)).clicked() {
-        app.ui.dialog = Some(crate::dialogs::Dialog::new("textFrameOptions", json!({})));
+    let options = place(ui, sub(b, 164.0, 0.5, ow, 20.0), |ui| outline_button(ui, crate::i18n::tr(&app.ui.language, "Options"), ow));
+    #[cfg(test)]
+    ui.data_mut(|data| data.insert_temp(egui::Id::new("r6_tfo_properties_button"), options.rect));
+    if options.clicked() {
+        crate::dialogs::open_text_frame_options(app);
     }
 }
 

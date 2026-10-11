@@ -577,7 +577,13 @@ impl DesignApp {
         let reqs = std::mem::take(&mut self.session.ui_requests);
         for r in reqs {
             match r {
-                UiRequest::Dialog { id, params } => self.ui.dialog = Some(dialogs::Dialog::new(&id, params)),
+                UiRequest::Dialog { id, params } => {
+                    self.ui.dialog = Some(if id == "textFrameOptions" {
+                        dialogs::text_frame_options_dialog(self, params)
+                    } else {
+                        dialogs::Dialog::new(&id, params)
+                    });
+                }
                 UiRequest::View { params } => canvas::apply_view_request(self, &params),
                 UiRequest::Pick { purpose, params } => {
                     let _ = params;

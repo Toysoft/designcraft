@@ -201,8 +201,11 @@ fn text_controls(app: &mut DesignApp, ui: &mut Ui, in_text: bool) {
             }
         }
     });
-    if widgets::icon_toggle(ui, "frame-options", false, crate::i18n::tr(&app.ui.language, "Text Frame Options")).clicked() {
-        app.ui.dialog = Some(crate::dialogs::Dialog::new("textFrameOptions", json!({})));
+    let options = widgets::icon_toggle(ui, "frame-options", false, crate::i18n::tr(&app.ui.language, "Text Frame Options"));
+    #[cfg(test)]
+    ui.data_mut(|data| data.insert_temp(egui::Id::new("r6_tfo_taskbar_button"), options.rect));
+    if options.clicked() {
+        crate::dialogs::open_text_frame_options(app);
     }
 }
 

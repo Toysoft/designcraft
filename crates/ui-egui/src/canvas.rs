@@ -1449,6 +1449,13 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     }
     let evs = ui.input(|i| i.events.clone());
     for e in evs {
+        // Modal controls own keyboard/clipboard input even when no TextEdit is focused.
+        // Leave pointer, modifier and focus events on their existing paths.
+        if app.ui.dialog.is_some()
+            && matches!(&e, egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut)
+        {
+            continue;
+        }
         match e {
             egui::Event::Text(t) if wants_text => {
                 let _ = app.run("text.insert", json!({"text": t}));

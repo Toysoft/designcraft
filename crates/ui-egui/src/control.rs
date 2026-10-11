@@ -295,7 +295,12 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
         },
         "ui.dialog.open" => {
             let Some(id) = s("id") else { return err("missing `id`") };
-            let d = crate::dialogs::Dialog::new(id, p.get("fields").cloned().unwrap_or(Value::Null));
+            let fields = p.get("fields").cloned().unwrap_or(Value::Null);
+            let d = if id == "textFrameOptions" {
+                crate::dialogs::text_frame_options_dialog(app, fields)
+            } else {
+                crate::dialogs::Dialog::new(id, fields)
+            };
             let v = serde_json::to_value(&d).unwrap_or_default();
             app.ui.dialog = Some(d);
             ok(v)

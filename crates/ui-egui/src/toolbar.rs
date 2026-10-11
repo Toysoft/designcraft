@@ -332,8 +332,11 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
     separator(ui, &t);
     // Utility (frame options).
     ui.vertical_centered(|ui| {
-        if tool_button(ui, "frame-options", false, crate::i18n::tr(&app.ui.language, "Text Frame Options")).clicked() {
-            app.ui.dialog = Some(crate::dialogs::Dialog::new("textFrameOptions", json!({})));
+        let options = tool_button(ui, "frame-options", false, crate::i18n::tr(&app.ui.language, "Text Frame Options"));
+        #[cfg(test)]
+        ui.data_mut(|data| data.insert_temp(egui::Id::new("r6_tfo_toolbar_button"), options.rect));
+        if options.clicked() {
+            crate::dialogs::open_text_frame_options(app);
         }
     });
     separator(ui, &t);
