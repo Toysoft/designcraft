@@ -955,7 +955,8 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 let col_w = cols[cur.fi][cur.col.min(cols[cur.fi].len() - 1)].width();
                 let reserve = notes.reserve(doc, cur.fi, cur.col, &line_notes, col_w, f, opts);
                 let reserve = if cur.last_baseline.is_none() { notes.reserve(doc, cur.fi, cur.col, &[], col_w, f, opts) } else { reserve };
-                let fits = baseline + desc <= col.y1 - reserve + 0.01 && !capped;
+                // As in InDesign, a line fits when its baseline is inside the frame; descenders may hang below.
+                let fits = baseline <= col.y1 - reserve + 0.01 && !capped;
                 if !fits {
                     if cur.can_next_sub() {
                         g0 = s;
