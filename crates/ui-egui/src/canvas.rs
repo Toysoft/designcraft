@@ -986,32 +986,8 @@ fn draw_text_selection(
             if s > e || (s == e && !(l.range.end < range.end && e == l.range.end)) {
                 continue;
             }
-            let quad = |x0: f64, x1: f64| {
-                [
-                    Point::new(x0, l.baseline - l.ascent),
-                    Point::new(x1, l.baseline - l.ascent),
-                    Point::new(x1, l.baseline + l.descent),
-                    Point::new(x0, l.baseline + l.descent),
-                ]
-            };
-            if l.glyphs.iter().any(|g| g.rtl) {
-                // Mixed directions: the selected glyphs' boxes, joined where they touch.
-                let mut spans: Vec<(f64, f64)> =
-                    l.glyphs.iter().filter(|g| g.len > 0 && g.byte >= s && g.byte < e).map(|g| (g.x, g.x + g.adv)).collect();
-                spans.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let mut merged: Vec<(f64, f64)> = Vec::new();
-                for (a, b) in spans {
-                    match merged.last_mut() {
-                        Some(m) if a <= m.1 + 0.5 => m.1 = m.1.max(b),
-                        _ => merged.push((a, b)),
-                    }
-                }
-                quads.extend(merged.into_iter().map(|(a, b)| quad(a, b)));
-            } else {
-                let x0 = compose::caret_x(l, s);
-                let x1 = if e == l.range.end && range.end > l.range.end { l.end_x.max(x0 + 3.0) } else { compose::caret_x(l, e) };
-                quads.push(quad(x0, x1));
-            }
+            let past = e == l.range.end && range.end > l.range.end;
+            quads.extend(compose::highlight_quads(l, s, e, past));
             for (gi, g) in l.glyphs.iter().enumerate() {
                 if g.visible && g.len > 0 && g.byte >= s && g.byte < e {
                     glyphs.push((li, gi));
@@ -1072,15 +1048,11 @@ fn draw_cell_selection(
             if s > e || (s == e && !(l.range.end < range.end && e == l.range.end)) {
                 continue;
             }
-            let x0 = compose::caret_x(l, s);
-            let x1 = if e == l.range.end && range.end > l.range.end { l.end_x.max(x0 + 3.0) } else { compose::caret_x(l, e) };
-            let q = [
-                xf.to_screen(m * Point::new(x0, l.baseline - l.ascent)),
-                xf.to_screen(m * Point::new(x1, l.baseline - l.ascent)),
-                xf.to_screen(m * Point::new(x1, l.baseline + l.descent)),
-                xf.to_screen(m * Point::new(x0, l.baseline + l.descent)),
-            ];
-            painter.add(egui::Shape::convex_polygon(q.to_vec(), Color32::from_rgba_unmultiplied(80, 140, 255, 110), Stroke::NONE));
+            let past = e == l.range.end && range.end > l.range.end;
+            for q in compose::highlight_quads(l, s, e, past) {
+                let poly = q.map(|p| xf.to_screen(m * p));
+                painter.add(egui::Shape::convex_polygon(poly.to_vec(), Color32::from_rgba_unmultiplied(80, 140, 255, 110), Stroke::NONE));
+            }
         }
     }
     if ts.is_caret()
@@ -1369,11 +1341,114 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
+// Re-evaluate egui's click region at this event's position, using the same previous-pass
+// geometry. A frame's Response may already reflect a later move out of the widget.
+fn canvas_pointer_left_widget(ctx: &egui::Context, id: egui::Id, p: Pos2) -> bool {
+    let widgets = ctx.viewport(|v| v.prev_pass.widgets.clone());
+    let Some(canvas) = widgets.get(id) else { return false };
+    if !canvas.enabled || !canvas.sense.senses_click() || !canvas.sense.senses_drag() {
+        return false;
+    }
+    let radius = ctx.global_style().interaction.interact_radius;
+    let (order, transforms) = ctx.memory(|m| (m.layer_ids().collect::<Vec<_>>(), m.to_global.clone()));
+    let mut layers = widgets.layer_ids().collect::<Vec<_>>();
+    layers.sort_by_key(|layer| (layer.order, order.iter().position(|entry| entry == layer)));
+    let mut close = Vec::new();
+    for layer in layers {
+        if !layer.order.allow_interaction() || egui::containers::AreaState::load(ctx, layer.id).is_some_and(|area| !area.interactable) {
+            continue;
+        }
+        let transform = transforms.get(&layer).copied().unwrap_or(egui::emath::TSTransform::IDENTITY);
+        let local = transform.inverse() * p;
+        for widget in widgets.get_layer(layer) {
+            if widget.interact_rect.is_negative() || widget.rect.any_nan() || widget.interact_rect.any_nan() {
+                continue;
+            }
+            if widget.interact_rect.distance_sq_to_pos(local) <= radius * radius {
+                let widget = widget.transform(transform);
+                if !widget.rect.any_nan() && !widget.interact_rect.any_nan() {
+                    close.push(widget);
+                }
+            }
+        }
+    }
+    // Preserve egui's layer occlusion and nearby-hit margin, including drag-only neighbors.
+    let mut included = Vec::new();
+    for widget in close.iter().rev() {
+        included.push(widget.layer_id);
+        if widget.interact_rect.shrink(radius).contains(p) {
+            break;
+        }
+    }
+    close.retain(|widget| included.contains(&widget.layer_id));
+    let hidden = close
+        .iter()
+        .enumerate()
+        .filter_map(|(i, widget)| {
+            close
+                .iter()
+                .skip(i + 1)
+                .any(|above| above.layer_id != widget.layer_id && above.interact_rect.contains_rect(widget.interact_rect))
+                .then_some(widget.id)
+        })
+        .collect::<Vec<_>>();
+    close.retain(|widget| !hidden.contains(&widget.id));
+    if close.iter().any(|widget| widget.id == id && widget.interact_rect.contains(p)) {
+        return false;
+    }
+    let closest = |click: bool, drag: bool, limit: f32| {
+        let mut best = None;
+        let mut distance = limit;
+        for widget in &close {
+            if widget.enabled && ((click && widget.sense.senses_click()) || (drag && widget.sense.senses_drag())) {
+                let d = widget.interact_rect.distance_sq_to_pos(p);
+                if d <= distance {
+                    distance = d;
+                    best = Some(*widget);
+                }
+            }
+        }
+        best
+    };
+    if closest(true, false, 0.0).is_some() {
+        return true; // A direct click hit outside the canvas cannot be this canvas.
+    }
+    let click = closest(true, false, f32::INFINITY);
+    if let Some(drag) = closest(false, true, 0.0) {
+        return !click.is_some_and(|widget| widget.id == id && drag.interact_rect.contains_rect(widget.interact_rect));
+    }
+    !closest(true, true, f32::INFINITY).is_some_and(|widget| widget.id == id)
+}
+
+// egui exposes a frame-wide click flag, so retain the eligible release history here.
+// Each release must be classified before a later pointer or text event is dispatched.
+#[derive(Clone, Copy, Default)]
+struct CanvasClicks {
+    last: Option<(Pos2, f64)>,
+    previous: Option<f64>,
+}
+
+impl CanvasClicks {
+    fn release(&mut self, pos: Pos2, now: f64, max_dist: f32, delay: f64) -> bool {
+        let nearby = self.last.is_some_and(|(last, _)| last.distance_sq(pos) < max_dist * max_dist);
+        let double = nearby && self.last.is_some_and(|(_, time)| now - time < delay);
+        let triple = nearby && self.previous.is_some_and(|time| now - time < delay * 2.0);
+        self.previous = self.last.map(|(_, time)| time);
+        self.last = Some((pos, now));
+        double && !triple
+    }
+}
+
 fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
     let Some(v) = app.view().copied() else { return };
     let xf = Xf::new(rect, &v);
     let wants_text = app.session.wants_text();
     let space = ui.input(|i| i.key_down(egui::Key::Space)) && !wants_text && !ui.ctx().text_edit_focused();
+    let modifiers_id = egui::Id::new(("canvas_modifiers", app.pane));
+    let frame_modifiers = ui.input(|i| mods(i, space));
+    let mut m = ui.data(|d| d.get_temp(modifiers_id)).unwrap_or(frame_modifiers);
+    m.space = space;
+    ui.data_mut(|d| d.insert_temp(modifiers_id, frame_modifiers));
     // Scroll / zoom.
     if resp.hovered() {
         let (scroll, zoom_delta, m, hover) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers, i.pointer.hover_pos()));
@@ -1390,6 +1465,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             }
         }
     }
+    let clicks_id = egui::Id::new(("canvas_clicks", app.pane));
     // Space-drag = hand (unless a tool drag is under way: then Space is a modifier, e.g. Live
     // Distribute while resizing). Middle-drag pans too, with any tool; tools only
     // see the primary button.
@@ -1399,96 +1475,103 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         if let Some(v) = app.view_mut() {
             v.origin = Point::new(v.origin.x - d.x as f64 / v.zoom, v.origin.y - d.y as f64 / v.zoom);
         }
+        ui.data_mut(|d| d.remove::<CanvasClicks>(clicks_id));
         return;
     }
     // Ruler guides need the rulers (hidden while the view is rotated).
     if !space && xf.rot == 0 && guide_drag(app, ui, resp, rect, &xf) {
+        ui.data_mut(|d| d.remove::<CanvasClicks>(clicks_id));
         return;
     }
-    let m = ui.input(|i| mods(i, space));
+    // Keep physical pointer, text and key events in their native order. egui's pointer
+    // flags summarize a whole frame, and latest_pos can already be a move after release.
     let vi = app.view_info();
-    let pos = |p: Pos2| xf.to_canvas(p);
-    let mut events: Vec<PointerEvent> = Vec::new();
-    let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
-    let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
-    let (pressed, released, origin, latest, dbl) = ui.input(|i| {
-        (
-            i.pointer.primary_pressed(),
-            i.pointer.primary_released(),
-            i.pointer.press_origin(),
-            i.pointer.latest_pos(),
-            i.pointer.button_double_clicked(egui::PointerButton::Primary),
-        )
-    });
-    if pressed
-        && !space
-        && let Some(o) = origin.filter(|o| (if xf.rot == 0 { rect.contains(*o) } else { resp.rect.contains(*o) }) && resp.hovered())
-    {
-        events.push(PointerEvent { kind: if dbl { PointerKind::DoubleClick } else { PointerKind::Down }, pos: pos(o), mods: m });
-        down = true;
-    }
-    if down
-        && resp.dragged()
-        && resp.drag_delta() != egui::Vec2::ZERO
-        && let Some(p) = latest
-    {
-        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m });
-    }
-    // Power Zoom: holding the Hand tool still for half a second turns the press into one.
-    let hold_id = egui::Id::new(("canvas_hold", app.pane));
-    if down && !released && app.session.tool_id() == "hand" && !m.alt {
-        let (now, origin_pos) = ui.input(|i| (i.time, i.pointer.press_origin()));
-        let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
-        let still = origin_pos.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
-        if !fired && still && now - start >= 0.5 {
-            let p = pos(latest.unwrap_or(rect.center()));
-            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m });
-            events.push(PointerEvent { kind: PointerKind::Down, pos: p, mods: Mods { alt: true, ..m } });
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
-        } else {
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
-            if !fired {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-            }
-        }
-    } else {
-        ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
-    }
-    if down && released {
-        let p = latest.unwrap_or(rect.center());
-        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m });
-        down = false;
-    } else if !down && let Some(p) = resp.hover_pos() {
-        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m });
-    }
-    ui.data_mut(|d| d.insert_temp(down_id, down));
-    for e in events {
+    let send = |app: &mut DesignApp, kind, p, m| {
+        // Earlier pointer events may have panned or zoomed the view.
+        let Some(v) = app.view().copied() else { return };
+        let e = PointerEvent { kind, pos: Xf::new(rect, &v).to_canvas(p), mods: m };
+        let vi = app.view_info();
         if let Err(err) = app.session.pointer(&e, vi) {
             app.status(err.to_string());
         }
-    }
-    app.after_engine();
-    if resp.clicked() || resp.drag_started() {
-        resp.request_focus();
-    }
-    // Keyboard for the active tool.
-    if ui.ctx().text_edit_focused() && !resp.has_focus() {
-        return;
-    }
-    let evs = ui.input(|i| i.events.clone());
+        app.after_engine();
+    };
+    let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
+    let gesture_id = egui::Id::new(("canvas_pointer_gesture", app.pane));
+    let mut clicks: CanvasClicks = ui.data(|d| d.get_temp(clicks_id)).unwrap_or_default();
+    let hold_id = egui::Id::new(("canvas_hold", app.pane));
+    let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
+    // (press origin, last held position, press time, active drag)
+    let mut gesture: Option<(Pos2, Pos2, f64, bool)> = ui.data(|d| d.get_temp(gesture_id));
+    let (drag_threshold, click_duration, double_delay) =
+        ui.ctx().options(|o| (o.input_options.max_click_dist, o.input_options.max_click_duration, o.input_options.max_double_click_delay));
+    let (now, evs) = ui.input(|i| (i.time, i.events.clone()));
+    let primary = egui::PointerButton::Primary;
+    let owns_pointer = resp.hovered() || resp.clicked_by(primary) || resp.dragged_by(primary) || resp.drag_stopped_by(primary);
+    // Only the focused pane dispatches keys; all panes still finish their pointer events.
+    let mut keyboard = app.pane == app.focus_pane && (!ui.ctx().text_edit_focused() || resp.has_focus());
     for e in evs {
         match e {
-            egui::Event::Text(t) if wants_text => {
+            egui::Event::ModifiersChanged(modifiers) => {
+                m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
+            }
+            egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers } => {
+                m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space };
+                if pressed {
+                    if !space && owns_pointer && (if xf.rot == 0 { rect.contains(p) } else { resp.rect.contains(p) }) {
+                        send(app, PointerKind::Down, p, m);
+                        down = true;
+                        gesture = Some((p, p, now, false));
+                        ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
+                        resp.request_focus();
+                        keyboard = app.pane == app.focus_pane;
+                    } else {
+                        // A press owned elsewhere interrupts this pane's click sequence.
+                        clicks = CanvasClicks::default();
+                    }
+                } else if down {
+                    let clicked = gesture.is_some_and(|(origin, _, pressed_at, dragging)| {
+                        !dragging && p.distance(origin) <= drag_threshold && now - pressed_at <= click_duration
+                    });
+                    if clicked && clicks.release(p, now, drag_threshold, double_delay) {
+                        send(app, PointerKind::DoubleClick, p, m);
+                    }
+                    send(app, PointerKind::Up, p, m);
+                    down = false;
+                    gesture = None;
+                    ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
+                }
+            }
+            egui::Event::PointerMoved(p) => {
+                if down {
+                    if let Some((origin, last, pressed_at, dragging)) = gesture.as_mut() {
+                        *dragging = *dragging
+                            || p.distance(*origin) > drag_threshold
+                            || now - *pressed_at > click_duration
+                            || canvas_pointer_left_widget(ui.ctx(), resp.id, p);
+                        if *dragging && p != *last {
+                            send(app, PointerKind::Drag, p, m);
+                        }
+                        *last = p;
+                    }
+                } else if resp.hovered() && rect.contains(p) {
+                    send(app, PointerKind::Move, p, m);
+                }
+            }
+            egui::Event::WindowFocused(false) => {
+                m = Mods { space, ..Mods::default() };
+                keyboard = false;
+            }
+            egui::Event::Text(t) if keyboard && app.session.wants_text() => {
                 let _ = app.run("text.insert", json!({"text": t}));
             }
-            egui::Event::Paste(t) if wants_text => {
+            egui::Event::Paste(t) if keyboard && app.session.wants_text() => {
                 // Formatted when the system clipboard still holds what was copied here;
                 // Shift (⇧⌘V) pastes without formatting.
-                let plain = ui.input(|i| i.modifiers.shift);
-                let id = if plain { "edit.pasteWithoutFormatting" } else { "edit.paste" };
+                let id = if m.shift { "edit.pasteWithoutFormatting" } else { "edit.paste" };
                 let _ = app.run(id, json!({"text": t}));
             }
-            egui::Event::Copy | egui::Event::Cut if wants_text => {
+            egui::Event::Copy | egui::Event::Cut if keyboard && app.session.wants_text() => {
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
                 if let Ok(r) = app.run(id, json!({}))
                     && let Some(t) = r.get("text").and_then(serde_json::Value::as_str)
@@ -1496,7 +1579,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                     ui.ctx().copy_text(t.to_string());
                 }
             }
-            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+            egui::Event::Key { key, pressed: true, modifiers, .. } if keyboard => {
                 let k = match key {
                     egui::Key::ArrowLeft => Some(ToolKey::Left),
                     egui::Key::ArrowRight => Some(ToolKey::Right),
@@ -1522,6 +1605,38 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             }
             _ => {}
         }
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(down_id, down);
+        d.insert_temp(clicks_id, clicks);
+        if let Some(gesture) = gesture {
+            d.insert_temp(gesture_id, gesture);
+        } else {
+            d.remove::<(Pos2, Pos2, f64, bool)>(gesture_id);
+        }
+        d.insert_temp(modifiers_id, m);
+    });
+    // Power Zoom: holding the Hand tool still for half a second turns the press into one.
+    if down && app.session.tool_id() == "hand" && !m.alt {
+        let (now, origin, latest) = ui.input(|i| (i.time, i.pointer.press_origin(), i.pointer.latest_pos()));
+        let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
+        let still = origin.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
+        if !fired && still && now - start >= 0.5 {
+            let p = latest.unwrap_or(rect.center());
+            send(app, PointerKind::Up, p, m);
+            send(app, PointerKind::Down, p, Mods { alt: true, ..m });
+            ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
+        } else {
+            ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
+            if !fired {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+    } else {
+        ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
+    }
+    if !down && let Some(p) = resp.hover_pos() {
+        send(app, PointerKind::Move, p, m);
     }
     let _ = DVec2::ZERO;
 }
@@ -1765,6 +1880,14 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
     }
     true
 }
+
+#[cfg(test)]
+#[path = "canvas/tests_text_selection.rs"]
+mod tests_text_selection;
+
+#[cfg(test)]
+#[path = "canvas/tests_control_modifiers.rs"]
+mod tests_control_modifiers;
 
 #[cfg(test)]
 mod tests {

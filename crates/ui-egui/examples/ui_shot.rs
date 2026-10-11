@@ -32,6 +32,8 @@ fn main() {
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .with_pixels_per_point(2.0)
+        // Keep queued multi-clicks inside egui's double-click interval.
+        .with_step_dt(1.0 / 60.0)
         .with_max_steps(1_000_000)
         .wgpu()
         .build_ui_state(
@@ -72,7 +74,7 @@ fn main() {
                 step(&mut harness);
                 if let Ok(r) = reply.try_recv() {
                     let s = r.to_string();
-                    println!("{m}: {}", &s[..s.len().min(300)]);
+                    println!("{m}: {}", reply_preview(&s));
                     break;
                 }
             }
@@ -93,5 +95,31 @@ fn step(harness: &mut egui_kittest::Harness<'_, DesignApp>) {
 fn step_n(harness: &mut egui_kittest::Harness<'_, DesignApp>, n: usize) {
     for _ in 0..n {
         step(harness);
+    }
+}
+
+/// Bound diagnostic output without cutting a UTF-8 code point in an error reply.
+fn reply_preview(reply: &str) -> &str {
+    let end = reply.char_indices().nth(300).map_or(reply.len(), |(byte, _)| byte);
+    &reply[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reply_preview;
+
+    #[test]
+    fn unicode_error_reply_does_not_panic_or_cut_a_character() {
+        // A fixed odd-length ASCII prefix makes byte 300 land inside é regardless of JSON map order.
+        let reply = format!(r#"{{"error":"unknown cell style xx{}","ok":false}}"#, "é".repeat(200));
+        assert!(!reply.is_char_boundary(300), "exercise the old truncation panic");
+        let preview = reply_preview(&reply);
+        assert_eq!(preview, reply.as_str(), "a short Unicode reply needs no truncation");
+        let long = "é".repeat(400);
+        let preview = reply_preview(&long);
+        assert_eq!(preview.chars().count(), 300);
+        assert!(long.starts_with(preview));
+        assert_eq!(reply_preview("short reply"), "short reply");
+        assert_eq!(reply_preview(&"a".repeat(400)).len(), 300);
     }
 }

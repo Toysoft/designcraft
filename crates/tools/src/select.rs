@@ -712,10 +712,17 @@ impl Tool for SelectionTool {
                 {
                     let (sr, sp) = cx.layout.spread_at(p).unwrap_or((SpreadRef::Doc(0), p));
                     let _ = sr;
-                    return vec![
+                    let mut actions = Vec::new();
+                    // The second Down can begin a resize or anchor interaction before
+                    // egui reports DoubleClick on release. Finish it while we still own it.
+                    if matches!(self.drag, Drag::Move { .. } | Drag::Resize { .. } | Drag::Anchor { .. } | Drag::Rotate { .. }) {
+                        actions.push(Action::Commit);
+                    }
+                    actions.extend([
                         Action::SwitchTool("type".into()),
                         Action::Exec("text.placeCaret".into(), json!({"frame": id.0, "point": [sp.x, sp.y]})),
-                    ];
+                    ]);
+                    return actions;
                 }
                 vec![]
             }
