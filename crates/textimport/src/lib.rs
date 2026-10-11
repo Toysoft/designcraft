@@ -1,15 +1,17 @@
-//! Text import (File › Place of text files): plain text, Word documents (`.docx`) and RTF become
+//! Text import (File › Place of text files): plain text, Markdown, Word documents (`.docx`) and RTF become
 //! a frameless [`Story`] with paragraph and character styles, local bold/italic/underline/size,
 //! footnotes (Word) and tables (Word), ready to flow into text frames.
 //!
 //! Word styles are imported by name (their font, size, bold/italic and space before/after become
 //! the style definition, like InDesign's "Use Word styles" import option). RTF keeps bold,
-//! italic, underline, size and paragraph breaks.
+//! italic, underline, size and paragraph breaks. Markdown imports headings, lists and inline
+//! emphasis/code as named styles for style mapping.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 mod docx;
 pub mod export;
+mod markdown;
 mod rtf;
 pub mod tagged;
 mod xlsx;
@@ -92,7 +94,11 @@ impl std::fmt::Display for ImportError {
 /// Text files this crate reads, by extension.
 pub fn is_text_file(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
-    l.ends_with(".txt") || l.ends_with(".text") || l.ends_with(".md") || l.ends_with(".docx") || l.ends_with(".rtf") || l.ends_with(".xlsx")
+    l.ends_with(".txt") || l.ends_with(".text") || is_markdown(&l) || l.ends_with(".docx") || l.ends_with(".rtf") || l.ends_with(".xlsx")
+}
+
+fn is_markdown(name: &str) -> bool {
+    name.ends_with(".md") || name.ends_with(".markdown")
 }
 
 /// Import `bytes` (format from the file name, else sniffed).
@@ -112,6 +118,9 @@ pub fn import(name: &str, bytes: &[u8]) -> Result<Imported, ImportError> {
     }
     if l.ends_with(".doc") {
         return Err(ImportError::Unsupported("legacy Word .doc (save it as .docx)".into()));
+    }
+    if is_markdown(&l) {
+        return markdown::import(bytes);
     }
     Ok(plain(&String::from_utf8_lossy(bytes)))
 }
@@ -134,5 +143,29 @@ mod tests {
         assert_eq!(i.story.paras.len(), 3);
         assert!(is_text_file("Report.DOCX") && !is_text_file("a.png"));
         assert!(matches!(import("x.doc", b"\xD0\xCF"), Err(ImportError::Unsupported(_))));
+    }
+
+    #[test]
+    fn markdown_dispatch_is_explicit_and_preserves_other_formats() {
+        for name in ["notes.md", "NOTES.MD", "notes.markdown", "NOTES.MARKDOWN"] {
+            assert!(is_text_file(name));
+            let imported = import(name, b"# Heading\n\n**bold**").unwrap();
+            assert_eq!(imported.story.text, "Heading\nbold");
+            assert_eq!(imported.story.paras[0].style, "Heading 1");
+            assert_eq!(imported.story.format_after("Heading\n".len()).style, "Strong");
+        }
+        for name in ["notes.txt", "notes.text", "unnamed"] {
+            let imported = import(name, b"# Heading\n\n**bold**").unwrap();
+            assert_eq!(imported.story.text, "# Heading\n\n**bold**");
+            assert!(imported.para_styles.is_empty() && imported.char_styles.is_empty());
+        }
+        // Existing magic-byte precedence applies even to misleading Markdown extensions.
+        let rtf = import("notes.md", br"{\rtf1 text {\b bold}}").unwrap();
+        assert_eq!(rtf.story.text, "text bold");
+        assert_eq!(rtf.story.format_after(5).over.font_style.as_deref(), Some("Bold"));
+        assert!(matches!(import("notes.md", b"PK\x03\x04broken"), Err(ImportError::Corrupt(_))));
+        let tagged = import("notes.md", b"<ASCII-WIN>\r\n<ParaStyle:Body>Text").unwrap();
+        assert_eq!(tagged.story.text, "Text");
+        assert_eq!(tagged.story.paras[0].style, "Body");
     }
 }

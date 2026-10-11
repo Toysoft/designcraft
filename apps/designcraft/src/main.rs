@@ -160,6 +160,7 @@ fn open_filters(purpose: &str) -> &'static [OpenFilter] {
                     "docx",
                     "rtf",
                     "md",
+                    "markdown",
                     "xlsx",
                     "idml",
                     "designcraft",
@@ -177,7 +178,7 @@ fn open_filters(purpose: &str) -> &'static [OpenFilter] {
                 name: "Graphics",
                 extensions: &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "psd", "svg", "pdf", "ai", "eps"],
             },
-            OpenFilter { name: "Text (Word, RTF, plain, Excel)", extensions: &["docx", "rtf", "txt", "md", "xlsx"] },
+            OpenFilter { name: "Text (Word, RTF, Markdown, plain, Excel)", extensions: &["docx", "rtf", "txt", "md", "markdown", "xlsx"] },
             OpenFilter { name: "Video and sound", extensions: &["mp4", "m4v", "mov", "webm", "mp3", "m4a", "wav", "ogg"] },
         ],
         _ => &[
@@ -362,6 +363,9 @@ mod tests {
         let place = super::open_filters("place");
         assert!(place.len() > 1, "the place dialog keeps a filter for each kind of file");
         assert!(place.iter().any(|filter| filter.extensions.contains(&"png")));
+        for ext in ["md", "markdown"] {
+            assert!(place.iter().any(|filter| filter.extensions.contains(&ext)), "{ext} must be selectable for Markdown placement");
+        }
         let documents = super::open_filters("");
         assert!(documents.iter().any(|filter| filter.extensions.contains(&"designcraft")));
     }

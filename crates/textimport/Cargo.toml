@@ -3,7 +3,7 @@ name = "designcraft-textimport"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "DesignCraft text import: plain text, Word (.docx) and RTF into stories"
+description = "DesignCraft text import: plain text, Markdown, Word (.docx) and RTF into stories"
 
 [lints]
 workspace = true
@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 designcraft-doc = { workspace = true }
 quick-xml = { workspace = true }
+unicode-general-category = { workspace = true }
 zip = { workspace = true }

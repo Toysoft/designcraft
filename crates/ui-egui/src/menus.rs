@@ -720,10 +720,10 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         "app.openDialog" => app.pick_and_open("open"),
         "app.placeDialog" => app.pick_and_open("place"),
         "app.placeWithOptions" => {
-            // Word/RTF Import Options: style mapping and conflicts before the text lands.
+            // Word/RTF/Markdown Import Options: style mapping and conflicts before the text lands.
             let Some(path) = app.services.pick_open.as_mut().and_then(|f| f("place")) else { return Some(Ok(Value::Null)) };
             let l = path.to_lowercase();
-            if !(l.ends_with(".docx") || l.ends_with(".rtf")) {
+            if !(l.ends_with(".docx") || l.ends_with(".rtf") || l.ends_with(".md") || l.ends_with(".markdown")) {
                 return Some(app.open_file("file.place", json!({"path": path})));
             }
             let info = match app.run("place.styles", json!({"path": path})) {
@@ -2342,6 +2342,58 @@ mod tests {
         }
         assert_eq!(app.ui.dialog.as_ref().map(|d| d.id.as_str()), Some("preferences"));
         assert!(!egui::Popup::is_any_open(&ctx), "choosing a command dismisses the menu");
+    }
+
+    fn markdown_dialog_control(app: &mut crate::DesignApp, method: &str, params: Value) -> Value {
+        let (request, _reply) = crate::control::ControlRequest::new(method, params);
+        let crate::control::Outcome::Done(response) = crate::control::handle(app, &egui::Context::default(), &request) else {
+            panic!("dialog command must finish without a screenshot");
+        };
+        assert_eq!(response["ok"], true, "{method}: {response}");
+        response["result"].clone()
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn markdown_import_options_activate_cancel_and_map_headings() {
+        let dir = std::env::temp_dir().join(format!("dc-ui-markdown-import-options-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for extension in ["md", "markdown", "MD", "MaRkDoWn"] {
+            let path = dir.join(format!("notes.{extension}"));
+            std::fs::write(&path, "# Head\n\nBody").unwrap();
+            let chosen = path.to_string_lossy().into_owned();
+            let services = crate::Services {
+                pick_open: Some(Box::new(move |mode| {
+                    assert_eq!(mode, "place");
+                    Some(chosen.clone())
+                })),
+                ..Default::default()
+            };
+            let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), services);
+            app.run("file.new", json!({})).unwrap();
+            app.run("style.paragraph.create", json!({"name": "Headline", "chars": {"size": 30}})).unwrap();
+            let before = app.session.doc().unwrap().doc.clone();
+            activate(&mut app, "app.placeWithOptions", &Value::Null);
+            let dialog = app.ui.dialog.as_ref().unwrap();
+            assert_eq!(dialog.id, "importOptions", "{extension} opens the options before placing");
+            assert!(dialog.fields.get("styles").unwrap().as_array().unwrap().contains(&json!("Heading 1")));
+            assert_eq!(*app.session.doc().unwrap().doc, *before, "activation must not place text");
+            markdown_dialog_control(&mut app, "ui.dialog.cancel", json!({}));
+            assert!(app.ui.dialog.is_none());
+            assert_eq!(*app.session.doc().unwrap().doc, *before, "cancel must not place text");
+
+            activate(&mut app, "app.placeWithOptions", &Value::Null);
+            markdown_dialog_control(&mut app, "ui.dialog.set", json!({"field": "map", "value": {"Heading 1": "Headline"}}));
+            let placed = markdown_dialog_control(&mut app, "ui.dialog.confirm", json!({}));
+            let doc = &app.session.doc().unwrap().doc;
+            let story = doc.story(designcraft_doc::StoryId(placed["story"].as_u64().unwrap())).unwrap();
+            assert_eq!(story.text, "Head\nBody");
+            assert_eq!(story.paras[0].style, "Headline");
+            assert!(doc.styles.para("Heading 1").is_none(), "mapped heading styles must not also be imported");
+            app.run("edit.undo", json!({})).unwrap();
+            assert_eq!(*app.session.doc().unwrap().doc, *before);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
