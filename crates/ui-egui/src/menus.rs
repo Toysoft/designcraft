@@ -68,6 +68,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         None,
         "{rule?: ruleAbove|ruleBelow} — Rule Above / Rule Below of the selected paragraphs (type.para)",
     ),
+    (
+        "app.justificationDialog",
+        "Justification…",
+        Some("Cmd+Alt+Shift+J"),
+        "{} — word and letter spacing, glyph scaling and composer of the selected paragraphs (type.para)",
+    ),
     ("app.findFontDialog", "Find/Replace Font…", None, "{} — fonts used (missing ones flagged) and replacing them"),
     ("app.insertXrefDialog", "Insert Cross-Reference…", None, "{} — New Cross-Reference dialog (paragraph or text anchor, format)"),
     ("app.deleteAllGuides", "Delete All Guides on Spread", None, "{} — the spread in view"),
@@ -392,6 +398,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "cmd:type.alignRight",
             "cmd:type.justify",
             "ui:app.paragraphRulesDialog",
+            "ui:app.justificationDialog",
             "-",
             "cmd:type.bold",
             "cmd:type.italic",
@@ -949,6 +956,18 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             let rule = if p.get("rule").and_then(Value::as_str) == Some("ruleBelow") { "ruleBelow" } else { "ruleAbove" };
             let current = json!({"ruleAbove": a["para"]["ruleAbove"], "ruleBelow": a["para"]["ruleBelow"]});
             app.ui.dialog = Some(crate::dialogs::Dialog::new("paragraphRules", json!({"rule": rule, "current": current})));
+            Ok(Value::Null)
+        }
+        "app.justificationDialog" => {
+            let Some(a) = app.session.execute("type.selectionAttrs", &json!({"mixed": true})).ok().filter(|a| !a.is_null()) else {
+                return Some(Err("select text or a text frame".into()));
+            };
+            let mixed: Vec<&str> = a["paraMixed"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let current: serde_json::Map<String, Value> = crate::dialogs::JUSTIFY_ATTRS
+                .iter()
+                .map(|k| (k.to_string(), if mixed.contains(k) { Value::Null } else { a["para"][*k].clone() }))
+                .collect();
+            app.ui.dialog = Some(crate::dialogs::Dialog::new("justification", json!({"current": current})));
             Ok(Value::Null)
         }
         "app.footnoteOptionsDialog" => {
@@ -1808,6 +1827,9 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
 
 /// Enablement for menu display (UI commands need a document unless they're app/window-level).
 pub fn menu_enabled(app: &DesignApp, id: &str) -> bool {
+    if id == "app.justificationDialog" {
+        return enabled(app, "type.para");
+    }
     if ui_label(id).is_some() {
         return app.session.active().is_some() || id.starts_with("app.") || id.starts_with("window.");
     }

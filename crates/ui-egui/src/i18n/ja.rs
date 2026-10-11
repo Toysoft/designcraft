@@ -1670,6 +1670,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Vertical:", "垂直方向:"),
     ("Working CMYK", "作業用 CMYK"),
     ("Yellow", "イエロー"),
+    ("Justification…", "両端揃え…"),
 ];
 
 #[cfg(test)]

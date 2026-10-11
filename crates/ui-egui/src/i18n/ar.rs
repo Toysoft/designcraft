@@ -1467,6 +1467,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ),
     ("Utilities", "أدوات مساعدة"),
     ("Paragraph Rules…", "خطوط الفقرة…"),
+    ("Justification…", "الضبط…"),
     ("Paragraph Rules", "خطوط الفقرة"),
     ("Rule Below", "خط سفلي"),
 ];

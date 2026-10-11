@@ -1455,6 +1455,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Selection", "Виділення"),
     ("All Documents", "Усі документи"),
     ("On", "Увімкнено"),
+    ("Justification…", "Вирівнювання за шириною…"),
 ];
 
 /// Contexts whose Ukrainian noun differs from the shared action/text-layout label.

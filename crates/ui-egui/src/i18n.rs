@@ -1894,7 +1894,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ),
     ("Indents and Spacing", ["Indents and Spacing", "Indents and Spacing", "Indents and Spacing", "Indents and Spacing", "缩进和间距"]),
     ("Hyphenation", ["Hyphenation", "Hyphenation", "Hyphenation", "Hyphenation", "断字"]),
-    ("Justification", ["Justification", "Justification", "Justification", "Justification", "两端对齐"]),
+    ("Justification", ["Blocksatzeinstellungen", "Justification", "Justificación", "両端揃え", "两端对齐"]),
     (
         "Drop Caps and Nested Styles",
         [
@@ -2808,6 +2808,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     // Paragraph Rules.
     ("Paragraph Rules…", ["Absatzlinien …", "Filets de paragraphe…", "Filetes de párrafo…", "段落境界線…", "段落线…"]),
     ("Paragraph Rules", ["Absatzlinien", "Filets de paragraphe", "Filetes de párrafo", "段落境界線", "段落线"]),
+    ("Justification…", ["Blocksatzeinstellungen …", "Justification…", "Justificación…", "両端揃え…", "两端对齐…"]),
     ("Rule Below", ["Linie unterhalb", "Filet après", "Filete después", "後境界線", "下方横线"]),
     ("Tint:", ["Farbton:", "Teinte:", "Matiz:", "濃淡:", "色调："]),
     ("Column", ["Spalte", "Colonne", "Columna", "段", "栏"]),

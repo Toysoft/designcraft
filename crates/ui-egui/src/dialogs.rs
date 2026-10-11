@@ -1132,6 +1132,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "characterStyleOptions" => crate::i18n::tr(&app.ui.language, "Character Style Options"),
         "footnoteOptions" => crate::i18n::tr(&app.ui.language, "Footnote Options"),
         "paragraphRules" => crate::i18n::tr(&app.ui.language, "Paragraph Rules"),
+        "justification" => crate::i18n::tr(&app.ui.language, "Justification"),
         "insertXref" => crate::i18n::tr(&app.ui.language, "New Cross-Reference"),
         "findFont" => crate::i18n::tr(&app.ui.language, "Find/Replace Font"),
         "polygonSettings" => crate::i18n::tr(&app.ui.language, "Polygon Settings"),
@@ -1392,6 +1393,10 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             "paragraphRules" => {
                 let current = d.fields.get("current").cloned().unwrap_or_default();
                 paragraph_rules(app, ui, &mut d, "", &current);
+            }
+            "justification" => {
+                let current = d.fields.get("current").cloned().unwrap_or_default();
+                justification(&app.ui.language, ui, &mut d, "", &current);
             }
             "insertXref" => insert_xref(app, ui, &mut d),
             "findFont" => find_font(app, ui, &mut d),
@@ -1808,6 +1813,17 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
         }
         "paragraphStyleOptions" => {
             let name = d.s("name");
+            // What the Justification section showed: the style's own values, or a new style's Based On.
+            let shown = if d.b("new") { d.s("basedOn") } else { name.clone() };
+            let base = app.session.active().map(|st| serde_json::to_value(st.doc.styles.resolve_para_style(&shown).0).unwrap_or_default()).unwrap_or_default();
+            if let Err(e) = check_justification(&d, "p.", &base) {
+                app.status(e.clone());
+                let mut d = d;
+                d.fields.insert("justifyError".into(), json!(e));
+                d.fields.insert("section".into(), json!("justify"));
+                app.ui.dialog = Some(d);
+                return Err(e);
+            }
             let mut para = serde_json::Map::new();
             let mut chars = serde_json::Map::new();
             for (k, v) in &d.fields {
@@ -1854,6 +1870,22 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 app.run("style.exportTag", json!({"style": style, "tag": tag, "class": d.s("x.class")}))?;
             }
             Ok(r)
+        }
+        "justification" => {
+            let current = d.fields.get("current").cloned().unwrap_or_default();
+            if let Err(e) = check_justification(&d, "", &current) {
+                // The dialog stays open to be corrected.
+                app.status(e.clone());
+                let mut d = d;
+                d.fields.insert("justifyError".into(), json!(e));
+                app.ui.dialog = Some(d);
+                return Err(e);
+            }
+            let attrs: Map<String, Value> = JUSTIFY_ATTRS.iter().filter_map(|k| d.fields.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
+            if attrs.is_empty() {
+                return Ok(Value::Null);
+            }
+            app.run("type.para", json!({"attrs": attrs}))
         }
         "paragraphRules" => {
             let attrs = rule_edits(&d, "");
@@ -2557,50 +2589,7 @@ fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                     }
                 });
             }
-            "justify" => {
-                egui::Grid::new("psj").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label("");
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Minimum"));
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Desired"));
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Maximum"));
-                    ui.end_row();
-                    for (label, base) in [("Word Spacing:", "wordSpace"), ("Letter Spacing:", "letterSpace"), ("Glyph Scaling:", "glyphScale")] {
-                        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, label));
-                        for suffix in ["Min", "Desired", "Max"] {
-                            let key = format!("{base}{suffix}");
-                            let v = cur(d, &format!("p.{key}"), &pv[key.as_str()]).as_f64().map(|x| x * 100.0);
-                            if let Some(n) = ui.scope(|ui| crate::widgets::number(ui, &format!("ps{key}"), v, "%", 60.0, 0)).inner {
-                                d.fields.insert(format!("p.{key}"), json!(n / 100.0));
-                            }
-                        }
-                        ui.end_row();
-                    }
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Composer:"));
-                    let single = cur(d, "p.composer", &pv["composer"]).as_str() == Some("singleLine");
-                    if ui.selectable_label(!single, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Paragraph Composer"))).clicked() {
-                        d.fields.insert("p.composer".into(), json!("paragraph"));
-                    }
-                    if ui.selectable_label(single, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Single-line Composer"))).clicked() {
-                        d.fields.insert("p.composer".into(), json!("singleLine"));
-                    }
-                    ui.end_row();
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Insert Kashidas:"));
-                    let mut k = cur(d, "p.kashidas", &pv["kashidas"]).as_bool().unwrap_or(true);
-                    if ui.checkbox(&mut k, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "In justified Arabic text"))).changed() {
-                        d.fields.insert("p.kashidas".into(), json!(k));
-                    }
-                    ui.end_row();
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Korean Line Breaks:"));
-                    let mut kb = cur(d, "p.koreanCharBreaks", &pv["koreanCharBreaks"]).as_bool().unwrap_or(false);
-                    if ui
-                        .checkbox(&mut kb, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Between syllables (not only at spaces)")))
-                        .changed()
-                    {
-                        d.fields.insert("p.koreanCharBreaks".into(), json!(kb));
-                    }
-                    ui.end_row();
-                });
-            }
+            "justify" => justification(&app.ui.language, ui, d, "p.", &pv),
             "color" => character_color(&app.ui.language, ui, d, &CharFields { base: &cv, sparse: false }, &doc),
             _ => {
                 egui::Grid::new("psg").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -3187,6 +3176,114 @@ fn shown_rule(d: &Dialog, prefix: &str, which: &str, current: &Value) -> Value {
         }
     }
     Value::Object(r)
+}
+
+/// The paragraph attributes of the Justification controls.
+pub const JUSTIFY_ATTRS: [&str; 12] = [
+    "wordSpaceMin",
+    "wordSpaceDesired",
+    "wordSpaceMax",
+    "letterSpaceMin",
+    "letterSpaceDesired",
+    "letterSpaceMax",
+    "glyphScaleMin",
+    "glyphScaleDesired",
+    "glyphScaleMax",
+    "composer",
+    "kashidas",
+    "koreanCharBreaks",
+];
+
+/// The spacing rows of the Justification controls: (label, attribute stem, allowed percent range).
+const JUSTIFY_ROWS: [(&str, &str, (f64, f64)); 3] = [
+    ("Word Spacing", "wordSpace", (0.0, 1000.0)),
+    ("Letter Spacing", "letterSpace", (-100.0, 500.0)),
+    ("Glyph Scaling", "glyphScale", (50.0, 200.0)),
+];
+
+/// Checks the edited spacing values: each within its range, and minimum ≤ desired ≤ maximum
+/// (values left mixed are not compared).
+fn check_justification(d: &Dialog, prefix: &str, current: &Value) -> Result<(), String> {
+    for (label, stem, (lo, hi)) in JUSTIFY_ROWS {
+        let mut edited = false;
+        let mut known = Vec::new();
+        for suffix in ["Min", "Desired", "Max"] {
+            let key = format!("{stem}{suffix}");
+            let v = match d.fields.get(&format!("{prefix}{key}")) {
+                Some(v) => {
+                    edited = true;
+                    let pct =
+                        v.as_f64().map(|x| x * 100.0).filter(|x| x.is_finite()).ok_or_else(|| format!("Justification: {label} is not a number"))?;
+                    // The fields show whole percents; compare what was shown.
+                    if pct.round() < lo || pct.round() > hi {
+                        return Err(format!("Justification: {label} must be between {lo}% and {hi}%"));
+                    }
+                    Some(pct)
+                }
+                None => current[key.as_str()].as_f64().map(|x| x * 100.0),
+            };
+            known.extend(v);
+        }
+        if edited && known.windows(2).any(|w| w[0] > w[1] + 1e-9) {
+            return Err(format!("Justification: {label} needs Minimum ≤ Desired ≤ Maximum"));
+        }
+    }
+    Ok(())
+}
+
+/// The Justification controls (the Justification dialog, and the Paragraph Style Options section).
+/// `current` holds the resolved paragraph attributes, `null` where the selected paragraphs differ
+/// (the field shows empty); each edit is stored as `{prefix}{attr}`, so OK changes only the fields
+/// edited.
+fn justification(lang: &str, ui: &mut egui::Ui, d: &mut Dialog, prefix: &str, current: &Value) {
+    let cur = |d: &Dialog, k: &str| d.fields.get(&format!("{prefix}{k}")).cloned().unwrap_or_else(|| current[k].clone());
+    egui::Grid::new("psj").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
+        ui.label("");
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Minimum"));
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Desired"));
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Maximum"));
+        ui.end_row();
+        for (label, base, _) in JUSTIFY_ROWS {
+            crate::rtl::label(ui, crate::i18n::tr(lang, &format!("{label}:")));
+            for suffix in ["Min", "Desired", "Max"] {
+                let key = format!("{base}{suffix}");
+                let v = cur(d, &key).as_f64().map(|x| x * 100.0);
+                if let Some(n) = ui.scope(|ui| crate::widgets::number(ui, &format!("ps{key}"), v, "%", 60.0, 0)).inner {
+                    d.fields.insert(format!("{prefix}{key}"), json!(n / 100.0));
+                }
+            }
+            ui.end_row();
+        }
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Composer:"));
+        let composer = cur(d, "composer");
+        if ui.selectable_label(composer.as_str() == Some("paragraph"), crate::rtl::widget(ui, crate::i18n::tr(lang, "Paragraph Composer"))).clicked()
+        {
+            d.fields.insert(format!("{prefix}composer"), json!("paragraph"));
+        }
+        if ui
+            .selectable_label(composer.as_str() == Some("singleLine"), crate::rtl::widget(ui, crate::i18n::tr(lang, "Single-line Composer")))
+            .clicked()
+        {
+            d.fields.insert(format!("{prefix}composer"), json!("singleLine"));
+        }
+        ui.end_row();
+        for (label, key, text, default) in [
+            ("Insert Kashidas:", "kashidas", "In justified Arabic text", true),
+            ("Korean Line Breaks:", "koreanCharBreaks", "Between syllables (not only at spaces)", false),
+        ] {
+            crate::rtl::label(ui, crate::i18n::tr(lang, label));
+            let v = cur(d, key);
+            let mut on = v.as_bool().unwrap_or(default);
+            if ui.add(egui::Checkbox::new(&mut on, crate::rtl::widget(ui, crate::i18n::tr(lang, text))).indeterminate(v.is_null())).changed() {
+                d.fields.insert(format!("{prefix}{key}"), json!(on));
+            }
+            ui.end_row();
+        }
+    });
+    if let Some(e) = d.fields.get("justifyError").and_then(Value::as_str) {
+        ui.add_space(6.0);
+        crate::rtl::label(ui, egui::RichText::new(e).color(ui.visuals().error_fg_color));
+    }
 }
 
 /// The rule fields edited in the dialog, as `type.para` attrs: `{ruleAbove?: {…}, ruleBelow?: {…}}`.
@@ -4068,6 +4165,104 @@ mod tests {
         assert_eq!(app.run("type.selectionAttrs", json!({})).unwrap()["para"]["ruleBelow"], want, "the paragraph follows its style");
         app.run("edit.undo", json!({})).unwrap();
         assert_eq!(resolved(&app)["ruleBelow"], rule);
+    }
+
+    /// A frame with two paragraphs of [Basic Paragraph]; the first has a local Word Spacing minimum.
+    fn two_paragraphs() -> (DesignApp, Value) {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let r = app.run("frame.create", json!({"rect": [72, 72, 300, 400], "content": "text", "text": "One\nTwo"})).unwrap();
+        app.run("text.select", json!({"story": r["story"], "anchor": 0, "focus": 0})).unwrap();
+        app.run("type.para", json!({"attrs": {"wordSpaceMin": 0.7}})).unwrap();
+        (app, r["story"].clone())
+    }
+
+    /// The resolved paragraph attribute `key` of the paragraph at byte `at`.
+    fn para_attr(app: &mut DesignApp, story: &Value, at: usize, key: &str) -> Value {
+        app.run("text.select", json!({"story": story, "anchor": at, "focus": at})).unwrap();
+        app.run("type.selectionAttrs", json!({})).unwrap()["para"][key].clone()
+    }
+
+    #[test]
+    fn justification_dialog_applies_to_a_local_paragraph_and_cancel_changes_nothing() {
+        let (mut app, story) = two_paragraphs();
+        let ctx = egui::Context::default();
+        assert!(crate::menus::menu_enabled(&app, "app.justificationDialog"));
+        app.run("app.justificationDialog", json!({})).unwrap();
+        draw(&mut app, &ctx);
+        let d = app.ui.dialog.clone().unwrap();
+        assert_eq!(d.id, "justification");
+        assert_eq!(d.fields["current"]["wordSpaceMin"], 0.7);
+        assert_eq!(d.fields["current"]["wordSpaceDesired"], 1.0);
+        app.ui.dialog.as_mut().unwrap().fields.insert("wordSpaceDesired".into(), json!(1.1));
+        draw(&mut app, &ctx);
+        let before = undo_steps(&app);
+        confirm(&mut app).unwrap();
+        assert_eq!(undo_steps(&app), before + 1, "one undo step");
+        assert_eq!(para_attr(&mut app, &story, 0, "wordSpaceDesired"), 1.1);
+        assert_eq!(para_attr(&mut app, &story, 0, "wordSpaceMin"), 0.7, "unedited fields stay");
+        assert_eq!(para_attr(&mut app, &story, 4, "wordSpaceDesired"), 1.0, "only the selected paragraph");
+        let style = app.session.doc().unwrap().doc.styles.resolve_para_style(designcraft_doc::story::BASIC_PARAGRAPH).0.word_space_desired;
+        assert_eq!(style, 1.0, "the paragraph style keeps its value");
+
+        // Cancel (Escape) leaves the paragraph alone.
+        app.run("text.select", json!({"story": story, "anchor": 0, "focus": 0})).unwrap();
+        app.run("app.justificationDialog", json!({})).unwrap();
+        app.ui.dialog.as_mut().unwrap().fields.insert("wordSpaceDesired".into(), json!(1.2));
+        let before = undo_steps(&app);
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+            events: vec![escape],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.logic(&ui.ctx().clone());
+            app.ui(ui);
+        });
+        out.textures_delta.clear();
+        assert!(app.ui.dialog.is_none(), "cancelled");
+        assert_eq!(undo_steps(&app), before);
+        assert_eq!(para_attr(&mut app, &story, 0, "wordSpaceDesired"), 1.1);
+
+        app.run("edit.deselectAll", json!({})).unwrap();
+        assert!(!crate::menus::menu_enabled(&app, "app.justificationDialog"), "nothing to justify");
+        assert!(app.run("app.justificationDialog", json!({})).is_err());
+    }
+
+    #[test]
+    fn justification_dialog_leaves_mixed_fields_alone_and_refuses_bad_values() {
+        let (mut app, story) = two_paragraphs();
+        let ctx = egui::Context::default();
+        app.run("text.select", json!({"story": story, "anchor": 0, "focus": 7})).unwrap();
+        app.run("app.justificationDialog", json!({})).unwrap();
+        draw(&mut app, &ctx);
+        let d = app.ui.dialog.clone().unwrap();
+        assert_eq!(d.fields["current"]["wordSpaceMin"], Value::Null, "mixed shows empty");
+        assert_eq!(d.fields["current"]["wordSpaceMax"], 1.33);
+
+        // Out of range, and minimum above desired: an error, the dialog stays open, nothing changes.
+        let before = undo_steps(&app);
+        for (key, v) in [("wordSpaceMax", 20.0), ("glyphScaleMin", 0.2), ("letterSpaceDesired", f64::NAN)] {
+            app.ui.dialog = Some(d.clone());
+            app.ui.dialog.as_mut().unwrap().fields.insert(key.into(), json!(v));
+            assert!(confirm(&mut app).is_err(), "{key} = {v}");
+            assert!(app.ui.dialog.as_ref().is_some_and(|d| d.fields.contains_key("justifyError")), "{key}: the dialog shows why");
+        }
+        app.ui.dialog = Some(d.clone());
+        app.ui.dialog.as_mut().unwrap().fields.insert("letterSpaceMin".into(), json!(0.1));
+        assert!(confirm(&mut app).is_err(), "letter spacing minimum above desired");
+        draw(&mut app, &ctx);
+        assert_eq!(undo_steps(&app), before);
+
+        app.ui.dialog = Some(d);
+        app.ui.dialog.as_mut().unwrap().fields.insert("wordSpaceMax".into(), json!(1.5));
+        confirm(&mut app).unwrap();
+        assert_eq!(undo_steps(&app), before + 1);
+        for (at, min) in [(0, 0.7), (4, 0.8)] {
+            assert_eq!(para_attr(&mut app, &story, at, "wordSpaceMax"), 1.5);
+            assert_eq!(para_attr(&mut app, &story, at, "wordSpaceMin"), min, "each paragraph keeps its own minimum");
+        }
     }
 
     fn command_app(id: &str, fields: Value) -> DesignApp {

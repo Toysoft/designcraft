@@ -253,7 +253,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_text_or_frames,
             break_link
         ),
-        cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection", has_doc, selection_attrs),
+        cmd!(
+            query "type.selectionAttrs",
+            "Selection Attributes",
+            [],
+            None,
+            "{mixed?: bool} → resolved character/paragraph attributes at the text selection; with mixed, paraMixed lists the paragraph attributes that differ across the selected paragraphs",
+            has_doc,
+            selection_attrs
+        ),
     ]
 }
 
@@ -957,7 +965,7 @@ fn open_type(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"features": list, "figures": otf::figures(&list)}))
 }
 
-fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
+fn selection_attrs(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let targets = format_targets(s);
     let Some(Target { story: sid, cell, range: r }) = targets.first().cloned() else { return Ok(Value::Null) };
@@ -967,8 +975,31 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let (pp, base) = st.doc.styles.resolve_para(pf);
     let cf = if r.is_empty() { story.char_format_at(r.start) } else { story.format_after(r.start) };
     let cp = st.doc.styles.resolve_char(&base, cf);
-    Ok(json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
-        "paraOverrides": pf.para.count(), "charOverrides": cf.over.count()}))
+    let mut out = json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
+        "paraOverrides": pf.para.count(), "charOverrides": cf.over.count()});
+    if bool_or(p, "mixed", false) {
+        out["paraMixed"] = json!(mixed_para_attrs(&st.doc, &targets));
+    }
+    Ok(out)
+}
+
+/// The paragraph attributes whose resolved values differ across the paragraphs of `targets`.
+fn mixed_para_attrs(doc: &designcraft_doc::Document, targets: &[Target]) -> Vec<String> {
+    let mut first: Option<serde_json::Map<String, Value>> = None;
+    let mut mixed = std::collections::BTreeSet::new();
+    for t in targets {
+        let Some(story) = doc.text_story(t.story, t.cell) else { continue };
+        let a = story.para_at(t.range.start);
+        let b = story.para_at(t.range.end.max(t.range.start));
+        for pf in story.paras.get(a..=b).unwrap_or(&[]) {
+            let Ok(Value::Object(v)) = serde_json::to_value(doc.styles.resolve_para(pf).0) else { continue };
+            match &first {
+                None => first = Some(v),
+                Some(f) => mixed.extend(v.into_iter().filter(|(k, x)| f.get(k) != Some(x)).map(|(k, _)| k)),
+            }
+        }
+    }
+    mixed.into_iter().collect()
 }
 
 /// Our own filler text (not Adobe's).

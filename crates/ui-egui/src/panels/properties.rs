@@ -1416,6 +1416,10 @@ pub fn paragraph_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
                     let _ = app.run("app.paragraphRulesDialog", json!({}));
                     ui.close();
                 }
+                if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Justification…"))).clicked() {
+                    let _ = app.run("app.justificationDialog", json!({}));
+                    ui.close();
+                }
             });
         });
     });

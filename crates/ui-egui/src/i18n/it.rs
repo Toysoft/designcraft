@@ -1489,6 +1489,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Strikethrough On", "Barrato attivo"),
     ("Edit \"{name}\"…", "Modifica \"{name}\"…"),
     ("Paragraph Rules…", "Filetti paragrafo…"),
+    ("Justification…", "Giustificazione…"),
     ("Paragraph Rules", "Filetti paragrafo"),
     ("Rule Below", "Filetto sotto"),
     ("Tint:", "Tinta:"),
