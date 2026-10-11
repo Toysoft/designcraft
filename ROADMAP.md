@@ -1,5 +1,7 @@
 # DesignCraft roadmap
 
+Interface themes support persistent favorites, hover stars in the picker, and light/dark favorite shortcuts on the appearance button context menu.
+
 - FID1: PDF export normalizes mixed emitted gradient color spaces to RGB with an explicit warning; homogeneous device-space gradients retain their components. Linear/radial, midpoint, archival and print policies have synthetic regression coverage.
 
 - AR1.1: Kashida justification tests verify space fallback without Tatweel fonts using an isolated font database, while retaining elongation assertions when fonts support it.

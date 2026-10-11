@@ -1,5 +1,8 @@
 //! Original Arabic interface translations, stored in logical Unicode order.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Appearance Settings…", "إعدادات المظهر…"),
+    ("Add to favorites", "إضافة إلى المفضلة"),
+    ("Remove from favorites", "إزالة من المفضلة"),
     ("File", "ملف"),
     ("Edit", "تحرير"),
     ("Layout", "تخطيط"),

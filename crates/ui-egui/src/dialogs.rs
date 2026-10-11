@@ -2019,6 +2019,9 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             if let Some(v) = d.n("uiScale") {
                 app.run("window.uiScale", json!({"scale": v / 100.0}))?;
             }
+            if let Some(value) = d.fields.get("themeFavorites") {
+                app.ui.theme_favorites = crate::theme_favorites::Favorites::from_value(value);
+            }
             if d.fields.contains_key("appearanceMode") {
                 app.run(
                     "window.appearanceMode",

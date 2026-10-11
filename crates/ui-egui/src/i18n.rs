@@ -25,6 +25,9 @@ pub const LANGUAGES: &[(&str, &str)] = &[
 
 /// English → [German, French, Spanish, Japanese, Simplified Chinese].
 const TABLE: &[(&str, [&str; 5])] = &[
+    ("Appearance Settings…", ["Erscheinungsbild-Einstellungen…", "Réglages d’apparence…", "Ajustes de apariencia…", "外観設定…", "外观设置…"]),
+    ("Add to favorites", ["Zu Favoriten hinzufügen", "Ajouter aux favoris", "Añadir a favoritos", "お気に入りに追加", "添加到收藏"]),
+    ("Remove from favorites", ["Aus Favoriten entfernen", "Retirer des favoris", "Quitar de favoritos", "お気に入りから削除", "从收藏中移除"]),
     // Menus.
     ("File", ["Datei", "Fichier", "Archivo", "ファイル", "文件"]),
     ("Edit", ["Bearbeiten", "Édition", "Edición", "編集", "编辑"]),

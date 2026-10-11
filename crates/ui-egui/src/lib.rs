@@ -23,6 +23,7 @@ mod rtl;
 pub mod story_editor;
 pub mod taskbar;
 pub mod theme;
+mod theme_favorites;
 pub mod toolbar;
 pub mod widgets;
 
@@ -163,6 +164,7 @@ impl Default for PdfExportSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
+    pub theme_favorites: crate::theme_favorites::Favorites,
     /// The interface theme on screen, resolved from the appearance mode and the system (kept as
     /// the single-theme setting older versions saved).
     pub brightness: theme::Brightness,
@@ -285,6 +287,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            theme_favorites: Default::default(),
             brightness: theme::Brightness::MediumDark,
             appearance_mode: theme::AppearanceMode::Dark,
             dark_theme: theme::DarkTheme::MediumDark,

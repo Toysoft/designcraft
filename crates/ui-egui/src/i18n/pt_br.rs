@@ -1,6 +1,9 @@
 //! Original Brazilian Portuguese interface translations, written from the English source
 //! using ordinary Brazilian Portuguese computing vocabulary.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Appearance Settings…", "Configurações de aparência…"),
+    ("Add to favorites", "Adicionar aos favoritos"),
+    ("Remove from favorites", "Remover dos favoritos"),
     ("File", "Arquivo"),
     ("Edit", "Editar"),
     ("Layout", "Layout"),

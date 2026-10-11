@@ -69,3 +69,5 @@ Generated-in-code art is original and has no file to list: the UI icon set (`cra
 | `packaging/macos/dmg/background.tiff` | @XusBadia | Rendered from `packaging/macos/dmg/background.svg` by `packaging/macos/dmg/generate.py` | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | 1x + 2x HiDPI TIFF for the macOS DMG window; includes the app icon (see its row) and LittleCMS's built-in sRGB profile ("No copyright, use freely") |
 
 The miniature page-layout theme previews (`crates/ui-egui/src/appearance.rs`) are original procedural artwork under MIT OR Apache-2.0.
+
+The favorite stars in `crates/ui-egui/src/theme_favorites.rs` are original procedural artwork under MIT OR Apache-2.0. The appearance settings and favorite action translations were adapted from [PhotoCraft #2445](https://github.com/storytold/photocraft/pull/2445), by PhotoCraft contributors, under MIT OR Apache-2.0.

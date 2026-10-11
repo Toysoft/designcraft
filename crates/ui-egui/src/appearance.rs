@@ -137,13 +137,41 @@ pub fn header_button(app: &mut DesignApp, ui: &mut egui::Ui) {
     };
     let lang = app.ui.language.clone();
     let tip = format!("{}: {}", crate::i18n::tr(&lang, "Appearance Mode"), crate::i18n::tr(&lang, mode.label()));
-    if crate::icons::button(ui, icon, 22.0, false, &tip).clicked() {
+    let response = crate::icons::button(ui, icon, 22.0, false, &tip);
+    if response.clicked() {
         let _ = app.run("window.nextAppearanceMode", json!({}));
+    }
+    response.context_menu(|ui| appearance_context_menu(app, ui));
+}
+
+fn appearance_context_menu(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let lang = app.ui.language.clone();
+    if ui.button(crate::i18n::tr(&lang, "Appearance Settings…")).clicked() {
+        let _ = app.run("app.preferences", json!({}));
+        if let Some(dialog) = app.ui.dialog.as_mut() {
+            dialog.fields.insert("section".into(), json!("interface"));
+        }
+        ui.close();
+    }
+    for light in [true, false] {
+        let favorites: Vec<_> = app.ui.theme_favorites.themes(light).collect();
+        if favorites.is_empty() {
+            continue;
+        }
+        ui.separator();
+        ui.label(crate::i18n::tr(&lang, if light { "Light Theme" } else { "Dark Theme" }));
+        for b in favorites {
+            if ui.selectable_label(app.ui.brightness == b, crate::i18n::tr(&lang, b.label())).clicked() {
+                let _ = app.run("window.brightness", json!({"brightness": b.id()}));
+                ui.close();
+            }
+        }
     }
 }
 
 /// Fields of the Preferences dialog for the current settings.
 pub fn dialog_fields(ui: &UiState, f: &mut Value) {
+    f["themeFavorites"] = json!(ui.theme_favorites);
     f["appearanceMode"] = json!(ui.appearance_mode.id());
     f["darkTheme"] = json!(ui.dark_theme.brightness().id());
     f["lightTheme"] = json!(ui.light_theme.brightness().id());
@@ -213,9 +241,26 @@ fn theme_card(
                 paint_preview(ui.painter(), r, current);
                 ui.add_space(4.0);
                 for b in options {
-                    if ui.radio(*b == current, crate::rtl::widget(ui, crate::i18n::tr(lang, b.label()))).clicked() {
-                        d.fields.insert(key.into(), json!(b.id()));
-                    }
+                    ui.horizontal(|ui| {
+                        let row = ui.radio(*b == current, crate::rtl::widget(ui, crate::i18n::tr(lang, b.label())));
+                        if row.clicked() {
+                            d.fields.insert(key.into(), json!(b.id()));
+                        }
+                        let mut favorites = crate::theme_favorites::Favorites::from_value(d.fields.get("themeFavorites").unwrap_or(&Value::Null));
+                        if crate::theme_favorites::star(
+                            ui,
+                            favorites.contains(*b),
+                            row.hovered(),
+                            crate::i18n::tr(lang, "Add to favorites"),
+                            crate::i18n::tr(lang, "Remove from favorites"),
+                            crate::i18n::tr(lang, b.label()),
+                        )
+                        .clicked()
+                        {
+                            favorites.toggle(*b);
+                            d.fields.insert("themeFavorites".into(), json!(favorites));
+                        }
+                    });
                 }
             });
         });
@@ -434,6 +479,59 @@ mod tests {
 
     fn app() -> DesignApp {
         DesignApp::new(designcraft_engine::Session::new(), crate::Services::default())
+    }
+
+    #[test]
+    fn favorites_stay_in_dialog_until_confirmed() {
+        let mut a = app();
+        a.run("app.preferences", json!({})).unwrap();
+        a.ui.dialog.as_mut().unwrap().fields.insert("themeFavorites".into(), json!(["light", "light", "unknown"]));
+        assert!(!a.ui.theme_favorites.contains(Brightness::Light));
+        crate::dialogs::confirm(&mut a).unwrap();
+        assert_eq!(serde_json::to_value(&a.ui.theme_favorites).unwrap(), json!(["light"]));
+    }
+
+    #[test]
+    fn favorite_context_menu_selects_explicit_theme_and_preserves_other_family() {
+        let mut a = app();
+        a.ui.theme_favorites = crate::theme_favorites::Favorites::from_value(&json!(["light", "dark"]));
+        a.ui.dark_theme = DarkTheme::HighContrast;
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| appearance_context_menu(&mut a, ui));
+        output.textures_delta.clear();
+        let texts: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.pos + text.galley.size() * 0.5)),
+                _ => None,
+            })
+            .collect();
+        let settings = texts.iter().position(|(s, _)| s == "Appearance Settings…").unwrap();
+        let light = texts.iter().position(|(s, _)| s == "Light Theme").unwrap();
+        let dark = texts.iter().position(|(s, _)| s == "Dark Theme").unwrap();
+        assert!(settings < light && light < dark);
+        let pos = texts.iter().find(|(s, _)| s == "Light").unwrap().1;
+        for pressed in [true, false] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+                    ],
+                    ..Default::default()
+                },
+                |ui| appearance_context_menu(&mut a, ui),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(a.ui.appearance_mode, AppearanceMode::Light);
+        assert_eq!(a.ui.light_theme, LightTheme::Light);
+        assert_eq!(a.ui.dark_theme, DarkTheme::HighContrast);
+        let saved = serde_json::to_vec(&a.ui).unwrap();
+        let restored: UiState = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.theme_favorites.contains(Brightness::Light));
+        assert!(restored.theme_favorites.contains(Brightness::Dark));
     }
 
     #[test]

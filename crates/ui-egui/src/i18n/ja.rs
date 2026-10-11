@@ -3,6 +3,9 @@
 //! Portuguese tables has a row here; the menu titles and panel names that were already Japanese in the
 //! shared table are carried over unchanged.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Appearance Settings…", "外観設定…"),
+    ("Add to favorites", "お気に入りに追加"),
+    ("Remove from favorites", "お気に入りから削除"),
     ("File", "ファイル"),
     ("Edit", "編集"),
     ("Layout", "レイアウト"),

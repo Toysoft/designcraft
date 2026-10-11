@@ -1,6 +1,9 @@
 //! Original Italian interface translations, written from the English source
 //! using ordinary Italian desktop-publishing vocabulary.
 pub(super) const TABLE: &[(&str, &str)] = &[
+    ("Appearance Settings…", "Impostazioni aspetto…"),
+    ("Add to favorites", "Aggiungi ai preferiti"),
+    ("Remove from favorites", "Rimuovi dai preferiti"),
     ("File", "File"),
     ("Edit", "Modifica"),
     ("Layout", "Layout"),
