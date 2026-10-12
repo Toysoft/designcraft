@@ -135,7 +135,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Color Swatch…",
             [],
             None,
-            "{name?, color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b], spot?: bool}",
+            "{name?, color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255)|{model: rgb|cmyk|gray, …}(0..1), spot?: bool}",
             has_doc,
             create_swatch
         ),
@@ -180,7 +180,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Color",
             [],
             None,
-            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection",
+            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255)|{model: rgb|cmyk|gray, r,g,b|c,m,y,k|k}(0..1), target?: fill|stroke, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection",
             super::has_selection,
             apply_color
         ),
@@ -720,6 +720,8 @@ pub fn parse_color(v: &Value) -> Option<designcraft_color::Color> {
     use designcraft_color::Color;
     match v {
         Value::String(s) => Color::from_hex(s),
+        // `{model, …}` is the colour's own form (as `color.convert` takes it): fractions, never guessed.
+        Value::Object(o) if o.contains_key("model") => model_color(v),
         // One scale per colour, not per component: {c: 0.7, y: 12.2} is C 0.7 %, Y 12.2 %. Only a colour whose
         // components are all within 0..1 is read as fractions (the older form).
         Value::Array(a) if a.len() >= 3 => {
@@ -734,6 +736,20 @@ pub fn parse_color(v: &Value) -> Option<designcraft_color::Color> {
             Some(Color::cmyk((v[0] / scale) as f32, (v[1] / scale) as f32, (v[2] / scale) as f32, (v[3] / scale) as f32))
         }
         _ => None,
+    }
+}
+
+/// `{model: rgb|cmyk|gray, …}` with every component in 0..=1; anything else is not a colour.
+fn model_color(v: &Value) -> Option<designcraft_color::Color> {
+    use designcraft_color::Color;
+    let color: Color = serde_json::from_value(v.clone()).ok()?;
+    // A float's last bit (100.0 / 100.0 ≠ 1.0 after an f32 round trip) is not out of range.
+    let unit = |x: f32| x.is_finite() && (-1e-4..=1.0 + 1e-4).contains(&x);
+    let q = |x: f32| x.clamp(0.0, 1.0);
+    match color {
+        Color::Rgb { r, g, b } => [r, g, b].into_iter().all(unit).then(|| Color::rgb(q(r), q(g), q(b))),
+        Color::Cmyk { c, m, y, k } => [c, m, y, k].into_iter().all(unit).then(|| Color::cmyk(q(c), q(m), q(y), q(k))),
+        Color::Gray { k } => unit(k).then_some(Color::Gray { k: q(k) }),
     }
 }
 
@@ -957,16 +973,28 @@ fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
     let stroke = str_param(p, "target") == Some("stroke");
     let ids = super::targets(s, p)?;
     s.edit(|d, _| {
-        // Reuse a swatch holding exactly this colour, else add an unnamed one.
+        // Reuse a swatch holding this colour to the precision its name shows (whole CMYK percents,
+        // 0-255 RGB), else add an unnamed one: values a fraction of a percent apart would otherwise
+        // add hidden "C=0 M=50 Y=100 K=0 2" twins.
+        let shown = value_name(color);
+        let process = |w: &&Swatch| match &w.value {
+            SwatchValue::Color { color: c, color_type: designcraft_color::ColorType::Process } => Some(*c),
+            _ => None,
+        };
         let existing = d
             .swatches
             .iter()
-            .find(|w| matches!(&w.value, SwatchValue::Color { color: c, color_type: designcraft_color::ColorType::Process } if *c == color))
+            .find(|w| process(w) == Some(color))
+            .or_else(|| {
+                d.swatches
+                    .iter()
+                    .find(|w| process(w).is_some_and(|c| std::mem::discriminant(&c) == std::mem::discriminant(&color) && value_name(c) == shown))
+            })
             .map(|w| w.name.clone());
         let name = match existing {
             Some(n) => n,
             None => {
-                let name = Styles::unique_name(|n| d.swatch(n).is_some(), &value_name(color));
+                let name = Styles::unique_name(|n| d.swatch(n).is_some(), &shown);
                 d.swatches.push(Swatch {
                     name: name.clone(),
                     value: SwatchValue::Color { color, color_type: designcraft_color::ColorType::Process },
@@ -1213,6 +1241,51 @@ mod color_tests {
         // RGB arrays follow the same rule: [1, 128, 255] is 0..255.
         let Some(Color::Rgb { r, g, b }) = parse_color(&json!([1, 128, 255])) else { panic!("not RGB") };
         assert!((r - 1.0 / 255.0).abs() < 1e-6 && (g - 128.0 / 255.0).abs() < 1e-6 && (b - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_colour_with_a_model_is_read_as_fractions_without_guessing() {
+        use designcraft_color::Color;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        let fill = |s: &Session| {
+            let d = &s.doc().unwrap().doc;
+            d.resolve_color(&d.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch, 1.0).unwrap()
+        };
+        // M 1 % from the Color panel: not M 100 % (magenta), though every component is within 0..1.
+        s.execute("object.color", &json!({"color": {"model": "cmyk", "c": 0, "m": 0.01, "y": 0, "k": 0}})).unwrap();
+        let Color::Cmyk { c, m, y, k } = fill(&s) else { panic!("not CMYK") };
+        assert!(c == 0.0 && (m - 0.01).abs() < 1e-6 && y == 0.0 && k == 0.0, "got {c} {m} {y} {k}");
+        // R 1 of 255 is a near black, not pure red.
+        s.execute("object.color", &json!({"color": {"model": "rgb", "r": 1.0 / 255.0, "g": 0, "b": 0}})).unwrap();
+        let Color::Rgb { r, g, b } = fill(&s) else { panic!("not RGB") };
+        assert!((r - 1.0 / 255.0).abs() < 1e-6 && g == 0.0 && b == 0.0, "got {r} {g} {b}");
+        // Out of range or not a model: refused rather than guessed.
+        assert!(s.execute("object.color", &json!({"color": {"model": "cmyk", "c": 0, "m": 50, "y": 0, "k": 0}})).is_err());
+        assert!(s.execute("object.color", &json!({"color": {"model": "hsb", "h": 0, "s": 0, "b": 0}})).is_err());
+    }
+
+    #[test]
+    fn colours_that_round_to_the_same_name_share_one_swatch() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        let n = |s: &Session| s.doc().unwrap().doc.swatches.len();
+        let first = s.execute("object.color", &json!({"color": {"model": "cmyk", "c": 0.1, "m": 0.5, "y": 1, "k": 0}})).unwrap();
+        let before = n(&s);
+        for m in [0.501, 0.499, 0.5041] {
+            let r = s.execute("object.color", &json!({"color": {"model": "cmyk", "c": 0.1, "m": m, "y": 1, "k": 0}})).unwrap();
+            assert_eq!(r["swatch"], first["swatch"], "M {m}");
+        }
+        s.execute("object.color", &json!({"color": {"model": "rgb", "r": 0.5, "g": 0.25, "b": 0}})).unwrap();
+        s.execute("object.color", &json!({"color": {"model": "rgb", "r": 0.5005, "g": 0.25, "b": 0}})).unwrap();
+        assert_eq!(n(&s), before + 1, "no hidden twins for values a fraction of a step apart");
+        // A whole percent apart is a different colour.
+        let r = s.execute("object.color", &json!({"color": {"model": "cmyk", "c": 0.1, "m": 0.51, "y": 1, "k": 0}})).unwrap();
+        assert_eq!(r["swatch"], "C=10 M=51 Y=100 K=0");
     }
 
     #[test]

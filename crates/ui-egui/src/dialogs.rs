@@ -1155,7 +1155,8 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             None => crate::i18n::tr(&app.ui.language, "Dialog"),
         },
     };
-    egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
+    // No dimmed backdrop: the page behind a dialog is what its settings and colours are judged against.
+    egui::Modal::new(egui::Id::new("dialog")).backdrop_color(egui::Color32::TRANSPARENT).show(ctx, |ui| {
         let frame_margin = egui::Frame::popup(ui.style()).total_margin().sum();
         let available = (ctx.content_rect().size() - frame_margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
         let preferred_width: f32 = match d.id.as_str() {
@@ -1899,9 +1900,17 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             }
             r
         }
+        // Nothing edited: OK leaves the fill or stroke as it was (its swatch and tint).
+        "colorPicker" if !d.b("edited") => Ok(Value::Null),
         "colorPicker" => {
-            let hex = d.s("hex");
-            app.run("object.color", json!({"color": hex, "target": d.s("target")}))
+            let color = if d.s("model") == "cmyk" {
+                let [c, m, y, k] = nums::<4>(&d, "cmyk").ok_or("no colour")?.map(|v| v / 100.0);
+                json!({"model": "cmyk", "c": c, "m": m, "y": y, "k": k})
+            } else {
+                let [r, g, b] = nums::<3>(&d, "rgb").ok_or("no colour")?.map(|v| v / 255.0);
+                json!({"model": "rgb", "r": r, "g": g, "b": b})
+            };
+            app.run("object.color", json!({"color": color, "target": d.s("target")}))
         }
         "layerOptions" => {
             let hidden: Vec<Value> = d.fields.get("layers").and_then(Value::as_array).map(|a| a.iter().filter(|l| l["visible"] == false).map(|l| l["name"].clone()).collect()).unwrap_or_default();
@@ -3645,45 +3654,116 @@ fn insert_xref(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     }
 }
 
-/// Color Picker: saturation/brightness field and hue slider, with RGB, CMYK and hex fields.
+/// `N` numbers from a dialog field holding a JSON array.
+fn nums<const N: usize>(d: &Dialog, k: &str) -> Option<[f64; N]> {
+    let a = d.fields.get(k)?.as_array()?;
+    if a.len() != N {
+        return None;
+    }
+    let mut out = [0.0; N];
+    for (o, v) in out.iter_mut().zip(a) {
+        *o = v.as_f64().filter(|x| x.is_finite())?;
+    }
+    Some(out)
+}
+
+/// What changed the Color Picker's colour this frame.
+#[derive(Clone, Copy, PartialEq)]
+enum ColorEdit {
+    None,
+    /// The saturation/brightness field, the hue slider or the hex field: keeps the colour's model.
+    Picked,
+    /// Typed R/G/B values: the colour becomes RGB.
+    Rgb,
+    /// Typed C/M/Y/K values: the colour becomes CMYK.
+    Cmyk,
+}
+
+/// Color Picker: saturation/brightness field and hue slider, with R/G/B, C/M/Y/K and hex fields.
+///
+/// `rgb` (0-255) and `cmyk` (percent) hold the values as typed, so a field being edited is never
+/// rebuilt from the colour; the hex field keeps its text in `hexEdit` while it has focus and shows
+/// the colour again when focus leaves. `model` is what OK applies: picking keeps a CMYK colour CMYK
+/// (converted through the CMYK working space); typing R/G/B or C/M/Y/K values chooses that model.
 fn color_picker(ui: &mut egui::Ui, d: &mut Dialog) {
-    let hex = d.s("hex");
-    let mut c = designcraft_color::Color::from_hex(&hex).map(|c| c.to_rgb()).map_or(egui::Color32::BLACK, |[r, g, b]| {
-        egui::Color32::from_rgb((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8)
-    });
-    let before = c;
+    use designcraft_color::Color;
+    let to8 = |v: f64| v.clamp(0.0, 255.0).round() as u8;
+    let display_rgb = |c: Color| c.to_rgb().map(|v| (f64::from(v) * 255.0).clamp(0.0, 255.0).round());
+    let cmyk_of = |rgb: [f64; 3]| {
+        let c = Color::rgb((rgb[0] / 255.0) as f32, (rgb[1] / 255.0) as f32, (rgb[2] / 255.0) as f32);
+        c.to_cmyk_managed(designcraft_color::cms::active_settings().intent).map(|v| f64::from(v) * 100.0)
+    };
+    let hex_rgb = |s: &str| match Color::from_hex(s) {
+        Some(Color::Rgb { r, g, b }) => Some([r, g, b].map(|v| (f64::from(v) * 255.0).round())),
+        _ => None,
+    };
+    let mut rgb = nums::<3>(d, "rgb").unwrap_or_else(|| hex_rgb(&d.s("hex")).unwrap_or([0.0; 3]));
+    let mut cmyk = nums::<4>(d, "cmyk").unwrap_or_else(|| cmyk_of(rgb));
+    let mut model = if d.s("model") == "cmyk" || (!d.fields.contains_key("model") && d.fields.contains_key("cmyk")) { "cmyk" } else { "rgb" };
+    let mut edit = ColorEdit::None;
+    let hex_id = egui::Id::new("color_picker_hex");
     ui.horizontal_top(|ui| {
-        egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque);
+        let mut c = egui::Color32::from_rgb(to8(rgb[0]), to8(rgb[1]), to8(rgb[2]));
+        let shown = c;
+        if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) && c != shown {
+            rgb = [c.r(), c.g(), c.b()].map(f64::from);
+            edit = ColorEdit::Picked;
+        }
         ui.vertical(|ui| {
-            let mut rgb = [c.r() as f32, c.g() as f32, c.b() as f32];
-            egui::Grid::new("cp_rgb").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
-                for (k, l) in ["R", "G", "B"].iter().enumerate() {
-                    ui.label(*l);
-                    ui.add(egui::DragValue::new(&mut rgb[k]).range(0.0..=255.0));
+            egui::Grid::new("cp_values").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
+                let mut rgb_rows = rgb.iter_mut().zip(["R", "G", "B"]);
+                for (v, l) in cmyk.iter_mut().zip(["C", "M", "Y", "K"]) {
+                    if let Some((rv, rl)) = rgb_rows.next() {
+                        ui.label(rl);
+                        if ui.add(egui::DragValue::new(rv).range(0.0..=255.0).max_decimals(1)).changed() {
+                            edit = ColorEdit::Rgb;
+                        }
+                    } else {
+                        ui.label("");
+                        ui.label("");
+                    }
+                    ui.label(l);
+                    if ui.add(egui::DragValue::new(v).range(0.0..=100.0).max_decimals(1).suffix("%")).changed() {
+                        edit = ColorEdit::Cmyk;
+                    }
                     ui.end_row();
                 }
             });
-            c = egui::Color32::from_rgb(rgb[0] as u8, rgb[1] as u8, rgb[2] as u8);
-            let col = designcraft_color::Color::rgb8(c.r(), c.g(), c.b());
-            let [cc, m, y, k] = col.to_cmyk();
-            ui.add_space(6.0);
-            ui.label(format!("C {:.0}%  M {:.0}%  Y {:.0}%  K {:.0}%", cc * 100.0, m * 100.0, y * 100.0, k * 100.0));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("#");
-                let mut h = format!("{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
-                if ui.add(egui::TextEdit::singleline(&mut h).desired_width(70.0)).changed()
-                    && let Some(n) = designcraft_color::Color::from_hex(&h)
+                let editing = ui.memory(|m| m.has_focus(hex_id));
+                let mut h = if editing { d.s("hexEdit") } else { format!("{:02x}{:02x}{:02x}", to8(rgb[0]), to8(rgb[1]), to8(rgb[2])) };
+                if ui.add(egui::TextEdit::singleline(&mut h).id(hex_id).desired_width(70.0)).changed()
+                    && let Some(v) = hex_rgb(&h)
                 {
-                    let [r, g, b] = n.to_rgb();
-                    c = egui::Color32::from_rgb((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8);
+                    rgb = v;
+                    edit = ColorEdit::Picked;
                 }
+                d.fields.insert("hexEdit".into(), json!(h));
             });
         });
     });
-    if c != before {
-        d.fields.insert("hex".into(), json!(format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())));
+    match edit {
+        ColorEdit::None => {}
+        ColorEdit::Picked => cmyk = cmyk_of(rgb),
+        ColorEdit::Rgb => {
+            model = "rgb";
+            cmyk = cmyk_of(rgb);
+        }
+        ColorEdit::Cmyk => {
+            model = "cmyk";
+            let [c, m, y, k] = cmyk.map(|v| (v / 100.0) as f32);
+            rgb = display_rgb(Color::cmyk(c, m, y, k));
+        }
     }
+    if edit != ColorEdit::None {
+        d.fields.insert("edited".into(), json!(true));
+    }
+    d.fields.insert("rgb".into(), json!(rgb));
+    d.fields.insert("cmyk".into(), json!(cmyk));
+    d.fields.insert("model".into(), json!(model));
+    d.fields.insert("hex".into(), json!(format!("#{:02x}{:02x}{:02x}", to8(rgb[0]), to8(rgb[1]), to8(rgb[2]))));
 }
 
 /// Find/Replace Font: the document's fonts (missing ones first, flagged) and a replacement.
@@ -3998,6 +4078,148 @@ mod tests {
             );
             assert!(app.ui.dialog.is_none(), "Escape must also close the reopened dialog");
         }
+    }
+
+    fn select_all_key() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers { ctrl: true, command: true, ..Default::default() },
+        }
+    }
+
+    /// The Color Picker over a new document's selected frame, a few frames in.
+    fn picker(fields: Value) -> (DesignApp, egui::Context, egui::Rect, u64) {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [36, 36, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        app.ui.dialog = Some(Dialog::new("colorPicker", fields));
+        let ctx = dialog_context("en");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 500.0));
+        for _ in 0..3 {
+            dialog_frame(&mut app, &ctx, screen, vec![]);
+        }
+        (app, ctx, screen, id)
+    }
+
+    /// The rightmost painted `text`: the picker's own field, right of egui's colour editor (which
+    /// has R/G/B fields of its own).
+    fn rightmost(labels: &[(String, egui::Rect, egui::Rect)], text: &str) -> egui::Pos2 {
+        labels
+            .iter()
+            .filter(|(t, _, _)| t.trim() == text)
+            .map(|(_, r, _)| r.center())
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .unwrap_or_else(|| panic!("{text} is painted"))
+    }
+
+    /// Types `text` one character per frame, with an idle frame after each.
+    fn type_slowly(app: &mut DesignApp, ctx: &egui::Context, screen: egui::Rect, text: &str) {
+        for ch in text.chars() {
+            dialog_frame(app, ctx, screen, vec![egui::Event::Text(ch.into())]);
+            dialog_frame(app, ctx, screen, vec![]);
+        }
+    }
+
+    fn fill(app: &DesignApp, id: u64) -> designcraft_color::Color {
+        let d = &app.session.active().unwrap().doc;
+        d.resolve_color(&d.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch, 1.0).unwrap()
+    }
+
+    #[test]
+    fn the_hex_field_keeps_typed_text_and_commits_a_valid_code() {
+        let (mut app, ctx, screen, _) = picker(json!({"target": "fill", "hex": "#ffffff"}));
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, "ffffff").center());
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "#f5");
+        let d = app.ui.dialog.as_ref().unwrap();
+        assert_eq!((d.s("hexEdit").as_str(), d.s("hex").as_str()), ("#f5", "#ffffff"), "half-typed text stays; the colour waits");
+        type_slowly(&mut app, &ctx, screen, "9019");
+        let d = app.ui.dialog.as_ref().unwrap();
+        assert_eq!((d.s("hexEdit").as_str(), d.s("hex").as_str()), ("#f59019", "#f59019"), "a 7-character #rrggbb commits");
+        // Invalid text is replaced by the colour when focus leaves.
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "zz");
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, "#").center());
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        visible_label(&labels, screen, "f59019");
+        assert_eq!(app.ui.dialog.as_ref().unwrap().s("hex"), "#f59019");
+    }
+
+    #[test]
+    fn typed_channel_values_are_kept_while_typing() {
+        let (mut app, ctx, screen, id) = picker(json!({"target": "fill", "hex": "#010203", "model": "rgb", "rgb": [1, 2, 3]}));
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, rightmost(&labels, "1"));
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "12.5");
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        assert!(rightmost(&labels, "12.5").x > rightmost(&labels, "2").x - 1.0, "the typed text stays in the R field");
+        assert_eq!(app.ui.dialog.as_ref().unwrap().s("hex"), "#0d0203");
+        confirm(&mut app).unwrap();
+        let designcraft_color::Color::Rgb { r, .. } = fill(&app, id) else { panic!("not RGB") };
+        assert!((r - 12.5 / 255.0).abs() < 1e-6, "{r}");
+    }
+
+    #[test]
+    fn a_cmyk_colour_stays_cmyk_unless_rgb_values_are_typed() {
+        let cmyk = json!({"target": "fill", "hex": "#ff8000", "model": "cmyk", "cmyk": [0, 50, 100, 0]});
+        // Picked by hex: converted to CMYK.
+        let (mut app, ctx, screen, id) = picker(cmyk.clone());
+        let hex = app.ui.dialog.as_ref().unwrap().s("hex");
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, hex.trim_start_matches('#')).center());
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "3366cc");
+        confirm(&mut app).unwrap();
+        assert!(matches!(fill(&app, id), designcraft_color::Color::Cmyk { .. }), "{:?}", fill(&app, id));
+        // A typed C/M/Y/K percent is a percent: M 1 is 1 %.
+        let (mut app, ctx, screen, id) = picker(cmyk.clone());
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, rightmost(&labels, "50"));
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "1");
+        confirm(&mut app).unwrap();
+        let designcraft_color::Color::Cmyk { c, m, y, k } = fill(&app, id) else { panic!("not CMYK") };
+        assert!(c == 0.0 && (m - 0.01).abs() < 1e-6 && (y - 1.0).abs() < 1e-6 && k == 0.0, "{c} {m} {y} {k}");
+        // Typed R/G/B values: RGB.
+        let (mut app, ctx, screen, id) = picker(cmyk);
+        let r = app.ui.dialog.as_ref().unwrap().fields["rgb"][0].as_f64().unwrap();
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, rightmost(&labels, &r.to_string()));
+        dialog_frame(&mut app, &ctx, screen, vec![select_all_key()]);
+        type_slowly(&mut app, &ctx, screen, "10");
+        confirm(&mut app).unwrap();
+        assert!(matches!(fill(&app, id), designcraft_color::Color::Rgb { .. }), "{:?}", fill(&app, id));
+    }
+
+    #[test]
+    fn ok_without_edits_leaves_the_fill_alone() {
+        let (mut app, _, _, id) = picker(json!({"target": "fill", "hex": "#ff8000", "model": "cmyk", "cmyk": [0, 50, 100, 0]}));
+        let before = app.session.active().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().fill.clone();
+        confirm(&mut app).unwrap();
+        assert_eq!(app.session.active().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().fill, before);
+    }
+
+    #[test]
+    fn dialogs_do_not_dim_the_page() {
+        let (mut app, ctx, screen, _) = picker(json!({"target": "fill", "hex": "#ff8000"}));
+        let time = ctx.input(|i| i.time) + 1.0 / 60.0;
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), time: Some(time), ..Default::default() }, |ui| show(&mut app, ui.ctx()));
+        fn covers(shape: &egui::Shape, screen: egui::Rect) -> bool {
+            match shape {
+                egui::Shape::Rect(r) => r.rect.contains_rect(screen) && r.fill.a() > 0,
+                egui::Shape::Vec(v) => v.iter().any(|s| covers(s, screen)),
+                _ => false,
+            }
+        }
+        assert!(app.ui.dialog.is_some());
+        assert!(!output.shapes.iter().any(|s| covers(&s.shape, screen)), "nothing paints over the whole window");
     }
 
     fn draw(app: &mut DesignApp, ctx: &egui::Context) {
