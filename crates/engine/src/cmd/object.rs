@@ -14,6 +14,17 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, bool_or, cmd, f64_or, has_doc, has_selection, ok, point_param, rect_param, spread_param, str_param, targets};
 use crate::{Result, Session};
 
+/// `name` must be a swatch of the document: an unknown name would paint nothing. The error names
+/// the swatch it was probably meant to be (`Paper` → `[Paper]`, a different case).
+fn known_swatch(doc: &designcraft_doc::Document, name: &str, cmd: &str, key: &str) -> Result<()> {
+    if doc.swatch(name).is_some() {
+        return Ok(());
+    }
+    let bare = |n: &str| n.trim().trim_start_matches('[').trim_end_matches(']').to_lowercase();
+    let hint = doc.swatches.iter().find(|s| bare(&s.name) == bare(name)).map(|s| format!(" (did you mean `{}`?)", s.name)).unwrap_or_default();
+    Err(bad(cmd, format!("{key}: no swatch named `{name}`{hint}; create one with `swatch.create` and use its returned name")))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -168,8 +179,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 )
             }
         ),
-        cmd!("object.fill", "Fill", [], None, "{swatch, tint?: 0..1, ids?}", has_selection, |s, p| {
+        cmd!("object.fill", "Fill", [], None, "{swatch (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?}", has_selection, |s, p| {
             let sw = str_param(p, "swatch").ok_or_else(|| bad("object.fill", "missing swatch"))?.to_string();
+            known_swatch(&s.doc()?.doc, &sw, "object.fill", "swatch")?;
             let tint = f64_or(p, "tint", 1.0) as f32;
             set_flag(s, p, move |i| i.fill = Fill { swatch: sw.clone(), tint, ..i.fill.clone() }, false)
         }),
@@ -181,6 +193,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "{swatch?, tint?, weight?, align?: center|inside|outside, type?: {kind:…}, cap?: butt|round|projecting, join?: miter|round|bevel, miterLimit?, start?, end?: none|simple|simpleWide|triangle|triangleWide|barbed|curved|circle|circleSolid|square|squareSolid|bar, gapSwatch?, gapTint?, gapOverprint?: bool, ids?}",
             has_selection,
             |s, p| {
+                for key in ["swatch", "gapSwatch"] {
+                    if let Some(name) = p.get(key).and_then(Value::as_str) {
+                        known_swatch(&s.doc()?.doc, name, "object.stroke", key)?;
+                    }
+                }
                 let p2 = p.clone();
                 set_flag(
                     s,
@@ -908,6 +925,11 @@ pub fn duplicate_from(dst: &mut Document, src: &Document, ids: &[ItemId], to: Sp
 fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut HashMap<StoryId, StoryId>) {
     it.id = ItemId(dst.alloc());
     let my_id = it.id;
+    if let Some(m) = it.media.as_mut()
+        && let Some(p) = m.poster
+    {
+        m.poster = dst.adopt_asset(src, p).or(Some(p));
+    }
     match &mut it.content {
         Content::Text(tf) => {
             let new_sid = match stories.get(&tf.story) {
@@ -916,6 +938,15 @@ fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut Has
                     let n = StoryId(dst.alloc());
                     let mut st = src.story(tf.story).cloned().unwrap_or_else(|| Story::new(n));
                     st.id = n;
+                    let mut assets = HashMap::new();
+                    for a in designcraft_doc::story_asset_refs(&st) {
+                        if let Some(na) = dst.adopt_asset(src, a)
+                            && na != a
+                        {
+                            assets.insert(a, na);
+                        }
+                    }
+                    designcraft_doc::remap_story_assets(&mut st, &assets);
                     st.frames.clear();
                     dst.stories.insert(n, Arc::new(st));
                     stories.insert(tf.story, n);
@@ -928,10 +959,8 @@ fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut Has
             }
         }
         Content::Graphic(g) => {
-            if let Some(a) = src.assets.get(&g.asset)
-                && !dst.assets.contains_key(&g.asset)
-            {
-                dst.assets.insert(g.asset, a.clone());
+            if let Some(a) = dst.adopt_asset(src, g.asset) {
+                g.asset = a;
             }
         }
         Content::Group { items } => {
@@ -2160,7 +2189,7 @@ mod scale_tests {
         s.execute("file.new", &json!({})).unwrap();
         let r = s.execute("frame.create", &json!({"rect": [100, 100, 200, 150]})).unwrap();
         let id = ItemId(r["id"].as_u64().unwrap());
-        s.execute("object.stroke", &json!({"weight": 4, "swatch": "Black"})).unwrap();
+        s.execute("object.stroke", &json!({"weight": 4, "swatch": "[Black]"})).unwrap();
         let weight = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().stroke.weight;
         let bounds = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().bounds();
         s.execute("transform.scale", &json!({"sx": 2.0})).unwrap();
@@ -2472,8 +2501,8 @@ mod fitting_tests {
         s.execute("object.fittingOptions", &json!({"ids": [f], "fitting": "fitProportionally", "align": 0})).unwrap();
         let c = content(&s);
         assert!((c.x0 - 100.0).abs() < 1e-6 && (c.y0 - 100.0).abs() < 1e-6 && (c.width() - 200.0).abs() < 1e-6, "{c:?}");
-        // Crop 10 pt on every side: the content spreads past the frame.
-        s.execute("object.fittingOptions", &json!({"ids": [f], "crop": 10, "align": 4})).unwrap();
+        // Crop 10 pt on every side and fit again: the content spreads past the frame.
+        s.execute("object.fittingOptions", &json!({"ids": [f], "fitting": "fitProportionally", "crop": 10, "align": 4})).unwrap();
         let c = content(&s);
         assert!((c.width() - 220.0).abs() < 1e-6, "{c:?}");
         // Auto-fit: resizing the frame refits the content.
@@ -2750,5 +2779,37 @@ mod copy_ids_tests {
         let r = s.execute("edit.stepAndRepeat", &json!({"count": 3, "dx": 0, "dy": 60, "ids": [a]})).unwrap();
         assert_eq!((r["created"].as_u64(), ids(&r).len()), (Some(3), 3), "{r}");
         assert!(ids(&r).iter().all(|i| s.doc().unwrap().doc.item(designcraft_doc::ItemId(*i)).is_some()));
+    }
+}
+
+#[cfg(test)]
+mod swatch_name_tests {
+    use serde_json::json;
+
+    #[test]
+    fn fills_and_strokes_must_name_a_swatch_and_change_nothing_otherwise() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 100, 100]})).unwrap()["id"].clone();
+        for (cmd, params, hint) in [
+            ("object.fill", json!({"swatch": "Paper", "ids": [id]}), Some("[Paper]")),
+            ("object.fill", json!({"swatch": "[black]", "ids": [id]}), Some("[Black]")),
+            ("object.fill", json!({"swatch": "Missing Ink", "ids": [id]}), None),
+            ("object.stroke", json!({"swatch": "#ff0000", "weight": 4, "ids": [id]}), None),
+            ("object.stroke", json!({"gapSwatch": "paper", "ids": [id]}), Some("[Paper]")),
+        ] {
+            let before = s.doc().unwrap().doc.clone();
+            let e = s.execute(cmd, &params).unwrap_err().to_string();
+            assert!(e.contains("no swatch named") && e.contains("swatch.create"), "{cmd}: {e}");
+            if let Some(h) = hint {
+                assert!(e.contains(&format!("did you mean `{h}`")), "{cmd}: {e}");
+            }
+            assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc), "{cmd}: nothing changed");
+        }
+        // Real names, [None] included, still work.
+        for sw in ["[Paper]", "[None]", "C=100 M=0 Y=0 K=0"] {
+            s.execute("object.fill", &json!({"swatch": sw, "ids": [id]})).unwrap();
+            s.execute("object.stroke", &json!({"swatch": sw, "ids": [id]})).unwrap();
+        }
     }
 }
