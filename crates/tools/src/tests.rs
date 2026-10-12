@@ -705,3 +705,57 @@ fn pen_click_snaps_to_a_guide() {
     let x = p["anchors"][0]["p"][0].as_f64().unwrap();
     assert!((x - 100.0).abs() < 1e-6, "anchor x {x}");
 }
+
+/// A text frame holding a 3×3 table of 80 pt columns, optionally rotated about its centre.
+fn table_frame(degrees: f64) -> (Document, ItemId) {
+    let mut d = Document::new(&NewDocument::default());
+    let layer = d.default_layer();
+    let (id, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 400.0, 400.0), layer, "", ParaFormat::default()).unwrap();
+    let tid = d.alloc();
+    d.story_mut(sid).unwrap().insert_table(0, designcraft_doc::Table::new(tid, 3, 3, 0, 0, 240.0));
+    d.item_mut(id).unwrap().xf = designcraft_geom::Affine::rotate_about(degrees.to_radians(), Point::new(250.0, 250.0));
+    (d, id)
+}
+
+#[test]
+fn type_tool_drags_a_table_column_border() {
+    for degrees in [0.0, 90.0] {
+        let (d, id) = table_frame(degrees);
+        let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));
+        let cx = ctx(&d, &s, &c, &l);
+        let it = d.item(id).unwrap();
+        let sid = it.text_frame().unwrap().story;
+        let cs = c.get(&d, sid, None);
+        let cell = cs.frames[0].tables[0].cell(1, 0).unwrap();
+        let xf = cx.item_canvas_xf(id).unwrap() * d.text_xf(it);
+        let on_border = xf * Point::new(cell.rect.x1 + 1.0, (cell.rect.y0 + cell.rect.y1) / 2.0);
+        let dragged = xf * Point::new(cell.rect.x1 + 21.0, (cell.rect.y0 + cell.rect.y1) / 2.0);
+        let mut t = create("type");
+        let expected = if degrees == 0.0 { Cursor::ResizeH } else { Cursor::ResizeV };
+        assert_eq!(t.cursor(&cx, on_border, Mods::default()), expected);
+        // A click with a 1 px wobble on the border changes nothing.
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, on_border.x, on_border.y)).is_empty());
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, on_border.x + 1.0, on_border.y)).is_empty());
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, on_border.x + 1.0, on_border.y)).is_empty());
+        // A press on the border starts a resize, not a text selection.
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, on_border.x, on_border.y)).is_empty());
+        let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, dragged.x, dragged.y));
+        assert_eq!(a[0], Action::Begin("Resize Column".into()));
+        let Action::Preview(cmd, p) = &a[1] else { panic!("{a:?}") };
+        assert_eq!(
+            (cmd.as_str(), &p["axis"], &p["index"], &p["frame"]),
+            ("table.resizeBorder", &serde_json::json!("column"), &serde_json::json!(0), &serde_json::json!(id.0))
+        );
+        assert!((p["delta"].as_f64().unwrap() - 20.0).abs() < 1e-6, "{p}");
+        assert_eq!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, dragged.x, dragged.y)), vec![Action::Commit]);
+        // Esc cancels a drag in progress.
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Down, on_border.x, on_border.y));
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, dragged.x, dragged.y));
+        assert_eq!(t.key(&cx, ToolKey::Escape, Mods::default()), vec![Action::Cancel]);
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, dragged.x, dragged.y)).is_empty());
+        // Inside the cell the Type tool places the caret as usual.
+        let inside = xf * Point::new(cell.rect.x0 + 20.0, (cell.rect.y0 + cell.rect.y1) / 2.0);
+        let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, inside.x, inside.y));
+        assert!(matches!(&a[..], [Action::Exec(cmd, _)] if cmd == "text.placeCaret"), "{a:?}");
+    }
+}

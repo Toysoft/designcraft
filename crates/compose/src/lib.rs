@@ -40,7 +40,7 @@ pub use crate::cache::Cache;
 use crate::notes::Notes;
 pub use crate::notes::{find_note, hit_note, note_caret};
 use crate::shape::{Glyph, StyleTable, SubstCtx};
-pub use crate::table::{PlacedCell, StrokeSeg, TableFrag, cell_caret, find_cell, hit_cell};
+pub use crate::table::{BorderHit, PlacedCell, StrokeSeg, TableFrag, cell_caret, find_cell, hit_border, hit_cell};
 
 /// Character appearance shared by many glyphs (indexed from [`PlacedGlyph::style`]).
 #[derive(Clone, Debug, PartialEq)]

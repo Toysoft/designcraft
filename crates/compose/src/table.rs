@@ -618,6 +618,56 @@ pub fn hit_cell(cs: &ComposedStory, fi: usize, p: Point) -> Option<(u64, usize, 
     None
 }
 
+/// A row or column border under the pointer, found by [`hit_border`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BorderHit {
+    pub table: u64,
+    /// `true`: a column border (dragged horizontally); `false`: a row border.
+    pub column: bool,
+    /// The row above / logical column before the border. The last index is the table's
+    /// bottom or end edge.
+    pub index: usize,
+    /// The column border is the physical left edge of its column (a right-to-left table), so
+    /// dragging left widens it.
+    pub mirrored: bool,
+}
+
+/// The row or column border within `tol` of `p` (frame inner space) in frame `fi`, nearest
+/// first. Only borders that resize something count: inner borders and the bottom and end
+/// edges. `tables` holds the story's tables (for cell spans).
+pub fn hit_border(cs: &ComposedStory, fi: usize, tables: &std::collections::BTreeMap<u64, Arc<Table>>, p: Point, tol: f64) -> Option<BorderHit> {
+    if !(tol.is_finite() && p.x.is_finite() && p.y.is_finite()) {
+        return None;
+    }
+    let ft = cs.frames.get(fi)?;
+    let mut best: Option<(f64, BorderHit)> = None;
+    let mut offer = |d: f64, hit: BorderHit| {
+        if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, hit));
+        }
+    };
+    for t in &ft.tables {
+        if !t.rect.inflate(tol, tol).contains(p) {
+            continue;
+        }
+        let Some(table) = tables.get(&t.table) else { continue };
+        let rtl = table.options.direction == designcraft_doc::TextDirection::RightToLeft;
+        for c in &t.cells {
+            let Some(cell) = table.cell(c.row, c.col) else { continue };
+            let last_col = c.col.saturating_add((cell.col_span.max(1) - 1) as usize);
+            let last_row = c.row.saturating_add((cell.row_span.max(1) - 1) as usize);
+            if (c.rect.y0..=c.rect.y1).contains(&p.y) {
+                let x = if rtl { c.rect.x0 } else { c.rect.x1 };
+                offer((p.x - x).abs(), BorderHit { table: t.table, column: true, index: last_col, mirrored: rtl });
+            }
+            if (c.rect.x0..=c.rect.x1).contains(&p.x) {
+                offer((p.y - c.rect.y1).abs(), BorderHit { table: t.table, column: false, index: last_row, mirrored: false });
+            }
+        }
+    }
+    best.map(|(_, h)| h)
+}
+
 /// Frame index and placed cell for a cell address (the first, non-repeated occurrence).
 pub fn find_cell(cs: &ComposedStory, table: u64, row: usize, col: usize) -> Option<(usize, &TableFrag, &PlacedCell)> {
     let mut found = None;

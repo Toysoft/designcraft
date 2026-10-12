@@ -129,6 +129,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-12** · With the Type tool, dragging a table's column or row border resizes it (the double-arrow cursor shows over a border): later columns and rows move along, Shift keeps the table size, and Shift on the right or bottom edge scales every column or row. A dragged row becomes At Least; one undo step per drag, Esc cancels; works in rotated frames and turned spreads. Scripts use `table.resizeBorder`. No readiness percentage change.
 - **2026-10-12** · Words in capitals hyphenate like capitalized words (FERRUM COM-MODI), as in InDesign; Hyphenate Capitalized Words off keeps them whole. No readiness percentage change.
 - **2026-10-11** · `transform.move {copy}`, Edit › Duplicate and Step and Repeat return the copies' ids, so a script can go on with them. No readiness percentage change.
 - **2026-10-11** · `object.fill` and `object.stroke` refuse a swatch name the document doesn't have (it painted nothing) and suggest the name meant (`Paper` → `[Paper]`). No readiness percentage change.
