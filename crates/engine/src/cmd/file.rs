@@ -39,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!(noundo "file.recovery.save", "Save Recovery Data", [], None, "{dir?} — write every unsaved document to the recovery folder (the app does this on a timer)", always, |s, p| {
             let dir = recovery_dir(s, p)?;
-            Ok(json!({"saved": crate::recovery::save(s, &dir)?}))
+            Ok(json!({"saved": crate::recovery::save_tracked(s, &dir)?}))
         }),
         cmd!(noundo "file.recovery.open", "Recover Documents", [], None, "{dir?} — reopen documents left in the recovery folder (unsaved)", always, |s, p| {
             let dir = recovery_dir(s, p)?;
@@ -255,9 +255,10 @@ fn file_save(s: &mut Session, p: &Value) -> Result<Value> {
     st.saved_revision = st.revision;
     st.saved_doc = st.doc.clone();
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(dir) = &s.recovery_dir {
-        let uid = s.doc()?.uid;
-        crate::recovery::discard(dir, uid);
+    {
+        let recovery_dir = s.recovery_dir.clone();
+        let index = s.active_index().ok_or(EngineError::NoDocument)?;
+        crate::recovery::discard_document(s, index, recovery_dir.as_deref());
     }
     Ok(json!({"path": path, "bytes": bytes.len()}))
 }
@@ -646,15 +647,14 @@ fn file_revert(s: &mut Session, _: &Value) -> Result<Value> {
         // As opened again: the fonts beside it now (unchanged files are shared, not read again).
         let (fonts, _, _) = load_document_fonts(&mut d, &path);
         let uid = s.doc()?.uid;
-        let st = s.doc_mut()?;
+        let recovery_dir = s.recovery_dir.clone();
+        let index = s.active_index().ok_or(EngineError::NoDocument)?;
         let mut fresh = DocState::new(d, Some(path.clone()));
         fresh.fonts = fonts;
         fresh.uid = uid;
-        fresh.revision = st.revision + 1;
-        *st = fresh;
-        if let Some(dir) = &s.recovery_dir {
-            crate::recovery::discard(dir, uid);
-        }
+        fresh.revision = s.doc()?.revision + 1;
+        crate::recovery::discard_document(s, index, recovery_dir.as_deref());
+        *s.doc_mut()? = fresh;
         Ok(json!({"path": path}))
     }
     #[cfg(target_arch = "wasm32")]

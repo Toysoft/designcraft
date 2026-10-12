@@ -340,29 +340,120 @@ pub fn discard(dir: &Path, uid: u64) {
     let _ = std::fs::remove_file(m);
 }
 
-/// Write recovery entries for the dirty documents (and drop those of clean ones). Returns how
-/// many were written.
-pub fn save(s: &Session, dir: &Path) -> Result<usize> {
+/// Consume this document's checkpoint provenance after Save/Close/Revert. A default-directory
+/// uid may also be another live recovered document's retained source after a failed republish.
+pub(crate) fn discard_document(s: &mut Session, index: usize, default_dir: Option<&Path>) {
+    let Some(doc) = s.docs.get_mut(index) else { return };
+    let uid = doc.uid;
+    // A completed Save/Close/Revert consumes the provenance, even when removal fails. A stale
+    // source uid must never become a future claim on another document's checkpoint.
+    let mut entries = std::mem::take(&mut doc.recovery_entries);
+    if let Some(dir) = default_dir
+        && !entries.iter().any(|(entry_dir, entry_uid)| *entry_uid == uid && same_directory(entry_dir, dir))
+    {
+        entries.push((dir.to_path_buf(), uid));
+    }
+    for (dir, uid) in entries {
+        // Session ownership governs deletion as well as writes: never consume another live
+        // document's only source merely because its old uid matches this unrelated document.
+        if !s.docs.iter().enumerate().any(|(other_index, owner)| {
+            other_index != index && owner.recovery_entries.iter().any(|(entry_dir, entry_uid)| *entry_uid == uid && same_directory(entry_dir, &dir))
+        }) {
+            discard(&dir, uid);
+        }
+    }
+}
+
+const MAX_RECOVERY_ENTRIES: usize = 16;
+
+fn same_directory(a: &Path, b: &Path) -> bool {
+    a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
+}
+
+fn has_checkpoint(doc: &DocState, dir: &Path) -> bool {
+    doc.recovery_entries.iter().any(|(entry_dir, uid)| *uid == doc.uid && same_directory(entry_dir, dir))
+}
+
+fn protect_retained_sources(s: &Session, dir: &Path) -> Result<()> {
+    for document in &s.docs {
+        if let Some(owner) = s.docs.iter().find(|owner| {
+            owner.uid != document.uid && owner.recovery_entries.iter().any(|(entry_dir, uid)| *uid == document.uid && same_directory(entry_dir, dir))
+        }) {
+            return Err(EngineError::Other(format!("save or close recovered document {} before reusing its recovery folder", owner.title())));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_save(s: &Session, dir: &Path) -> Result<()> {
+    // Check before any write or deletion: a failed republish can retain a source whose uid
+    // coincides with an unrelated live document in a manually configured recovery directory.
+    protect_retained_sources(s, dir)?;
     let created = secure_recovery_dir(dir)?;
     #[cfg(not(target_arch = "wasm32"))]
     relock(dir, created)?;
     #[cfg(target_arch = "wasm32")]
     let _ = created;
+    Ok(())
+}
+
+/// Write recovery entries for dirty documents and drop clean checkpoints. Returns how many
+/// were written. Command callers use the tracked variant without configuring automatic recovery.
+pub fn save(s: &Session, dir: &Path) -> Result<usize> {
+    prepare_save(s, dir)?;
     let mut n = 0;
     for d in &s.docs {
         if !d.is_dirty() {
             discard(dir, d.uid);
             continue;
         }
-        let (doc, meta) = files(dir, d.uid);
-        let bytes = crate::cmd::to_bytes(d.preview_stash.as_deref().unwrap_or(d.doc.as_ref()));
-        // Write then rename, so a crash mid-write never leaves a torn file.
-        write_recovery_file(&doc, &bytes)?;
-        let m = json!({"path": d.path, "title": d.title(), "saved": designcraft_doc::vars::now()});
-        write_recovery_file(&meta, m.to_string().as_bytes())?;
+        write_entry(dir, d)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// Command-path checkpointing also records explicitly selected directories, without configuring
+/// automatic recovery. The immutable public helper remains available for fixtures and callers.
+pub(crate) fn save_tracked(s: &mut Session, dir: &Path) -> Result<usize> {
+    // Reject the complete batch before writing rather than silently losing old ownership records.
+    for document in &s.docs {
+        if document.is_dirty() && !has_checkpoint(document, dir) && document.recovery_entries.len() >= MAX_RECOVERY_ENTRIES {
+            return Err(EngineError::Other(
+                "too many recovery checkpoints; save or close the document before choosing another recovery folder".into(),
+            ));
+        }
+    }
+    prepare_save(s, dir)?;
+    let mut n = 0;
+    for index in 0..s.docs.len() {
+        if s.docs.get(index).is_some_and(|document| !document.is_dirty()) {
+            discard_document(s, index, Some(dir));
+            continue;
+        }
+        let Some(document) = s.docs.get_mut(index) else { continue };
+        let (doc, meta) = files(dir, document.uid);
+        let bytes = designcraft_format::save(document.preview_stash.as_deref().unwrap_or(document.doc.as_ref()))
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        write_recovery_file(&doc, &bytes)?;
+        // The primary is useful even if optional metadata fails next. Track it immediately.
+        if !has_checkpoint(document, dir) {
+            document.recovery_entries.push((dir.to_path_buf(), document.uid));
+        }
+        let metadata = json!({"path": document.path, "title": document.title(), "saved": designcraft_doc::vars::now()});
+        write_recovery_file(&meta, metadata.to_string().as_bytes())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Publish a document's recovery entry before its optional metadata.
+fn write_entry(dir: &Path, d: &DocState) -> Result<()> {
+    let (doc, meta) = files(dir, d.uid);
+    let bytes = designcraft_format::save(d.preview_stash.as_deref().unwrap_or(d.doc.as_ref())).map_err(|e| EngineError::Other(e.to_string()))?;
+    write_recovery_file(&doc, &bytes)?;
+    let metadata = json!({"path": d.path, "title": d.title(), "saved": designcraft_doc::vars::now()});
+    write_recovery_file(&meta, metadata.to_string().as_bytes())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -410,6 +501,11 @@ fn secure_recovery_dir(_dir: &Path) -> Result<bool> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_recovery_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    publish_recovery_file(path, bytes, true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_recovery_file(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     let Some(dir) = path.parent() else {
         return Err(EngineError::Other(format!("{} has no parent folder", path.display())));
     };
@@ -429,7 +525,8 @@ fn write_recovery_file(path: &Path, bytes: &[u8]) -> Result<()> {
     // Validate the non-followed leaf again immediately before renaming the randomized temporary
     // file to its fixed sibling destination.
     validate_recovery_dir(dir)?;
-    tmp.persist(path).map_err(|e| EngineError::Other(format!("{}: {}", path.display(), e.error)))?;
+    let published = if replace { tmp.persist(path) } else { tmp.persist_noclobber(path) };
+    published.map_err(|e| EngineError::Other(format!("{}: {}", path.display(), e.error)))?;
     sync_recovery_dir(dir)?;
     Ok(())
 }
@@ -489,6 +586,45 @@ fn write_recovery_file(_path: &Path, _bytes: &[u8]) -> Result<()> {
     Err(EngineError::Other("recovery files are unavailable on the web".into()))
 }
 
+#[cfg(target_arch = "wasm32")]
+fn publish_recovery_file(_path: &Path, _bytes: &[u8], _replace: bool) -> Result<()> {
+    Err(EngineError::Other("recovery files are unavailable on the web".into()))
+}
+
+/// Canonical keys are only for alias comparison; operational paths stay unchanged so run
+/// ownership checks still find the directory registered by the native profile.
+fn directory_key(dir: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))
+}
+
+/// Include metadata-only entries as occupied, so publication cannot attach a new document to
+/// somebody else's orphan metadata. No filename-derived maximum changes the uid allocator.
+fn occupied_uids(dir: &Path) -> Result<std::collections::HashSet<u64>> {
+    let entries = std::fs::read_dir(dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+    let mut ids = std::collections::HashSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+        let path = entry.path();
+        if matches!(path.extension().and_then(|s| s.to_str()), Some("json" | "designcraft"))
+            && let Some(uid) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok())
+        {
+            ids.insert(uid);
+        }
+    }
+    Ok(ids)
+}
+
+fn reserve_uid(state: &mut DocState, occupied: &mut std::collections::HashSet<u64>) -> Result<()> {
+    // At most occupied.len() consecutive candidates can collide. The extra attempt must be free.
+    for _ in 0..=occupied.len() {
+        if occupied.insert(state.uid) {
+            return Ok(());
+        }
+        state.uid = crate::NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    Err(EngineError::Other("no free recovery document uid".into()))
+}
+
 /// Recovery entries in `dir`: (uid, metadata).
 pub fn list(dir: &Path) -> Vec<(u64, Value)> {
     let mut out = Vec::new();
@@ -515,19 +651,42 @@ pub fn list(dir: &Path) -> Vec<(u64, Value)> {
     out
 }
 
-/// Reopen every recovery entry as an unsaved document (and remove the entries: the new session
-/// writes its own). Returns the opened documents' indices.
+/// Reopen recovery entries as unsaved documents. Publish each recovered document under its new
+/// uid before removing the original, so another crash before the next timer preserves the edits.
+/// Entries belonging to documents already open in this session's recovery folder are left alone.
+/// Returns the opened documents' indices.
 pub fn open(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         validate_recovery_dir(dir)?;
         relock(dir, false)?;
     }
+    let destination = s.recovery_dir.clone().unwrap_or_else(|| dir.to_path_buf());
+    let created = secure_recovery_dir(&destination)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    relock(&destination, created)?;
+    #[cfg(target_arch = "wasm32")]
+    let _ = created;
+    let source_key = directory_key(dir)?;
+    let destination_key = directory_key(&destination)?;
     let mut opened = Vec::new();
     // For this run's own folder, first bring in what runs that ended left in theirs.
     #[cfg(not(target_arch = "wasm32"))]
     take_over(dir);
-    for (uid, meta) in list(dir) {
+    let entries = list(dir);
+    // Reserve every source entry before opening the first one: publication must never overwrite
+    // a source still waiting in this list, even after a fresh process restarts its allocator at 1.
+    let mut occupied = occupied_uids(dir)?;
+    if source_key != destination_key {
+        occupied.extend(occupied_uids(&destination)?);
+    }
+    occupied.extend(s.docs.iter().map(|d| d.uid));
+    for (uid, meta) in entries {
+        if s.docs.iter().any(|d| {
+            d.recovery_entries.iter().any(|(entry_dir, entry_uid)| *entry_uid == uid && directory_key(entry_dir).is_ok_and(|key| key == source_key))
+        }) {
+            continue;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         validate_recovery_dir(dir)?;
         let (doc, _) = files(dir, uid);
@@ -540,12 +699,37 @@ pub fn open(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
         // Skipped font files are logged; the document opens without them.
         let fonts = path.as_deref().and_then(|p| crate::cmd::load_document_fonts(&mut d, p).0);
         let mut st = DocState::new(d, path);
+        reserve_uid(&mut st, &mut occupied)?;
+        st.recovery_entries.push((dir.to_path_buf(), uid));
         st.fonts = fonts;
         // Unsaved: the copy on disk (if any) is older than what was recovered.
         st.saved_doc = std::sync::Arc::new((*st.doc).clone());
         st.revision += 1;
-        opened.push(s.add_document(st));
-        discard(dir, uid);
+        let index = s.add_document(st);
+        opened.push(index);
+        // New uids are published without replacement, and the original is consumed only after
+        // both files succeed. Track a published primary even if metadata fails, so Save/Close can
+        // clean up every snapshot this document actually owns rather than an unrelated same uid.
+        if let Some(state) = s.docs.get_mut(index) {
+            let (document, metadata) = files(&destination, state.uid);
+            let publish = designcraft_format::save(state.doc.as_ref())
+                .map_err(|e| EngineError::Other(e.to_string()))
+                .and_then(|bytes| publish_recovery_file(&document, &bytes, false));
+            match publish {
+                Ok(()) => {
+                    state.recovery_entries.push((destination.clone(), state.uid));
+                    let meta = json!({"path": state.path, "title": state.title(), "saved": designcraft_doc::vars::now()});
+                    match publish_recovery_file(&metadata, meta.to_string().as_bytes(), false) {
+                        Ok(()) => {
+                            discard(dir, uid);
+                            state.recovery_entries = vec![(destination.clone(), state.uid)];
+                        }
+                        Err(e) => log::warn!("recovery entry {uid} kept: {e}"),
+                    }
+                }
+                Err(e) => log::warn!("recovery entry {uid} kept: {e}"),
+            }
+        }
     }
     Ok(opened)
 }
@@ -579,7 +763,8 @@ mod tests {
         let st = s2.doc().unwrap();
         assert!(st.is_dirty());
         assert_eq!(st.doc.spreads[0].items.len(), 1);
-        assert!(list(&dir).is_empty(), "entries are consumed");
+        assert_eq!(list(&dir).iter().map(|e| e.0).collect::<Vec<_>>(), [st.uid], "the entry follows its reopened document");
+        discard(&dir, st.uid);
         // Saving a document drops its entry.
         s.recovery_dir = Some(dir.clone());
         assert_eq!(save(&s, &dir).unwrap(), 1);
@@ -587,6 +772,57 @@ mod tests {
         s.execute("file.saveAs", &json!({"path": path.to_string_lossy()})).unwrap();
         assert!(list(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recovered_document_survives_a_second_crash_before_autosave() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = unsaved("edits preserved after a second crash");
+        assert_eq!(save(&original, dir.path()).unwrap(), 1);
+        let mut reopened = Session::new();
+        assert_eq!(open(&mut reopened, dir.path()).unwrap().len(), 1);
+        drop(reopened);
+        let mut recovered_again = Session::new();
+        assert_eq!(open(&mut recovered_again, dir.path()).unwrap().len(), 1);
+        assert_eq!(texts(&recovered_again), ["edits preserved after a second crash"]);
+        assert!(recovered_again.documents().iter().all(DocState::is_dirty));
+        assert_eq!(list(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn opening_recovery_again_does_not_duplicate_live_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(save(&unsaved("one recovered document"), dir.path()).unwrap(), 1);
+        let mut reopened = Session::new();
+        reopened.recovery_dir = Some(dir.path().to_path_buf());
+        assert_eq!(open(&mut reopened, dir.path()).unwrap().len(), 1);
+        assert!(open(&mut reopened, dir.path()).unwrap().is_empty());
+        assert_eq!(texts(&reopened), ["one recovered document"]);
+        assert_eq!(list(dir.path()).len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_recovery_rewrite_preserves_the_original() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(save(&unsaved("keep the original"), dir.path()).unwrap(), 1);
+        let entries = list(dir.path());
+        let original = files(dir.path(), entries[0].0).0;
+        let bytes = std::fs::read(&original).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut reopened = Session::new();
+        let result = open(&mut reopened, dir.path());
+        // Restore before assertions so a failing test does not leave an unremovable fixture.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap().len(), 1);
+        assert_eq!(texts(&reopened), ["keep the original"]);
+        assert_eq!(std::fs::read(original).unwrap(), bytes);
+        assert_eq!(list(dir.path()).len(), 1);
+        // Its source uid differs from the reopened uid, but explicit Close still discards it.
+        assert!(open(&mut reopened, dir.path()).unwrap().is_empty());
+        reopened.close_document(0);
+        assert!(list(dir.path()).is_empty());
     }
 
     #[cfg(unix)]
@@ -680,6 +916,290 @@ mod tests {
             assert_eq!(std::fs::metadata(&own).unwrap().permissions().mode() & 0o777, 0o700);
             assert_eq!(std::fs::metadata(own.join(LOCK)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    fn failed_republication_session() -> (Session, tempfile::TempDir, u64) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::new();
+        session.execute("file.new", &json!({})).unwrap();
+        let live_uid = session.docs[0].uid;
+        let mut original = unsaved("retained old work");
+        original.docs[0].uid = live_uid;
+        save(&original, root.path()).unwrap();
+        session.recovery_dir = Some(root.path().to_path_buf());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let recovered = open(&mut session, root.path());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(recovered.unwrap().len(), 1);
+        assert_ne!(session.docs[1].uid, live_uid);
+        (session, root, live_uid)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_survives_a_coincident_live_uid_checkpoint_failure() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        let original = std::fs::read(files(root.path(), live_uid).0).unwrap();
+        let recovered_uid = session.docs[1].uid;
+        std::fs::create_dir(files(root.path(), recovered_uid).0).unwrap();
+        session.execute("file.activate", &json!({"index": 0})).unwrap();
+        session.execute("frame.create", &json!({"rect": [0,0,100,100], "content": "text", "text": "other live work"})).unwrap();
+        assert!(session.execute("file.recovery.save", &json!({"dir": root.path().to_string_lossy()})).is_err());
+        assert_eq!(std::fs::read(files(root.path(), live_uid).0).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_autosave_preserves_another_documents_retained_source() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        let checkpoint = files(root.path(), live_uid).0;
+        let original = std::fs::read(&checkpoint).unwrap();
+        assert!(!session.docs[0].is_dirty());
+        assert!(session.docs[1].is_dirty());
+        assert!(session.execute("file.recovery.save", &json!({})).is_err());
+        assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_coincident_document_preserves_another_documents_retained_source() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        let checkpoint = files(root.path(), live_uid).0;
+        let original = std::fs::read(&checkpoint).unwrap();
+        session.execute("file.close", &json!({"index": 0})).unwrap();
+        assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_coincident_document_preserves_another_documents_retained_source() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        let checkpoint = files(root.path(), live_uid).0;
+        let original = std::fs::read(&checkpoint).unwrap();
+        session.execute("file.activate", &json!({"index": 0})).unwrap();
+        session.execute("file.saveAs", &json!({"path": root.path().join("saved-other.designcraft").to_string_lossy()})).unwrap();
+        assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reverting_a_coincident_document_preserves_another_documents_retained_source() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        let checkpoint = files(root.path(), live_uid).0;
+        let original = std::fs::read(&checkpoint).unwrap();
+        let saved = root.path().join("saved-other.designcraft");
+        std::fs::write(&saved, designcraft_format::save(&session.docs[0].doc).unwrap()).unwrap();
+        session.docs[0].path = Some(saved.to_string_lossy().into_owned());
+        session.execute("file.activate", &json!({"index": 0})).unwrap();
+        session.execute("frame.create", &json!({"rect": [0,0,100,100]})).unwrap();
+        session.execute("file.revert", &json!({})).unwrap();
+        assert_eq!(std::fs::read(checkpoint).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_provenance_is_consumed_before_its_uid_is_reused() {
+        let (mut session, root, live_uid) = failed_republication_session();
+        session.execute("file.saveAs", &json!({"path": root.path().join("saved.designcraft").to_string_lossy()})).unwrap();
+        session.execute("file.activate", &json!({"index": 0})).unwrap();
+        session.execute("frame.create", &json!({"rect": [0,0,100,100], "content": "text", "text": "other live work"})).unwrap();
+        session.execute("file.recovery.save", &json!({"dir": root.path().to_string_lossy()})).unwrap();
+        let checkpoint = files(root.path(), live_uid).0;
+        let expected = std::fs::read(&checkpoint).unwrap();
+        session.execute("file.close", &json!({"index": 1})).unwrap();
+        assert_eq!(
+            std::fs::read(checkpoint).unwrap(),
+            expected,
+            "closing the saved recovered document must not delete another document's checkpoint"
+        );
+    }
+
+    #[test]
+    fn explicit_checkpoint_tracking_is_bounded_and_deduplicated_before_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = unsaved("bounded checkpoints");
+        for n in 0..MAX_RECOVERY_ENTRIES {
+            session.execute("file.recovery.save", &json!({"dir": root.path().join(n.to_string()).to_string_lossy()})).unwrap();
+        }
+        let excess = root.path().join("excess");
+        assert!(session.execute("file.recovery.save", &json!({"dir": excess.to_string_lossy()})).is_err());
+        assert!(!excess.exists(), "reject before creating or writing the next directory");
+        let first_alias = root.path().join("0").join(".");
+        session.execute("file.recovery.save", &json!({"dir": first_alias.to_string_lossy()})).unwrap();
+        for n in 0..MAX_RECOVERY_ENTRIES {
+            assert_eq!(persisted_texts(&root.path().join(n.to_string())), ["bounded checkpoints"]);
+        }
+        assert!(session.recovery_dir.is_none());
+        session.execute("file.close", &json!({})).unwrap();
+        for n in 0..MAX_RECOVERY_ENTRIES {
+            assert!(list(&root.path().join(n.to_string())).is_empty());
+        }
+    }
+
+    fn restart_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = unsaved("restart first");
+        first.docs[0].uid = 1;
+        save(&first, root.path()).unwrap();
+        let mut second = unsaved("restart second");
+        second.docs[0].uid = 2;
+        save(&second, root.path()).unwrap();
+        root
+    }
+
+    fn persisted_texts(dir: &Path) -> Vec<String> {
+        let mut result = Vec::new();
+        for (uid, _) in list(dir) {
+            let doc = crate::cmd::from_bytes(&std::fs::read(files(dir, uid).0).unwrap()).unwrap();
+            result.extend(doc.stories.values().map(|story| story.text.clone()));
+        }
+        result.sort();
+        result
+    }
+
+    #[test]
+    #[ignore = "subprocess helper, executed by the restart recovery regression tests"]
+    fn restart_recovery_child() {
+        let source = PathBuf::from(std::env::var("DESIGNCRAFT_TEST_RECOVERY_SOURCE").unwrap());
+        let mode = std::env::var("DESIGNCRAFT_TEST_RECOVERY_MODE").unwrap();
+        if mode == "occupied_destination" {
+            let owned_root = tempfile::tempdir().unwrap();
+            let destination = run_dir(owned_root.path()).unwrap();
+            let mut existing = unsaved("already in destination");
+            existing.docs[0].uid = 3;
+            save(&existing, &destination).unwrap();
+            let (existing_doc, existing_meta) = files(&destination, 3);
+            let doc_bytes = std::fs::read(&existing_doc).unwrap();
+            let meta_bytes = std::fs::read(&existing_meta).unwrap();
+            let mut session = Session::new();
+            session.recovery_dir = Some(destination.clone());
+            let opened = open(&mut session, &source).unwrap();
+            assert_eq!(opened.len(), 2);
+            assert_eq!(texts(&session), ["restart first", "restart second"]);
+            assert!(session.docs.iter().all(|document| document.uid != 3));
+            assert_eq!(persisted_texts(&destination), ["already in destination", "restart first", "restart second"]);
+            assert!(list(&source).is_empty());
+            session.execute("file.saveAs", &json!({"path": source.join("saved.designcraft").to_string_lossy()})).unwrap();
+            session.execute("file.close", &json!({"index": opened[0]})).unwrap();
+            assert_eq!(list(&destination).len(), 1);
+            assert_eq!(std::fs::read(existing_doc).unwrap(), doc_bytes);
+            assert_eq!(std::fs::read(existing_meta).unwrap(), meta_bytes);
+            return;
+        }
+        let mut session = Session::new();
+        if mode == "advance" || mode == "coincident_live" {
+            session.execute("file.new", &json!({})).unwrap();
+            assert_eq!(session.docs[0].uid, 1);
+        }
+        let owned_root;
+        let destination = match mode.as_str() {
+            "cross_dir" => {
+                owned_root = tempfile::tempdir().unwrap();
+                let own = run_dir(owned_root.path()).unwrap();
+                session.recovery_dir = Some(own.clone());
+                own
+            }
+            "alias" => {
+                let alias = source.join(".");
+                session.recovery_dir = Some(alias.clone());
+                alias
+            }
+            "coincident_live" => {
+                session.recovery_dir = Some(source.clone());
+                source.clone()
+            }
+            _ => source.clone(),
+        };
+        let opened = open(&mut session, &source).unwrap();
+        assert_eq!(opened.len(), 2);
+        assert_eq!(texts(&session), ["restart first", "restart second"]);
+        assert_eq!(persisted_texts(&destination), ["restart first", "restart second"]);
+        assert!(session.docs.iter().all(|d| d.uid > 0 && d.uid < u64::MAX));
+        if matches!(mode.as_str(), "cross_dir" | "manual" | "alias" | "revert") {
+            let was_disabled = session.recovery_dir.is_none();
+            if mode == "cross_dir" {
+                assert!(list(&source).is_empty());
+            }
+            // A copy does not consume recovery. A successful Save and a Close do.
+            session.execute("file.saveACopy", &json!({"path": source.join("copy.designcraft").to_string_lossy()})).unwrap();
+            assert_eq!(list(&destination).len(), 2);
+            session.execute("file.saveAs", &json!({"path": source.join("saved.designcraft").to_string_lossy()})).unwrap();
+            assert_eq!(list(&destination).len(), 1);
+            if mode == "revert" {
+                session.execute("frame.create", &json!({"rect": [0, 0, 100, 100], "content": "text", "text": "after saving"})).unwrap();
+                session.execute("file.recovery.save", &json!({"dir": destination.to_string_lossy()})).unwrap();
+                assert_eq!(list(&destination).len(), 2);
+                session.execute("file.revert", &json!({})).unwrap();
+                assert_eq!(list(&destination).len(), 1);
+            }
+            session.execute("file.close", &json!({"index": opened[0]})).unwrap();
+            assert!(list(&destination).is_empty());
+            assert!(list(&source).is_empty());
+            assert_eq!(session.recovery_dir.is_none(), was_disabled, "manual recovery must not configure autosave");
+        }
+    }
+
+    fn run_restart_case(mode: &str) {
+        let source = restart_fixture();
+        if mode == "max_uid" {
+            let (doc, meta) = files(source.path(), 2);
+            let (max_doc, max_meta) = files(source.path(), u64::MAX);
+            std::fs::rename(doc, max_doc).unwrap();
+            std::fs::rename(meta, max_meta).unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "recovery::tests::restart_recovery_child", "--ignored", "--nocapture"])
+            .env("DESIGNCRAFT_TEST_RECOVERY_SOURCE", source.path())
+            .env("DESIGNCRAFT_TEST_RECOVERY_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let child_stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(child_stdout.contains("test result: ok. 1 passed; 0 failed;"), "the fresh-process helper did not run exactly once: {child_stdout}");
+    }
+
+    #[test]
+    fn restart_uid_collision_cannot_delete_the_new_snapshot() {
+        run_restart_case("fresh");
+    }
+    #[test]
+    fn restart_uid_collision_cannot_overwrite_an_unopened_entry() {
+        run_restart_case("advance");
+    }
+    #[test]
+    fn cross_directory_recovery_uses_the_configured_destination() {
+        run_restart_case("cross_dir");
+    }
+    #[test]
+    fn cross_directory_recovery_preserves_occupied_destination_entries() {
+        run_restart_case("occupied_destination");
+    }
+    #[test]
+    fn manual_recovery_save_and_close_clean_up_without_enabling_autosave() {
+        run_restart_case("manual");
+    }
+    #[test]
+    fn recovery_directory_aliases_do_not_delete_new_snapshots() {
+        run_restart_case("alias");
+    }
+    #[test]
+    fn a_maximum_source_uid_does_not_advance_or_overflow_the_allocator() {
+        run_restart_case("max_uid");
+    }
+    #[test]
+    fn a_coincident_live_uid_is_not_recovered_entry_provenance() {
+        run_restart_case("coincident_live");
+    }
+    #[test]
+    fn manual_recovery_revert_removes_its_previous_checkpoint() {
+        run_restart_case("revert");
     }
 
     /// The recovery folder was cleared while the app runs: the next save makes the run's folder
