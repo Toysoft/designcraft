@@ -1454,3 +1454,138 @@ fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
     check(&d);
     check(&import_idml(&export_idml(&d)).unwrap());
 }
+
+fn tracked_story(body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="s1">{body}</Story>
+</idPkg:Story>"#
+    )
+}
+
+const CSR: &str = r#"<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]">"#;
+
+#[test]
+fn tracked_deleted_text_takes_no_room_and_round_trips() {
+    let psr = r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle">"#;
+    let kwn = r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle" KeepWithNext="2">"#;
+    let tracked = tracked_story(&format!(
+        r#"{psr}{CSR}<Content>The first paragraph keeps a </Content><Change Self="c1" ChangeType="DeletedText"><Content>deleted </Content></Change><Content>word.</Content><Br/></CharacterStyleRange></ParagraphStyleRange>
+{kwn}{CSR}<Change Self="c2" ChangeType="DeletedText"><Br/></Change></CharacterStyleRange></ParagraphStyleRange>
+{psr}{CSR}<Change Self="c3" ChangeType="InsertedText"><Content>New </Content></Change><Content>second paragraph.</Content></CharacterStyleRange></ParagraphStyleRange>"#
+    ));
+    let plain = tracked_story(&format!(
+        r#"{psr}{CSR}<Content>The first paragraph keeps a word.</Content><Br/></CharacterStyleRange></ParagraphStyleRange>
+{psr}{CSR}<Content>New second paragraph.</Content></CharacterStyleRange></ParagraphStyleRange>"#
+    ));
+    let lines = |d: &Document| {
+        let sid = *d.stories.keys().next().unwrap();
+        let cs = designcraft_compose::compose_story(d, sid, &Default::default());
+        cs.frames.iter().flat_map(|f| f.lines.iter().map(|l| (l.baseline, l.x0, l.end_x))).collect::<Vec<_>>()
+    };
+    let d = import_idml_with(&fixture_with_story(&tracked), &|_| None).unwrap();
+    let story = d.stories.values().next().unwrap();
+    assert_eq!(story.text, "The first paragraph keeps a deleted word.\n\nNew second paragraph.");
+    let marks = |s: &designcraft_doc::Story| s.runs().map(|(r, f)| (s.text[r].to_string(), f.over.change)).collect::<Vec<_>>();
+    use designcraft_doc::ChangeMark::{Deleted, Inserted};
+    let want = vec![
+        ("The first paragraph keeps a ".to_string(), None),
+        ("deleted ".to_string(), Some(Deleted)),
+        ("word.\n".to_string(), None),
+        ("\n".to_string(), Some(Deleted)),
+        ("New ".to_string(), Some(Inserted)),
+        ("second paragraph.".to_string(), None),
+    ];
+    assert_eq!(marks(story), want);
+    let reference = import_idml_with(&fixture_with_story(&plain), &|_| None).unwrap();
+    let expected = lines(&reference);
+    assert!(expected.len() >= 2);
+    assert_eq!(lines(&d), expected);
+    // Export writes the changes back as `Change` elements.
+    let back = import_idml(&export_idml(&d)).unwrap();
+    assert_eq!(marks(back.stories.values().next().unwrap()), want);
+}
+
+/// Composed lines (baseline, left, right) of the only story.
+fn story_lines(d: &Document) -> Vec<(f64, f64, f64)> {
+    let sid = *d.stories.keys().next().unwrap();
+    let cs = designcraft_compose::compose_story(d, sid, &Default::default());
+    cs.frames.iter().flat_map(|f| f.lines.iter().map(|l| (l.baseline, l.x0, l.end_x))).collect()
+}
+
+const PSR: &str = r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle">"#;
+
+/// Lays out like the same story without the deleted paragraph.
+fn assert_deleted_para_takes_no_room(deleted: &str, deleted_text: &str) {
+    let tracked = tracked_story(&format!(
+        r#"{PSR}{CSR}<Content>First live paragraph.</Content><Br/></CharacterStyleRange></ParagraphStyleRange>
+{deleted}
+{PSR}{CSR}<Content>Second live paragraph.</Content></CharacterStyleRange></ParagraphStyleRange>"#
+    ));
+    let plain = tracked_story(&format!(
+        r#"{PSR}{CSR}<Content>First live paragraph.</Content><Br/></CharacterStyleRange></ParagraphStyleRange>
+{PSR}{CSR}<Content>Second live paragraph.</Content></CharacterStyleRange></ParagraphStyleRange>"#
+    ));
+    let d = import_idml_with(&fixture_with_story(&tracked), &|_| None).unwrap();
+    let story = d.stories.values().next().unwrap();
+    let marks: Vec<_> = story.runs().map(|(r, f)| (story.text[r].to_string(), f.over.change)).collect();
+    let want = vec![
+        ("First live paragraph.\n".to_string(), None),
+        (deleted_text.to_string(), Some(designcraft_doc::ChangeMark::Deleted)),
+        ("Second live paragraph.".to_string(), None),
+    ];
+    assert_eq!(marks, want);
+    let expected = story_lines(&import_idml_with(&fixture_with_story(&plain), &|_| None).unwrap());
+    assert_eq!(expected.len(), 2);
+    assert_eq!(story_lines(&d), expected);
+}
+
+#[test]
+fn tracked_deleted_paragraph_range_stays_deleted() {
+    assert_deleted_para_takes_no_room(
+        &format!(
+            r#"<Change Self="c1" ChangeType="DeletedText">{PSR}{CSR}<Content>Deleted text</Content><Br/></CharacterStyleRange></ParagraphStyleRange></Change>"#
+        ),
+        "Deleted text\n",
+    );
+}
+
+#[test]
+fn tracked_deleted_frame_break_does_not_break() {
+    let fb = "\u{E003}";
+    let nf = r#"<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" ParagraphBreakType="NextFrame">"#;
+    // The change around the paragraph range.
+    assert_deleted_para_takes_no_room(
+        &format!(
+            r#"<Change Self="c1" ChangeType="DeletedText">{PSR}{CSR}<Content>Gone</Content></CharacterStyleRange>{nf}<Br/></CharacterStyleRange></ParagraphStyleRange></Change>"#
+        ),
+        &format!("Gone{fb}\n"),
+    );
+    // The change inside the character range.
+    assert_deleted_para_takes_no_room(
+        &format!(
+            r#"{PSR}{nf}<Change Self="c1" ChangeType="DeletedText"><Content>Gone</Content><Br/></Change></CharacterStyleRange></ParagraphStyleRange>"#
+        ),
+        &format!("Gone{fb}\n"),
+    );
+}
+
+#[test]
+fn live_frame_break_before_deleted_paragraph_still_breaks() {
+    let nf = r#"<CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" ParagraphBreakType="NextFrame">"#;
+    let first =
+        format!(r#"{PSR}{CSR}<Content>First live paragraph.</Content></CharacterStyleRange>{nf}<Br/></CharacterStyleRange></ParagraphStyleRange>"#);
+    let second = format!(r#"{PSR}{CSR}<Content>Second live paragraph.</Content></CharacterStyleRange></ParagraphStyleRange>"#);
+    let deleted = format!(
+        r#"<Change Self="c1" ChangeType="DeletedText">{PSR}{CSR}<Content>Gone</Content><Br/></CharacterStyleRange></ParagraphStyleRange></Change>"#
+    );
+    let import = |body: String| import_idml_with(&fixture_with_story(&tracked_story(&body)), &|_| None).unwrap();
+    let reference = import(format!("{first}\n{second}"));
+    let sid = *reference.stories.keys().next().unwrap();
+    let per_frame: Vec<usize> =
+        designcraft_compose::compose_story(&reference, sid, &Default::default()).frames.iter().map(|f| f.lines.len()).collect();
+    assert!(per_frame.first() == Some(&1) && per_frame.get(1).is_some_and(|n| *n > 0), "the break sends the second paragraph on");
+    let expected = story_lines(&reference);
+    assert_eq!(story_lines(&import(format!("{first}\n{deleted}\n{second}"))), expected);
+}

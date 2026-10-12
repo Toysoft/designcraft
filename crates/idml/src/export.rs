@@ -2170,13 +2170,33 @@ impl<'a> Ex<'a> {
                 flush_content(&mut pending, &mut out);
                 let is_last_seg = k + 1 == nseg;
                 // A break character that ends the paragraph was written as its `Br`.
-                if is_last_seg && !last && !ends_with_break {
-                    out.push(Node::El(El::new("Br")));
-                }
-                if !out.is_empty() || csrs.is_empty() {
+                let para_br = is_last_seg && !last && !ends_with_break;
+                if !out.is_empty() || csrs.is_empty() || para_br {
                     let mut c = self.csr_el(&f);
                     c.children.extend(out);
                     csrs.push(c);
+                }
+                // Tracked changes wrap the text they mark.
+                if let Some(kind) = change_type(f.over.change) {
+                    for c in csrs.iter_mut().filter(|c| c.name == "CharacterStyleRange" && !c.children.is_empty()) {
+                        let mut ch = El::new("Change").attr("Self", self.fresh()).attr("ChangeType", kind);
+                        ch.children = std::mem::take(&mut c.children);
+                        c.push(ch);
+                    }
+                }
+                if para_br && let Some(c) = csrs.last_mut() {
+                    let nl = s.runs().find(|(rr, _)| rr.contains(&r.end)).and_then(|(_, nf)| change_type(nf.over.change));
+                    match nl {
+                        None => c.push(El::new("Br")),
+                        Some(kind) => match c.children.last_mut() {
+                            Some(Node::El(ch)) if ch.name == "Change" && ch.get("ChangeType") == Some(kind) => ch.push(El::new("Br")),
+                            _ => {
+                                let mut ch = El::new("Change").attr("Self", self.fresh()).attr("ChangeType", kind);
+                                ch.push(El::new("Br"));
+                                c.push(ch);
+                            }
+                        },
+                    }
                 }
                 for c in csrs {
                     psr.push(c);
@@ -2664,4 +2684,13 @@ fn topic_self(path: &[String]) -> String {
         s.push_str(&escape_id(n));
     }
     s
+}
+
+/// The IDML `ChangeType` of a tracked change.
+fn change_type(mark: Option<designcraft_doc::ChangeMark>) -> Option<&'static str> {
+    match mark {
+        Some(designcraft_doc::ChangeMark::Deleted) => Some("DeletedText"),
+        Some(designcraft_doc::ChangeMark::Inserted) => Some("InsertedText"),
+        _ => None,
+    }
 }

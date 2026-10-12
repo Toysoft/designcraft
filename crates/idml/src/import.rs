@@ -1732,7 +1732,9 @@ impl<'r> Importer<'r> {
                     "ParagraphStyleRange" => {
                         let style = c.get("AppliedParagraphStyle").map(|r| self.para_style_ref(r)).unwrap_or_else(|| pf.style.clone());
                         let para = self.para_attrs(c);
-                        let chars = self.char_attrs(c);
+                        let mut chars = self.char_attrs(c);
+                        // A paragraph range inside a tracked change is part of that change.
+                        chars.change = chars.change.or(cf.over.change);
                         let npf = ParaFormat { style, para, chars: CharAttrs::default(), table: None };
                         if b.fresh
                             && let Some(last) = b.paras.last_mut()
@@ -1745,6 +1747,7 @@ impl<'r> Importer<'r> {
                         let style = c.get("AppliedCharacterStyle").map(|r| self.char_style_ref(r)).unwrap_or_else(|| st::NO_CHAR_STYLE.into());
                         let mut over = pchars.clone();
                         over.merge(&self.char_attrs(c));
+                        over.change = over.change.or(cf.over.change);
                         let ncf = CharFormat { style, over };
                         let bt = c.get("ParagraphBreakType").filter(|t| *t != "Anywhere");
                         b.last = ncf.clone();
@@ -1874,6 +1877,17 @@ impl<'r> Importer<'r> {
                             b.objects.push(designcraft_doc::AnchoredObject::new(item, position));
                             b.push(&designcraft_doc::OBJECT_MARK.to_string(), cf);
                         }
+                    }
+                    "Change" => {
+                        // Tracked changes: deleted text stays in the story, marked, and takes no
+                        // room in the layout.
+                        let mut ncf = cf.clone();
+                        match c.get("ChangeType") {
+                            Some("DeletedText") => ncf.over.change = Some(designcraft_doc::ChangeMark::Deleted),
+                            Some("InsertedText" | "MovedText") => ncf.over.change = Some(designcraft_doc::ChangeMark::Inserted),
+                            _ => {}
+                        }
+                        self.walk_story(c, b, pf, pchars, &ncf, brk);
                     }
                     "Properties" | "Note" | "TextFrame" | "StoryPreference" | "InCopyExportOption" | "TextVariableInstance" => {}
                     _ => self.walk_story(c, b, pf, pchars, cf, brk),
