@@ -233,9 +233,8 @@ pub fn hyphen_points_in(word: &str, lim: &Limits, lang: Lang) -> Vec<usize> {
             if letters < lim.min_word.max(2) {
                 return false;
             }
-            if letters > 1 && run.iter().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase()) {
-                return false;
-            }
+            // Words in capitals (FERRUM COMMODI) hyphenate like capitalized words, as InDesign's: Hyphenate
+            // Capitalized Words off keeps both, acronyms included, whole.
             if !lim.capitalized && run[0].is_uppercase() {
                 return false;
             }
@@ -333,7 +332,10 @@ mod tests {
     #[test]
     fn case_apostrophes_and_punctuation() {
         assert_eq!(h("Typography"), "Ty-pog-ra-phy");
-        assert_eq!(h("TYPOGRAPHY"), "TYPOGRAPHY");
+        assert_eq!(h("TYPOGRAPHY"), "TY-POG-RA-PHY");
+        assert_eq!(h("COMMODI"), "COM-MO-DI");
+        let whole = Limits { capitalized: false, ..Limits::default() };
+        assert_eq!(hyphenate_word("TYPOGRAPHY", &whole), "TYPOGRAPHY", "Hyphenate Capitalized Words off");
         assert_eq!(h("typography,"), "ty-pog-ra-phy,");
         assert_eq!(h("“typography”"), "“ty-pog-ra-phy”");
         assert_eq!(h("typography's"), "ty-pog-ra-phy's");

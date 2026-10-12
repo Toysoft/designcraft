@@ -514,8 +514,14 @@ pub struct DesignApp {
     quit_requested: bool,
     /// Close the window without asking about unsaved changes (the control channel's `app.quit`).
     pub(crate) quit_without_asking: bool,
-    /// Quitting waits for the user's answer about the unsaved document with this uid.
-    quitting: Option<u64>,
+    /// No document is discarded until every unsaved document has an up-to-date approval.
+    quitting: Option<QuitState>,
+}
+
+struct QuitState {
+    original_active: Option<u64>,
+    accepted: HashMap<u64, u64>,
+    pending: Option<u64>,
 }
 
 impl DesignApp {
@@ -819,48 +825,138 @@ impl DesignApp {
         self.quit_requested = true;
     }
 
-    /// Closing the window (close button, Quit) with unsaved documents: keep it open and ask about
-    /// each of them in turn with the dialog File › Close uses. Save and Don't Save go on to the
-    /// next one and the window closes after the last; Cancel, or a cancelled Save As, stops.
+    /// Ask about unsaved documents without closing any of them yet. A later Cancel must also
+    /// keep documents whose earlier answer was Don't Save, including their history and recovery.
     fn handle_quit(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.quit_requested) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.quit_without_asking || !self.session.documents().iter().any(|d| d.is_dirty()) {
+            if self.quit_without_asking {
                 self.quitting = None;
                 return;
             }
+            if self.quitting.is_none() && !self.session.documents().iter().any(|d| d.is_dirty()) {
+                return;
+            }
+            let approved =
+                self.quitting.as_ref().is_some_and(|q| q.pending.is_none()) && self.ui.dialog.is_none() && self.next_unapproved_document().is_none();
+            if approved {
+                // Commit only when the backend receives the final close, after checking for
+                // edits that arrived since the last answer. Closing also discards recovery data.
+                if let Err(e) = self.finish_confirmed_quit() {
+                    self.status(e);
+                    self.cancel_quit();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                return;
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            let asking = self.quitting.is_some() && self.ui.dialog.as_ref().is_some_and(|d| d.id == "closeDocument");
+            if self.quitting.is_none() {
+                self.quitting = Some(QuitState { original_active: self.session.active().map(|d| d.uid), accepted: HashMap::new(), pending: None });
+            }
+        }
+        let Some(q) = self.quitting.as_ref() else { return };
+        if let Some(uid) = q.pending {
+            let asking = self.ui.dialog.as_ref().is_some_and(|d| {
+                d.id == "closeDocument"
+                    && d.fields.get("quitting").and_then(Value::as_bool) == Some(true)
+                    && d.fields.get("uid").and_then(Value::as_u64) == Some(uid)
+            });
             if !asking {
-                self.ask_next_unsaved(ctx);
+                self.cancel_quit();
             }
             return;
         }
-        let Some(uid) = self.quitting else { return };
         if self.ui.dialog.is_some() {
-            return;
-        }
-        // Still open: the user cancelled, or the save didn't happen.
-        if self.session.documents().iter().any(|d| d.uid == uid) {
-            self.quitting = None;
+            self.cancel_quit();
             return;
         }
         self.ask_next_unsaved(ctx);
     }
 
-    /// Ask about the first document with unsaved changes (shown, so the user sees which one),
-    /// or close the window when none is left.
+    /// Finalize a complete, still-current quit plan at an orderly host exit. The host can
+    /// terminate before egui receives its queued Close; an unfinished/stale plan leaves every
+    /// document live so the host can preserve its recovery data instead.
+    pub fn finish_confirmed_quit(&mut self) -> Result<(), String> {
+        let approved =
+            self.quitting.as_ref().is_some_and(|q| q.pending.is_none()) && self.ui.dialog.is_none() && self.next_unapproved_document().is_none();
+        if !approved {
+            return Ok(());
+        }
+        while !self.session.documents().is_empty() {
+            self.run("file.close", json!({"index": 0}))?;
+        }
+        self.quitting = None;
+        Ok(())
+    }
+
+    fn next_unapproved_document(&self) -> Option<(usize, u64)> {
+        let q = self.quitting.as_ref()?;
+        self.session
+            .documents()
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.is_dirty() && q.accepted.get(&d.uid) != Some(&d.revision))
+            .map(|(i, d)| (i, d.uid))
+    }
+
+    fn cancel_quit(&mut self) {
+        let Some(q) = self.quitting.take() else { return };
+        if let Some(i) = q.original_active.and_then(|uid| self.session.documents().iter().position(|d| d.uid == uid)) {
+            let _ = self.run("file.activate", json!({"index": i}));
+        }
+    }
+
+    /// Save/Don't Save during Quit approves this UID's current revision, without destroying it.
+    pub(crate) fn confirm_quit_document(&mut self, uid: u64, discard: bool) -> Result<Value, String> {
+        if self.quitting.as_ref().and_then(|q| q.pending) != Some(uid) {
+            return Err("Quit confirmation is no longer active".into());
+        }
+        let Some(i) = self.session.documents().iter().position(|d| d.uid == uid) else {
+            if let Some(q) = self.quitting.as_mut() {
+                q.pending = None;
+            }
+            return Ok(Value::Null);
+        };
+        if !discard {
+            let saved = self.run("file.activate", json!({"index": i})).and_then(|_| self.run("app.save", json!({})));
+            if let Err(e) = saved {
+                self.cancel_quit();
+                return Err(e);
+            }
+            if self.session.documents().iter().find(|d| d.uid == uid).is_none_or(|d| d.is_dirty()) {
+                // No file chosen (or an asynchronous host save has not completed): stop quitting.
+                self.cancel_quit();
+                return Ok(Value::Null);
+            }
+        }
+        if let Some(q) = self.quitting.as_mut() {
+            if let Some(d) = self.session.documents().iter().find(|d| d.uid == uid) {
+                q.accepted.insert(uid, d.revision);
+            }
+            q.pending = None;
+        }
+        Ok(Value::Null)
+    }
+
+    /// Show the next unapproved document, or request a final close that revalidates all approvals.
     fn ask_next_unsaved(&mut self, ctx: &egui::Context) {
-        let Some((i, uid)) = self.session.documents().iter().enumerate().find(|(_, d)| d.is_dirty()).map(|(i, d)| (i, d.uid)) else {
-            self.quitting = None;
+        let Some((i, uid)) = self.next_unapproved_document() else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         };
-        let _ = self.run("file.activate", json!({"index": i}));
+        if self.run("file.activate", json!({"index": i})).is_err() {
+            self.cancel_quit();
+            return;
+        }
         menus::close_document(self, Some(i));
-        self.quitting = Some(uid);
+        if let Some(d) = self.ui.dialog.as_mut() {
+            d.fields.insert("quitting".into(), json!(true));
+        }
+        if let Some(q) = self.quitting.as_mut() {
+            q.pending = Some(uid);
+        }
     }
 
     /// A file dropped on the window: documents open, anything else is placed.
@@ -871,6 +967,7 @@ impl DesignApp {
 
     /// Open (`file.open`, `file.openBytes`) or place (`file.place`) a file the user chose. A file
     /// that can't be opened or placed gets an alert with the reason, as well as the status line.
+    /// A successful import with warnings keeps the document and shows the warnings in an alert.
     pub fn open_file(&mut self, cmd: &str, params: Value) -> Result<Value, String> {
         let file = match params.get("path").and_then(Value::as_str) {
             Some(path) => std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string()),
@@ -880,6 +977,20 @@ impl DesignApp {
         if let Err(e) = &r {
             let title = if cmd == "file.place" { "Can't Place the File" } else { "Can't Open the File" };
             self.ui.dialog = Some(dialogs::Dialog::new("alert", json!({"title": title, "file": file, "message": e})));
+        } else if let Ok(result) = &r {
+            let warnings: Vec<&str> = result
+                .get("warnings")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|warning| !warning.is_empty())
+                .collect();
+            if !warnings.is_empty() {
+                self.status(format!("{file}: {}", warnings.join("; ")));
+                self.ui.dialog =
+                    Some(dialogs::Dialog::new("alert", json!({"title": "Import Warnings", "file": file, "message": warnings.join("\n")})));
+            }
         }
         r
     }
@@ -1272,8 +1383,243 @@ mod tests {
             let cmds = quit_frame(&mut app, &ctx, false);
             assert_eq!(cmds.contains(&egui::ViewportCommand::Close), n == 1, "{cmds:?}");
         }
-        // Only the saved document is left: the close goes through.
+        // All documents stay open until the backend's final close commits the decision.
+        assert_eq!(app.session.documents().len(), 3);
         assert!(quit_frame(&mut app, &ctx, true).is_empty());
+        assert!(app.session.documents().is_empty());
+    }
+
+    /// A later Cancel must not destroy documents already approved for discard.
+    #[test]
+    fn quitting_later_cancel_retains_every_document_and_active_tab() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        app.run("file.new", json!({})).unwrap();
+        app.run("frame.create", json!({"rect": [20, 20, 120, 120]})).unwrap();
+        let uids: Vec<u64> = app.session.documents().iter().map(|d| d.uid).collect();
+        let active = app.session.active().unwrap().uid;
+        let revisions: Vec<u64> = app.session.documents().iter().map(|d| d.revision).collect();
+        let docs: Vec<_> = app.session.documents().iter().map(|d| d.doc.clone()).collect();
+        quit_frame(&mut app, &ctx, true);
+        app.ui.dialog.as_mut().unwrap().fields.insert("discard".into(), json!(true));
+        dialogs::confirm(&mut app).unwrap();
+        quit_frame(&mut app, &ctx, false);
+        assert_eq!(dialog_uid(&app), Some(uids[1]));
+        app.ui.dialog = None;
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents().iter().map(|d| d.uid).collect::<Vec<_>>(), uids);
+        assert_eq!(app.session.active().unwrap().uid, active);
+        assert_eq!(app.session.documents().iter().map(|d| d.revision).collect::<Vec<_>>(), revisions);
+        for (d, original) in app.session.documents().iter().zip(docs) {
+            assert!(std::sync::Arc::ptr_eq(&d.doc, &original));
+            assert!(d.is_dirty());
+            assert!(!d.history.undo.is_empty());
+        }
+    }
+
+    fn second_unsaved_document(app: &mut DesignApp) {
+        app.run("file.new", json!({})).unwrap();
+        app.run("frame.create", json!({"rect": [20, 20, 120, 120]})).unwrap();
+    }
+
+    fn discard_quit_dialog(app: &mut DesignApp) {
+        app.ui.dialog.as_mut().unwrap().fields.insert("discard".into(), json!(true));
+        dialogs::confirm(app).unwrap();
+    }
+
+    #[test]
+    fn quitting_first_cancel_restores_original_clean_active_document() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        app.run("file.new", json!({})).unwrap();
+        let original_active = app.session.active().unwrap().uid;
+        quit_frame(&mut app, &ctx, true);
+        assert_ne!(app.session.active().unwrap().uid, original_active);
+        app.ui.dialog = None;
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.active().unwrap().uid, original_active);
+        assert_eq!(app.session.documents().len(), 2);
+    }
+
+    #[test]
+    fn quitting_save_as_cancel_after_discard_keeps_all_documents() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let active = app.session.active().unwrap().uid;
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        quit_frame(&mut app, &ctx, false);
+        dialogs::confirm(&mut app).unwrap(); // No picker: Save As was cancelled.
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents().len(), 2);
+        assert!(app.session.documents().iter().all(|d| d.is_dirty()));
+        assert_eq!(app.session.active().unwrap().uid, active);
+    }
+
+    #[test]
+    fn quitting_save_failure_after_discard_keeps_documents_and_can_retry() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let path = std::env::temp_dir()
+            .join(format!("designcraft-quit-missing-{}-{}", std::process::id(), app.session.active().unwrap().uid))
+            .join("missing")
+            .join("document.designcraft");
+        assert!(!path.parent().unwrap().exists());
+        let picked = path.to_string_lossy().to_string();
+        app.services.pick_save = Some(Box::new(move |_| Some(picked.clone())));
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        quit_frame(&mut app, &ctx, false);
+        assert!(dialogs::confirm(&mut app).is_err());
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents().len(), 2);
+        assert!(app.session.documents().iter().all(|d| d.is_dirty()));
+        // Starting over must ask about the previously discarded first document again.
+        quit_frame(&mut app, &ctx, true);
+        assert_eq!(dialog_uid(&app), Some(app.session.documents()[0].uid));
+    }
+
+    #[test]
+    fn quitting_save_then_later_cancel_keeps_saved_document_open() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let first = app.session.documents()[0].uid;
+        let path = std::env::temp_dir().join(format!("designcraft-quit-save-{}-{first}.designcraft", std::process::id()));
+        let picked = path.to_string_lossy().to_string();
+        app.services.pick_save = Some(Box::new(move |_| Some(picked.clone())));
+        quit_frame(&mut app, &ctx, true);
+        dialogs::confirm(&mut app).unwrap();
+        quit_frame(&mut app, &ctx, false);
+        assert_eq!(app.session.documents().len(), 2);
+        assert!(!app.session.documents()[0].is_dirty());
+        assert!(path.exists());
+        app.ui.dialog = None;
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents()[0].uid, first);
+        assert!(app.session.documents()[1].is_dirty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn quitting_rechecks_discard_approval_after_a_later_edit() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let first = app.session.documents()[0].uid;
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        quit_frame(&mut app, &ctx, false);
+        app.run("file.activate", json!({"index": 0})).unwrap();
+        app.run("frame.create", json!({"rect": [200, 200, 300, 300]})).unwrap();
+        discard_quit_dialog(&mut app); // Approval is bound to the second UID, despite the switch.
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(dialog_uid(&app), Some(first), "new edit needs a fresh decision");
+        assert_eq!(app.session.documents().len(), 2);
+    }
+
+    #[test]
+    fn quitting_final_close_rechecks_new_unsaved_document() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        assert!(quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        second_unsaved_document(&mut app); // Arrives after Close was queued, before its event.
+        let new_uid = app.session.active().unwrap().uid;
+        assert!(quit_frame(&mut app, &ctx, true).contains(&egui::ViewportCommand::CancelClose));
+        assert_eq!(dialog_uid(&app), Some(new_uid));
+        assert_eq!(app.session.documents().len(), 2);
+    }
+
+    #[test]
+    fn quitting_pending_save_uses_dialog_uid_after_tab_switch() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let first = app.session.documents()[0].uid;
+        let path = std::env::temp_dir().join(format!("designcraft-quit-uid-{}-{first}.designcraft", std::process::id()));
+        let picked = path.to_string_lossy().to_string();
+        app.services.pick_save = Some(Box::new(move |_| Some(picked.clone())));
+        quit_frame(&mut app, &ctx, true);
+        app.run("file.activate", json!({"index": 1})).unwrap();
+        dialogs::confirm(&mut app).unwrap();
+        assert_eq!(app.session.documents()[0].path.as_deref(), path.to_str());
+        assert!(!app.session.documents()[0].is_dirty());
+        assert!(app.session.documents()[1].is_dirty());
+        quit_frame(&mut app, &ctx, false);
+        assert_eq!(dialog_uid(&app), Some(app.session.documents()[1].uid));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn quitting_discard_preserves_recovery_until_final_commit() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        let uid = app.session.active().unwrap().uid;
+        let dir = std::env::temp_dir().join(format!("designcraft-quit-recovery-{}-{uid}", std::process::id()));
+        app.session.recovery_dir = Some(dir.clone());
+        app.run("file.recovery.save", json!({})).unwrap();
+        let entry = dir.join(format!("{uid}.designcraft"));
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        assert!(quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert!(entry.exists(), "a queued close is not a committed close");
+        assert!(quit_frame(&mut app, &ctx, true).is_empty());
+        assert!(!entry.exists(), "accepted Don't Save must not be recovered on restart");
+        assert!(app.session.documents().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quitting_native_exit_commits_completed_approvals_before_close_event() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        quit_frame(&mut app, &ctx, true);
+        discard_quit_dialog(&mut app);
+        assert!(quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents().len(), 1);
+        app.finish_confirmed_quit().unwrap();
+        assert!(app.session.documents().is_empty());
+    }
+
+    #[test]
+    fn quitting_native_exit_retains_incomplete_stale_and_new_document_plans() {
+        for case in ["incomplete", "stale", "new document"] {
+            let ctx = egui::Context::default();
+            let mut app = app_with_unsaved_document();
+            if case == "incomplete" {
+                second_unsaved_document(&mut app);
+            }
+            quit_frame(&mut app, &ctx, true);
+            discard_quit_dialog(&mut app);
+            quit_frame(&mut app, &ctx, false);
+            if case == "stale" {
+                app.run("frame.create", json!({"rect": [200, 200, 300, 300]})).unwrap();
+            } else if case == "new document" {
+                second_unsaved_document(&mut app);
+            }
+            let active = app.session.active().unwrap().uid;
+            let before: Vec<_> = app
+                .session
+                .documents()
+                .iter()
+                .map(|d| (d.uid, d.revision, d.doc.clone(), d.selection.items.clone(), d.history.undo.len(), d.history.redo.len()))
+                .collect();
+            app.finish_confirmed_quit().unwrap();
+            assert_eq!(app.session.documents().len(), before.len(), "{case}");
+            assert_eq!(app.session.active().unwrap().uid, active, "{case}");
+            for (d, (uid, revision, doc, selection, undo, redo)) in app.session.documents().iter().zip(before) {
+                assert_eq!(
+                    (d.uid, d.revision, &d.selection.items, d.history.undo.len(), d.history.redo.len()),
+                    (uid, revision, &selection, undo, redo),
+                    "{case}"
+                );
+                assert!(std::sync::Arc::ptr_eq(&d.doc, &doc), "{case}");
+            }
+        }
     }
 
     #[test]
@@ -1460,6 +1806,99 @@ mod tests {
         let control::Outcome::Done(r) = control::handle(&mut app, &egui::Context::default(), &req) else { panic!("app.open answers") };
         assert_eq!(r["ok"], json!(false), "{r}");
         assert!(app.ui.dialog.is_none(), "a control-channel app.open doesn't raise an alert");
+    }
+}
+
+#[cfg(test)]
+mod import_warning_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn idml(missing_parts: bool) -> Vec<u8> {
+        let missing = if missing_parts { r#"<idPkg:Spread src="Spreads/missing.xml"/><idPkg:Story src="Stories/missing.xml"/>"# } else { "" };
+        let map = format!(
+            r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d"><idPkg:Spread src="Spreads/one.xml"/>{missing}</Document>"#
+        );
+        let spread = r#"<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Spread Self="s"><Page Self="p" GeometricBounds="0 0 100 100" ItemTransform="1 0 0 1 0 0"/><Rectangle Self="r" ItemTransform="1 0 0 1 0 0"/></Spread></idPkg:Spread>"#;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, text) in [("mimetype", designcraft_idml::MIMETYPE), ("designmap.xml", &map), ("Spreads/one.xml", spread)] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn app() -> DesignApp {
+        let mut app = DesignApp::new(Session::new(), Services { inbox: Some(Inbox::default()), ..Default::default() });
+        app.run("file.new", json!({"title": "Existing work"})).unwrap();
+        app.run("frame.create", json!({"rect": [10, 10, 50, 50]})).unwrap();
+        app
+    }
+
+    fn assert_partial_import_warning(app: &mut DesignApp, file: &str) {
+        let dialog = app.ui.dialog.as_ref().expect("partial import must show an alert");
+        assert_eq!(dialog.id, "alert");
+        assert_eq!(dialog.fields["title"], "Import Warnings");
+        assert_eq!(dialog.fields["file"], file);
+        for part in ["Spreads/missing.xml", "Stories/missing.xml"] {
+            assert!(dialog.fields["message"].as_str().unwrap().contains(part), "every missing part is named");
+            assert!(app.ui.status.contains(part), "the status line retains the warning");
+        }
+        assert_eq!(app.session.documents().len(), 2);
+        assert_eq!(app.session.documents()[0].doc.title, "Existing work");
+        assert!(app.session.documents()[0].is_dirty(), "existing unsaved work stays intact");
+        assert_eq!(app.session.documents()[0].doc.spreads[0].items.len(), 1);
+        assert_eq!(app.session.doc().unwrap().doc.spreads.len(), 1);
+        assert_eq!(app.session.doc().unwrap().doc.spreads[0].items.len(), 1, "available document content is kept");
+        dialogs::confirm(app).unwrap();
+        assert!(app.ui.dialog.is_none(), "OK dismisses the warning");
+        assert_eq!(app.session.documents().len(), 2, "dismissing the warning keeps the imported document");
+    }
+
+    #[test]
+    fn byte_open_reports_partial_import_warnings_without_losing_documents() {
+        let mut app = app();
+        let result =
+            app.open_file("file.openBytes", json!({"name": "partial.idml", "base64": designcraft_engine::cmd::base64_encode(&idml(true))})).unwrap();
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 2);
+        assert_partial_import_warning(&mut app, "partial.idml");
+    }
+
+    #[test]
+    fn native_open_reports_partial_import_warnings_without_losing_documents() {
+        let path = std::env::temp_dir().join(format!("designcraft-partial-import-{}", std::process::id())).join("partial.idml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, idml(true)).unwrap();
+        let picked = path.to_string_lossy().to_string();
+        let mut app = app();
+        app.services.pick_open = Some(Box::new(move |_| Some(picked.clone())));
+        let result = app.run("app.openDialog", json!({}));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(path.parent().unwrap()).unwrap();
+        assert_eq!(result.unwrap()["warnings"].as_array().unwrap().len(), 2);
+        assert_partial_import_warning(&mut app, "partial.idml");
+    }
+
+    #[test]
+    fn inbox_open_reports_partial_import_warnings_without_losing_documents() {
+        let mut app = app();
+        let request = app.import_request("open");
+        app.services.inbox.as_ref().unwrap().lock().unwrap().push(ImportedFile { request, name: "partial.idml".into(), bytes: idml(true) });
+        app.drain_inbox();
+        assert_partial_import_warning(&mut app, "partial");
+    }
+
+    #[test]
+    fn complete_import_does_not_show_a_warning() {
+        let mut app = app();
+        let result = app
+            .open_file("file.openBytes", json!({"name": "complete.idml", "base64": designcraft_engine::cmd::base64_encode(&idml(false))}))
+            .unwrap();
+        assert_eq!(result["warnings"], json!([]));
+        assert!(app.ui.dialog.is_none());
+        assert!(app.ui.status.is_empty());
+        assert_eq!(app.session.documents().len(), 2);
     }
 }
 
