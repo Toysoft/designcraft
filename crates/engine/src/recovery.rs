@@ -656,6 +656,10 @@ pub fn list(dir: &Path) -> Vec<(u64, Value)> {
 /// Entries belonging to documents already open in this session's recovery folder are left alone.
 /// Returns the opened documents' indices.
 pub fn open(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
+    open_with_publisher(s, dir, |path, bytes| publish_recovery_file(path, bytes, false))
+}
+
+fn open_with_publisher(s: &mut Session, dir: &Path, mut publish: impl FnMut(&Path, &[u8]) -> Result<()>) -> Result<Vec<usize>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         validate_recovery_dir(dir)?;
@@ -712,14 +716,14 @@ pub fn open(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
         // clean up every snapshot this document actually owns rather than an unrelated same uid.
         if let Some(state) = s.docs.get_mut(index) {
             let (document, metadata) = files(&destination, state.uid);
-            let publish = designcraft_format::save(state.doc.as_ref())
+            let published = designcraft_format::save(state.doc.as_ref())
                 .map_err(|e| EngineError::Other(e.to_string()))
-                .and_then(|bytes| publish_recovery_file(&document, &bytes, false));
-            match publish {
+                .and_then(|bytes| publish(&document, &bytes));
+            match published {
                 Ok(()) => {
                     state.recovery_entries.push((destination.clone(), state.uid));
                     let meta = json!({"path": state.path, "title": state.title(), "saved": designcraft_doc::vars::now()});
-                    match publish_recovery_file(&metadata, meta.to_string().as_bytes(), false) {
+                    match publish(&metadata, meta.to_string().as_bytes()) {
                         Ok(()) => {
                             discard(dir, uid);
                             state.recovery_entries = vec![(destination.clone(), state.uid)];
@@ -801,20 +805,32 @@ mod tests {
         assert_eq!(list(dir.path()).len(), 1);
     }
 
-    #[cfg(unix)]
+    /// Directory collisions fail even for privileged runners. Creating the blocker in the
+    /// publisher occurs after UID reservation, which would otherwise skip an occupied path.
+    fn open_with_failed_republication(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
+        let mut attempts = 0;
+        let opened = open_with_publisher(s, dir, |path, bytes| {
+            assert_eq!(path.extension().and_then(|extension| extension.to_str()), Some("designcraft"));
+            std::fs::create_dir(path).unwrap();
+            let result = publish_recovery_file(path, bytes, false);
+            std::fs::remove_dir(path).unwrap();
+            assert!(result.is_err(), "a directory must obstruct actual recovery publication");
+            attempts += 1;
+            result
+        });
+        assert_eq!(attempts, 1, "the fixture must exercise the actual failed publication");
+        opened
+    }
+
     #[test]
     fn a_failed_recovery_rewrite_preserves_the_original() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(save(&unsaved("keep the original"), dir.path()).unwrap(), 1);
         let entries = list(dir.path());
         let original = files(dir.path(), entries[0].0).0;
         let bytes = std::fs::read(&original).unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let mut reopened = Session::new();
-        let result = open(&mut reopened, dir.path());
-        // Restore before assertions so a failing test does not leave an unremovable fixture.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = open_with_failed_republication(&mut reopened, dir.path());
         assert_eq!(result.unwrap().len(), 1);
         assert_eq!(texts(&reopened), ["keep the original"]);
         assert_eq!(std::fs::read(original).unwrap(), bytes);
@@ -918,9 +934,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn failed_republication_session() -> (Session, tempfile::TempDir, u64) {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let mut session = Session::new();
         session.execute("file.new", &json!({})).unwrap();
@@ -929,15 +943,12 @@ mod tests {
         original.docs[0].uid = live_uid;
         save(&original, root.path()).unwrap();
         session.recovery_dir = Some(root.path().to_path_buf());
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        let recovered = open(&mut session, root.path());
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let recovered = open_with_failed_republication(&mut session, root.path());
         assert_eq!(recovered.unwrap().len(), 1);
         assert_ne!(session.docs[1].uid, live_uid);
         (session, root, live_uid)
     }
 
-    #[cfg(unix)]
     #[test]
     fn retained_source_survives_a_coincident_live_uid_checkpoint_failure() {
         let (mut session, root, live_uid) = failed_republication_session();
@@ -950,7 +961,6 @@ mod tests {
         assert_eq!(std::fs::read(files(root.path(), live_uid).0).unwrap(), original);
     }
 
-    #[cfg(unix)]
     #[test]
     fn clean_autosave_preserves_another_documents_retained_source() {
         let (mut session, root, live_uid) = failed_republication_session();
@@ -962,7 +972,6 @@ mod tests {
         assert_eq!(std::fs::read(checkpoint).unwrap(), original);
     }
 
-    #[cfg(unix)]
     #[test]
     fn closing_a_coincident_document_preserves_another_documents_retained_source() {
         let (mut session, root, live_uid) = failed_republication_session();
@@ -972,7 +981,6 @@ mod tests {
         assert_eq!(std::fs::read(checkpoint).unwrap(), original);
     }
 
-    #[cfg(unix)]
     #[test]
     fn saving_a_coincident_document_preserves_another_documents_retained_source() {
         let (mut session, root, live_uid) = failed_republication_session();
@@ -983,7 +991,6 @@ mod tests {
         assert_eq!(std::fs::read(checkpoint).unwrap(), original);
     }
 
-    #[cfg(unix)]
     #[test]
     fn reverting_a_coincident_document_preserves_another_documents_retained_source() {
         let (mut session, root, live_uid) = failed_republication_session();
@@ -998,7 +1005,6 @@ mod tests {
         assert_eq!(std::fs::read(checkpoint).unwrap(), original);
     }
 
-    #[cfg(unix)]
     #[test]
     fn retained_source_provenance_is_consumed_before_its_uid_is_reused() {
         let (mut session, root, live_uid) = failed_republication_session();
