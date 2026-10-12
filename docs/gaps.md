@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (image clipping paths from IDML) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -178,7 +178,9 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 
 ### 19. Placed graphics depth (FF)
 - **Missing:** EPS is shown through its preview only (no PostScript interpreter); PSD layer
-  comps beyond visibility; Edit Original / Edit With; PDF placed as editable vectors (#227, #24);
+  comps beyond visibility; the Clipping Path Options dialog (tracing into a clip that keeps the
+  frame, Threshold/Tolerance/Inset Frame preview, picking an alpha channel or a path saved in a
+  TIFF/PSD); Text Wrap › Same As Clipping following an imported clipping path; Edit Original / Edit With; PDF placed as editable vectors (#227, #24);
   QuarkXPress import (#73).
 - **Estimate:** 30–60 h (PostScript interpreter is a large separate project: +80–150 h).
 

@@ -1275,7 +1275,25 @@ impl Exporter<'_> {
         img
     }
 
+    /// Draw a placed graphic, inside its clipping path when it has one.
     pub(crate) fn graphic(&mut self, s: &mut Surface, g: &designcraft_doc::Graphic) {
+        match g.clip_region().map(|(region, even_odd)| (to_path(&region), even_odd)) {
+            Some((Some(clip), even_odd)) => {
+                s.push_clip_path(&clip, if even_odd { &FillRule::EvenOdd } else { &FillRule::NonZero });
+                self.graphic_unclipped(s, g);
+                s.pop();
+            }
+            // A degenerate outline shows nothing, or everything when inverted.
+            Some((None, even_odd)) => {
+                if even_odd {
+                    self.graphic_unclipped(s, g);
+                }
+            }
+            None => self.graphic_unclipped(s, g),
+        }
+    }
+
+    fn graphic_unclipped(&mut self, s: &mut Surface, g: &designcraft_doc::Graphic) {
         // Video / sound without a poster: a dark frame with a play mark.
         if let Some(asset) = self.doc.assets.get(&g.asset)
             && designcraft_doc::media_kind(&asset.mime).is_some()

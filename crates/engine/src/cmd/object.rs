@@ -680,6 +680,15 @@ pub fn specs() -> Vec<CommandSpec> {
             clipping_path
         ),
         cmd!(
+            "object.clippingPathOptions",
+            "Clipping Path Options…",
+            ["Object", "Clipping Path"],
+            None,
+            "{type?: none, invert?: bool, includeInsideEdges?: bool, ids?} — without type, invert or includeInsideEdges, reports each selected graphic's clipping path ({items: [{id, type: none|detectEdges|alphaChannel|photoshopPath|userModifiedPath, anchors, invert, includeInsideEdges, threshold, tolerance, inset, sourceName}]}); type none removes it, invert shows the graphic outside it instead of inside",
+            has_selection,
+            clipping_path_options
+        ),
+        cmd!(
             "object.primaryTextFrame",
             "Primary Text Frame",
             ["Object"],
@@ -1701,6 +1710,63 @@ fn clipping_path(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 
+/// Clipping Path Options: report a graphic's clipping path, remove it, or change its options.
+fn clipping_path_options(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "object.clippingPathOptions";
+    let ids = targets(s, p)?;
+    let remove = match str_param(p, "type") {
+        None => false,
+        Some("none") => true,
+        Some(t) => return Err(bad(ID, format!("type `{t}` can't be set here (only `none`); object.clippingPath traces an outline"))),
+    };
+    let flag = |key: &str| p.get(key).map(|v| v.as_bool().ok_or_else(|| bad(ID, format!("{key} must be true or false")))).transpose();
+    let (invert, inside) = (flag("invert")?, flag("includeInsideEdges")?);
+    let graphics: Vec<ItemId> = {
+        let d = &s.doc()?.doc;
+        ids.into_iter().filter(|id| d.item(*id).and_then(Item::graphic).is_some()).collect()
+    };
+    if graphics.is_empty() {
+        return Err(bad(ID, "select a frame with a placed graphic"));
+    }
+    if !remove && invert.is_none() && inside.is_none() {
+        let d = &s.doc()?.doc;
+        let items: Vec<Value> = graphics
+            .iter()
+            .filter_map(|id| d.item(*id).and_then(Item::graphic).map(|g| (id, g)))
+            .map(|(id, g)| match &g.clip {
+                None => json!({"id": id.0, "type": "none"}),
+                Some(c) => json!({
+                    "id": id.0,
+                    "type": serde_json::to_value(c.kind).ok(),
+                    "anchors": c.path.anchor_count(),
+                    "invert": c.invert,
+                    "includeInsideEdges": c.include_inside_edges,
+                    "threshold": c.threshold,
+                    "tolerance": c.tolerance,
+                    "inset": c.inset,
+                    "sourceName": c.source_name,
+                }),
+            })
+            .collect();
+        return Ok(json!({"items": items}));
+    }
+    s.edit(|d, _| {
+        let mut n = 0;
+        for id in &graphics {
+            let Some(Content::Graphic(g)) = d.item_mut(*id).map(|it| &mut it.content) else { continue };
+            if remove {
+                n += usize::from(g.clip.take().is_some());
+            } else if let Some(c) = &mut g.clip {
+                let c = Arc::make_mut(c);
+                c.invert = invert.unwrap_or(c.invert);
+                c.include_inside_edges = inside.unwrap_or(c.include_inside_edges);
+                n += 1;
+            }
+        }
+        Ok(json!({"changed": n}))
+    })
+}
+
 fn fitting_mode(s: &str) -> Option<designcraft_doc::Fitting> {
     use designcraft_doc::Fitting as F;
     Some(match s {
@@ -2564,6 +2630,39 @@ mod clipping_tests {
         assert!((b.x0 - 105.0).abs() < 1.5 && (b.x1 - 135.0).abs() < 1.5, "{b:?}");
         assert_eq!(it.shape, Shape::Path);
         assert!(s.execute("object.clippingPath", &json!({"ids": [f], "threshold": 255})).is_err());
+    }
+
+    #[test]
+    fn clipping_path_options_report_invert_and_remove_the_clip() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let png = designcraft_render::Rendered { width: 4, height: 4, pixels: vec![255; 64] }.to_png();
+        let f = s.execute("frame.create", &json!({"rect": [100, 100, 140, 140]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("file.place", &json!({"base64": super::super::file::base64_encode(&png), "name": "white.png", "frame": f})).unwrap();
+        let get = |s: &mut Session| s.execute("object.clippingPathOptions", &json!({"ids": [f]})).unwrap()["items"][0].clone();
+        assert_eq!(get(&mut s)["type"], "none");
+        // As an imported file would carry it.
+        let triangle = designcraft_geom::PathData::single(designcraft_geom::path::SubPath::polyline(
+            &[Point::new(0.0, 4.0), Point::new(2.0, 0.0), Point::new(4.0, 4.0)],
+            true,
+        ));
+        s.edit(|d, _| {
+            if let Some(Content::Graphic(g)) = d.item_mut(ItemId(f)).map(|it| &mut it.content) {
+                g.clip = Some(Arc::new(designcraft_doc::ClippingPath::new(designcraft_doc::ClippingKind::PhotoshopPath, triangle)));
+            }
+            Ok(json!({}))
+        })
+        .unwrap();
+        let c = get(&mut s);
+        assert_eq!((c["type"].as_str(), c["anchors"].as_u64(), c["invert"].as_bool()), (Some("photoshopPath"), Some(3), Some(false)));
+        s.execute("object.clippingPathOptions", &json!({"ids": [f], "invert": true})).unwrap();
+        assert_eq!(get(&mut s)["invert"], true);
+        assert_eq!(s.execute("object.clippingPathOptions", &json!({"ids": [f], "type": "none"})).unwrap()["changed"], 1);
+        assert_eq!(get(&mut s)["type"], "none");
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(get(&mut s)["type"], "photoshopPath");
+        assert!(s.execute("object.clippingPathOptions", &json!({"ids": [f], "type": "alphaChannel"})).is_err());
+        assert!(s.execute("object.clippingPathOptions", &json!({"ids": [f], "invert": "yes"})).is_err());
     }
 }
 

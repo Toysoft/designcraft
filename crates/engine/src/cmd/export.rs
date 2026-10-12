@@ -264,6 +264,7 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
                 size: (w as f64, h as f64),
                 xf: designcraft_geom::Affine::translate((r.x0, r.y0))
                     * designcraft_geom::Affine::scale_non_uniform(r.width() / w as f64, r.height() / h as f64),
+                clip: None,
                 auto_fit: Default::default(),
                 fit_align: 4,
                 crop: [0.0; 4],
@@ -429,6 +430,7 @@ fn rasterize_where(
             asset: aid,
             size: (w as f64, h as f64),
             xf: designcraft_geom::Affine::translate((reach.x0, reach.y0)) * designcraft_geom::Affine::scale(1.0 / k),
+            clip: None,
             auto_fit: Default::default(),
             fit_align: 4,
             crop: [0.0; 4],

@@ -551,6 +551,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "<",
             "ui:app.qrCode",
             ">Clipping Path",
+            "cmd:object.clippingPathOptions|None|{\"type\": \"none\"}",
             "cmd:object.clippingPath|Alpha Channel|{\"type\": \"alpha\"}",
             "cmd:object.clippingPath|Detect Edges|{\"type\": \"edges\"}",
             "<",

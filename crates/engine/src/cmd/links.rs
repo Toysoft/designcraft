@@ -417,6 +417,7 @@ mod shared_asset_tests {
             asset: sid,
             size: (4.0, 4.0),
             xf: designcraft_geom::Affine::IDENTITY,
+            clip: None,
             auto_fit: Default::default(),
             fit_align: 4,
             crop: [1.0; 4],

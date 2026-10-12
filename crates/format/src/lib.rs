@@ -248,6 +248,7 @@ mod tests {
             asset,
             size: (1.0, 1.0),
             xf: Affine::translate((crop, crop)),
+            clip: None,
             auto_fit: Default::default(),
             fit_align: 4,
             crop: [crop; 4],

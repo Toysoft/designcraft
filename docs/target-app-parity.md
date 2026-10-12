@@ -1,6 +1,6 @@
 # DesignCraft parity with Adobe InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (image clipping paths from IDML) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
 
 The authoritative assessment of how close DesignCraft is to Adobe InDesign. [ROADMAP.md](../ROADMAP.md)
 summarizes it; [gaps.md](gaps.md) lists every known shortfall one at a time; the feature-by-feature
@@ -336,7 +336,7 @@ It is evidence of breadth: each item exists. It is not a claim of InDesign-level
 - Column rules (Text Frame Options › Column Rules, `object.textFrameOptions {columnRule, columnRuleWeight, columnRuleColor, columnRuleTint, columnRuleOffset, columnRuleTopInset, columnRuleBottomInset}`, reported by `document.inspect`): a bar centred in each gutter of a multi-column frame, inside the insets and between the columns of right-to-left and vertical frames too, broken around paragraphs that span columns, with weight, colour, tint, horizontal offset and top/bottom insets; on screen, in PDF (tagged as an artifact) and in IDML (`ColumnRule…` attributes of `TextFramePreference`, also in object styles). The dialog shows the frame's options and changes only the fields edited. Rule stroke types and overprint aren't there yet.
 - Place a page of an IDML or DesignCraft document (`file.place {layoutPage}`): its objects, stories, styles and swatches as one group (INDD files are not readable).
 - Articles panel (`article.new/add/remove/options/delete/list`): reading order and content of EPUB and HTML exports.
-- Object ▸ Clipping Path (`object.clippingPath {type: alpha|edges, threshold, tolerance}`): traces the placed image and makes the outline the frame.
+- Object ▸ Clipping Path (`object.clippingPath {type: alpha|edges, threshold, tolerance}`): traces the placed image and makes the outline the frame. Clipping paths saved in IDML (Detect Edges, Alpha Channel, Photoshop Path, User-Modified Path; Invert) hide the image outside the path on screen and in PDF and survive IDML export; `object.clippingPathOptions` reports, inverts or removes one (Object ▸ Clipping Path ▸ None).
 - Gridify: arrow keys while dragging a frame or shape tool add columns/rows (`frame.grid`), one undo step.
 - Gap tool (U, `gap.move`): drag the space between objects (or an object and the page edge) and both sides resize.
 - XML basics (`xml.newTag/deleteTag/tag/mapStyle/structure`, `file.exportXml`, `file.importXml`; Tags panel with structure; View ▸ Show Tagged Frames): tagged frames export in reading order, mapped paragraph styles become elements, imported elements flow into frames with matching tags. Inline text tagging (`xml.tagText`, an `xmlTag` character attribute, exported as nested elements) and tag markers (View ▸ Structure ▸ Show Tag Markers) too. DTDs (`xml.loadDtd`, `xml.validate`, `xml.deleteDtd`; Tags panel): loading one adds its elements as tags and names the root; validation checks content models (sequences, choices, `?*+`, mixed content, EMPTY/ANY, parameter entities) and required attributes, and lists each problem with its element path.

@@ -233,6 +233,7 @@ fn place(d: &mut Document, data: Vec<u8>, px: (u32, u32)) {
         asset,
         size: (px.0 as f64, px.1 as f64),
         xf: designcraft_geom::Affine::translate((72.0, 72.0)) * designcraft_geom::Affine::scale(50.0),
+        clip: None,
         auto_fit: designcraft_doc::Fitting::FillProportionally,
         fit_align: 4,
         crop: [0.0; 4],
@@ -445,4 +446,40 @@ fn column_rules_are_drawn() {
     assert_eq!(xs.len(), 2, "{xs:?}");
     assert!((xs[0] - 214.0).abs() < 0.01 && (xs[1] - 398.0).abs() < 0.01, "{xs:?}");
     assert!(rules(false).is_empty());
+}
+
+/// A clipping path on a placed image becomes a clip in the page content, inside the frame's.
+#[test]
+fn clipping_path_clips_the_image() {
+    let png = |d: &mut Document| {
+        let mut b = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
+        place(d, b, (4, 4));
+    };
+    let clips = |s: &str| s.lines().filter(|l| matches!(l.trim(), "W" | "W*")).count();
+    let mut d = doc_with_text("x");
+    png(&mut d);
+    let plain = uncompressed(&d, PdfOptions::default());
+    let id = d.spreads[0].items.iter().find(|i| i.graphic().is_some()).unwrap().id;
+    let triangle = designcraft_geom::PathData::single(designcraft_geom::path::SubPath::polyline(
+        &[designcraft_geom::Point::new(0.0, 4.0), designcraft_geom::Point::new(2.0, 0.0), designcraft_geom::Point::new(4.0, 4.0)],
+        true,
+    ));
+    let mut clip = designcraft_doc::ClippingPath::new(designcraft_doc::ClippingKind::DetectEdges, triangle);
+    let set = |d: &mut Document, c: &designcraft_doc::ClippingPath| {
+        if let Some(designcraft_doc::Content::Graphic(g)) = d.item_mut(id).map(|it| &mut it.content) {
+            g.clip = Some(std::sync::Arc::new(c.clone()));
+        }
+    };
+    set(&mut d, &clip);
+    let clipped = uncompressed(&d, PdfOptions::default());
+    assert_eq!(clips(&clipped), clips(&plain) + 1, "{clipped}");
+    // The triangle's apex: graphic (2, 0) → page (172, 72) → PDF y = page height − 72.
+    let apex_y = d.spreads[0].pages[0].height - 72.0;
+    assert!(clipped.contains(&format!("172 {apex_y} l")), "{clipped}");
+    clip.invert = true;
+    set(&mut d, &clip);
+    assert!(uncompressed(&d, PdfOptions::default()).lines().any(|l| l.trim() == "W*"), "an inverted clip is even-odd");
 }

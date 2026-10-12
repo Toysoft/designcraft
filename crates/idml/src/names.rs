@@ -2,8 +2,8 @@
 
 use designcraft_color::BlendMode;
 use designcraft_doc::{
-    Align, Arrowhead, AutoSize, Cap, Capitalization, FirstBaseline, Join, Leading, NumberStyle, Position, StartParagraph, StrokeAlign, StrokeType,
-    TabAlign, VerticalJustification, WrapMode, WrapSide,
+    Align, Arrowhead, AutoSize, Cap, Capitalization, ClippingKind, FirstBaseline, Join, Leading, NumberStyle, Position, StartParagraph, StrokeAlign,
+    StrokeType, TabAlign, VerticalJustification, WrapMode, WrapSide,
 };
 use designcraft_geom::Unit;
 use designcraft_geom::corners::CornerShape;
@@ -377,6 +377,20 @@ pub fn wrap_mode_out(m: WrapMode) -> &'static str {
         WrapMode::JumpObject => "JumpObjectTextWrap",
         WrapMode::JumpToNextColumn => "NextColumnTextWrap",
     }
+}
+pub fn clipping_kind_out(k: ClippingKind) -> &'static str {
+    match k {
+        ClippingKind::DetectEdges => "DetectEdges",
+        ClippingKind::AlphaChannel => "AlphaChannel",
+        ClippingKind::PhotoshopPath => "PhotoshopPath",
+        ClippingKind::UserModifiedPath => "UserModifiedPath",
+    }
+}
+/// `None` for `ClippingType="None"` and unknown types.
+pub fn clipping_kind_in(s: &str) -> Option<ClippingKind> {
+    [ClippingKind::DetectEdges, ClippingKind::AlphaChannel, ClippingKind::PhotoshopPath, ClippingKind::UserModifiedPath]
+        .into_iter()
+        .find(|k| clipping_kind_out(*k) == s)
 }
 pub fn wrap_mode_in(s: &str) -> WrapMode {
     [WrapMode::BoundingBox, WrapMode::Contour, WrapMode::JumpObject, WrapMode::JumpToNextColumn]

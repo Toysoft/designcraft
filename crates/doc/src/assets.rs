@@ -286,6 +286,7 @@ mod tests {
             asset: AssetId(asset),
             size: (10.0, 10.0),
             xf: Affine::translate((crop, 0.0)),
+            clip: None,
             auto_fit: Default::default(),
             fit_align: 4,
             crop: [crop; 4],

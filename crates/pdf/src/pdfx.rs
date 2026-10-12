@@ -477,6 +477,7 @@ mod tests {
             asset,
             size,
             xf: Affine::translate(at) * Affine::scale(100.0 / size.0),
+            clip: None,
             auto_fit: Fitting::FillProportionally,
             fit_align: 4,
             crop: [0.0; 4],

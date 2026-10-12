@@ -722,7 +722,23 @@ impl Renderer {
         }
     }
 
+    /// Draw a placed graphic, inside its clipping path when it has one.
     pub(crate) fn draw_graphic(&mut self, ctx: &mut RenderContext, f: &Frame, g: &designcraft_doc::Graphic, xf: Affine) {
+        let Some((region, even_odd)) = g.clip_region() else {
+            self.draw_graphic_unclipped(ctx, f, g, xf);
+            return;
+        };
+        ctx.set_transform(f.view * xf);
+        if even_odd {
+            ctx.set_fill_rule(peniko::Fill::EvenOdd);
+        }
+        ctx.push_clip_layer(&region);
+        ctx.set_fill_rule(peniko::Fill::NonZero);
+        self.draw_graphic_unclipped(ctx, f, g, xf);
+        ctx.pop_layer();
+    }
+
+    fn draw_graphic_unclipped(&mut self, ctx: &mut RenderContext, f: &Frame, g: &designcraft_doc::Graphic, xf: Affine) {
         let Some(asset) = f.doc.assets.get(&g.asset) else { return };
         if designcraft_doc::media_kind(&asset.mime).is_some() {
             // Video / sound: a dark frame with a play mark (the poster, when set, is drawn by the item).
@@ -1453,6 +1469,7 @@ mod tests {
             asset: aid,
             size: (100.0, 100.0),
             xf: Affine::translate((100.0, 100.0)),
+            clip: None,
             auto_fit: Default::default(),
             fit_align: 4,
             crop: [0.0; 4],
@@ -1467,6 +1484,63 @@ mod tests {
         assert_eq!(px(DisplayQuality::High, &mut r)[..3], [255, 0, 0]);
         assert_eq!(px(DisplayQuality::Typical, &mut r)[..3], [255, 0, 0]);
         assert_eq!(px(DisplayQuality::Fast, &mut r)[..3], [178, 178, 178]);
+    }
+
+    #[test]
+    fn clipping_path_hides_the_image_outside_it() {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let aid = designcraft_doc::AssetId(d.alloc());
+        d.assets.insert(
+            aid,
+            Arc::new(designcraft_doc::Asset {
+                page: 0,
+                id: aid,
+                name: "red.png".into(),
+                mime: "image/png".into(),
+                link: None,
+                data: Arc::new(png),
+                pixels: Some((4, 4)),
+            }),
+        );
+        // A 100 pt image at 100,100 clipped by a triangle with its apex at the top middle.
+        let triangle = designcraft_geom::PathData::single(designcraft_geom::path::SubPath::polyline(
+            &[designcraft_geom::Point::new(0.0, 100.0), designcraft_geom::Point::new(50.0, 0.0), designcraft_geom::Point::new(100.0, 100.0)],
+            true,
+        ));
+        let mut clip = designcraft_doc::ClippingPath::new(designcraft_doc::ClippingKind::PhotoshopPath, triangle);
+        let id = designcraft_doc::ItemId(d.alloc());
+        let mut it =
+            Item::new(id, lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(Rect::new(100.0, 100.0, 200.0, 200.0)));
+        it.content = designcraft_doc::Content::Graphic(designcraft_doc::Graphic {
+            asset: aid,
+            size: (100.0, 100.0),
+            xf: Affine::translate((100.0, 100.0)),
+            auto_fit: Default::default(),
+            fit_align: 4,
+            crop: [0.0; 4],
+            clip: Some(Arc::new(clip.clone())),
+        });
+        d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+        let cache = Cache::new();
+        let mut r = Renderer::new();
+        r.threads = 0;
+        let page = r.render_page(&d, &cache, 0, 1.0, false, &RenderOptions::default()).unwrap();
+        assert_eq!(page.pixel(150, 170)[..3], [255, 0, 0], "inside the triangle");
+        assert_eq!(page.pixel(110, 110)[..3], [255, 255, 255], "inside the frame, outside the triangle: paper");
+        // Inverted: the corners show and the triangle is paper.
+        clip.invert = true;
+        if let Some(designcraft_doc::Content::Graphic(g)) = d.item_mut(id).map(|it| &mut it.content) {
+            g.clip = Some(Arc::new(clip));
+        }
+        let cache = Cache::new();
+        let page = r.render_page(&d, &cache, 0, 1.0, false, &RenderOptions::default()).unwrap();
+        assert_eq!(page.pixel(150, 170)[..3], [255, 255, 255]);
+        assert_eq!(page.pixel(110, 110)[..3], [255, 0, 0]);
     }
 
     #[test]
