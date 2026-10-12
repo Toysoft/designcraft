@@ -14,6 +14,17 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, bool_or, cmd, f64_or, has_doc, has_selection, ok, point_param, rect_param, spread_param, str_param, targets};
 use crate::{Result, Session};
 
+/// `name` must be a swatch of the document: an unknown name would paint nothing. The error names
+/// the swatch it was probably meant to be (`Paper` → `[Paper]`, a different case).
+fn known_swatch(doc: &designcraft_doc::Document, name: &str, cmd: &str, key: &str) -> Result<()> {
+    if doc.swatch(name).is_some() {
+        return Ok(());
+    }
+    let bare = |n: &str| n.trim().trim_start_matches('[').trim_end_matches(']').to_lowercase();
+    let hint = doc.swatches.iter().find(|s| bare(&s.name) == bare(name)).map(|s| format!(" (did you mean `{}`?)", s.name)).unwrap_or_default();
+    Err(bad(cmd, format!("{key}: no swatch named `{name}`{hint}; create one with `swatch.create` and use its returned name")))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -160,8 +171,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 )
             }
         ),
-        cmd!("object.fill", "Fill", [], None, "{swatch, tint?: 0..1, ids?}", has_selection, |s, p| {
+        cmd!("object.fill", "Fill", [], None, "{swatch (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?}", has_selection, |s, p| {
             let sw = str_param(p, "swatch").ok_or_else(|| bad("object.fill", "missing swatch"))?.to_string();
+            known_swatch(&s.doc()?.doc, &sw, "object.fill", "swatch")?;
             let tint = f64_or(p, "tint", 1.0) as f32;
             set_flag(s, p, move |i| i.fill = Fill { swatch: sw.clone(), tint, ..i.fill.clone() }, false)
         }),
@@ -173,6 +185,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "{swatch?, tint?, weight?, align?: center|inside|outside, type?: {kind:…}, cap?: butt|round|projecting, join?: miter|round|bevel, miterLimit?, start?, end?: none|simple|simpleWide|triangle|triangleWide|barbed|curved|circle|circleSolid|square|squareSolid|bar, gapSwatch?, gapTint?, gapOverprint?: bool, ids?}",
             has_selection,
             |s, p| {
+                for key in ["swatch", "gapSwatch"] {
+                    if let Some(name) = p.get(key).and_then(Value::as_str) {
+                        known_swatch(&s.doc()?.doc, name, "object.stroke", key)?;
+                    }
+                }
                 let p2 = p.clone();
                 set_flag(
                     s,
@@ -2163,7 +2180,7 @@ mod scale_tests {
         s.execute("file.new", &json!({})).unwrap();
         let r = s.execute("frame.create", &json!({"rect": [100, 100, 200, 150]})).unwrap();
         let id = ItemId(r["id"].as_u64().unwrap());
-        s.execute("object.stroke", &json!({"weight": 4, "swatch": "Black"})).unwrap();
+        s.execute("object.stroke", &json!({"weight": 4, "swatch": "[Black]"})).unwrap();
         let weight = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().stroke.weight;
         let bounds = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().bounds();
         s.execute("transform.scale", &json!({"sx": 2.0})).unwrap();
@@ -2724,5 +2741,37 @@ mod blend_mode_tests {
         let it = s.doc().unwrap().doc.item(id).cloned().unwrap();
         assert_eq!(it.blend, BlendMode::Multiply, "a rejected value changes nothing");
         assert_eq!(it.opacity, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod swatch_name_tests {
+    use serde_json::json;
+
+    #[test]
+    fn fills_and_strokes_must_name_a_swatch_and_change_nothing_otherwise() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 100, 100]})).unwrap()["id"].clone();
+        for (cmd, params, hint) in [
+            ("object.fill", json!({"swatch": "Paper", "ids": [id]}), Some("[Paper]")),
+            ("object.fill", json!({"swatch": "[black]", "ids": [id]}), Some("[Black]")),
+            ("object.fill", json!({"swatch": "Missing Ink", "ids": [id]}), None),
+            ("object.stroke", json!({"swatch": "#ff0000", "weight": 4, "ids": [id]}), None),
+            ("object.stroke", json!({"gapSwatch": "paper", "ids": [id]}), Some("[Paper]")),
+        ] {
+            let before = s.doc().unwrap().doc.clone();
+            let e = s.execute(cmd, &params).unwrap_err().to_string();
+            assert!(e.contains("no swatch named") && e.contains("swatch.create"), "{cmd}: {e}");
+            if let Some(h) = hint {
+                assert!(e.contains(&format!("did you mean `{h}`")), "{cmd}: {e}");
+            }
+            assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc), "{cmd}: nothing changed");
+        }
+        // Real names, [None] included, still work.
+        for sw in ["[Paper]", "[None]", "C=100 M=0 Y=0 K=0"] {
+            s.execute("object.fill", &json!({"swatch": sw, "ids": [id]})).unwrap();
+            s.execute("object.stroke", &json!({"swatch": sw, "ids": [id]})).unwrap();
+        }
     }
 }

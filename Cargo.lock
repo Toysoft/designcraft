@@ -1160,6 +1160,7 @@ dependencies = [
  "unicode-bidi",
  "unicode-bidi-mirroring",
  "unicode-segmentation",
+ "zip",
 ]
 
 [[package]]
