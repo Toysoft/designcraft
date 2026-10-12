@@ -852,6 +852,11 @@ impl DesignApp {
                 return;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // Dock Quit can arrive while the app is hidden or minimized. Make its question
+            // visible through the normal safe window commands before asking about documents.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             if self.quitting.is_none() {
                 self.quitting = Some(QuitState { original_active: self.session.active().map(|d| d.uid), accepted: HashMap::new(), pending: None });
             }
@@ -1425,6 +1430,105 @@ mod tests {
     fn discard_quit_dialog(app: &mut DesignApp) {
         app.ui.dialog.as_mut().unwrap().fields.insert("discard".into(), json!(true));
         dialogs::confirm(app).unwrap();
+    }
+
+    #[test]
+    fn native_quit_prompts_restore_window_visibility_without_focusing_completed_quits() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        let commands = quit_frame(&mut app, &ctx, true);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        for command in [egui::ViewportCommand::Visible(true), egui::ViewportCommand::Minimized(false), egui::ViewportCommand::Focus] {
+            assert!(commands.contains(&command), "unsaved prompt must restore the window: {commands:?}");
+        }
+        discard_quit_dialog(&mut app);
+        let approved = quit_frame(&mut app, &ctx, false);
+        assert!(approved.contains(&egui::ViewportCommand::Close));
+        let completed = quit_frame(&mut app, &ctx, true);
+        assert!(app.session.documents().is_empty());
+
+        let mut clean = DesignApp::new(designcraft_engine::Session::new(), Services::default());
+        clean.run("file.new", json!({})).unwrap();
+        let clean_close = quit_frame(&mut clean, &ctx, true);
+        let mut control = app_with_unsaved_document();
+        control.quit_without_asking = true;
+        let control_close = quit_frame(&mut control, &ctx, true);
+        for commands in [&approved, &completed, &clean_close, &control_close] {
+            assert!(
+                !commands.iter().any(|command| matches!(
+                    command,
+                    egui::ViewportCommand::Visible(true) | egui::ViewportCommand::Minimized(false) | egui::ViewportCommand::Focus
+                )),
+                "completed and immediate quits must not activate the window: {commands:?}"
+            );
+        }
+    }
+
+    /// Dock Quit may arrive again while the first request's dialogs are still open.
+    #[test]
+    fn repeated_native_quit_requests_preserve_partial_approvals_and_cancel() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let original_active = app.session.active().unwrap().uid;
+        let uids: Vec<_> = app.session.documents().iter().map(|d| d.uid).collect();
+        let docs: Vec<_> = app.session.documents().iter().map(|d| d.doc.clone()).collect();
+        let directory = tempfile::tempdir().unwrap();
+        app.session.recovery_dir = Some(directory.path().to_path_buf());
+        app.run("file.recovery.save", json!({})).unwrap();
+        assert!(quit_frame(&mut app, &ctx, true).contains(&egui::ViewportCommand::CancelClose));
+        assert_eq!(dialog_uid(&app), Some(uids[0]));
+        discard_quit_dialog(&mut app);
+        quit_frame(&mut app, &ctx, false);
+        assert_eq!(dialog_uid(&app), Some(uids[1]));
+        for _ in 0..3 {
+            assert!(quit_frame(&mut app, &ctx, true).contains(&egui::ViewportCommand::CancelClose));
+            assert_eq!(dialog_uid(&app), Some(uids[1]));
+        }
+        app.ui.dialog = None; // Cancel the second document, retaining the first Don't Save answer.
+        assert!(!quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.active().unwrap().uid, original_active);
+        assert_eq!(app.session.documents().iter().map(|d| d.uid).collect::<Vec<_>>(), uids);
+        for (document, original) in app.session.documents().iter().zip(docs) {
+            assert!(std::sync::Arc::ptr_eq(&document.doc, &original));
+            assert!(document.is_dirty());
+            assert!(!document.history.undo.is_empty());
+            assert!(directory.path().join(format!("{}.designcraft", document.uid)).exists());
+        }
+        // A fresh Dock Quit must ask about the first document again after cancellation.
+        assert!(quit_frame(&mut app, &ctx, true).contains(&egui::ViewportCommand::CancelClose));
+        assert_eq!(dialog_uid(&app), Some(uids[0]));
+    }
+
+    #[test]
+    fn repeated_native_quit_requests_save_and_discard_only_after_all_answers() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_unsaved_document();
+        second_unsaved_document(&mut app);
+        let uids: Vec<_> = app.session.documents().iter().map(|d| d.uid).collect();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("saved.designcraft");
+        let chosen = path.to_string_lossy().to_string();
+        app.services.pick_save = Some(Box::new(move |_| Some(chosen.clone())));
+        app.session.recovery_dir = Some(directory.path().join("recovery"));
+        app.run("file.recovery.save", json!({})).unwrap();
+        quit_frame(&mut app, &ctx, true);
+        assert_eq!(dialog_uid(&app), Some(uids[0]));
+        dialogs::confirm(&mut app).unwrap(); // Save the first document.
+        assert!(!app.session.documents()[0].is_dirty());
+        quit_frame(&mut app, &ctx, false);
+        assert_eq!(dialog_uid(&app), Some(uids[1]));
+        assert!(quit_frame(&mut app, &ctx, true).contains(&egui::ViewportCommand::CancelClose));
+        assert_eq!(dialog_uid(&app), Some(uids[1]));
+        discard_quit_dialog(&mut app);
+        assert!(quit_frame(&mut app, &ctx, false).contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.session.documents().len(), 2);
+        assert!(app.session.recovery_dir.as_ref().unwrap().join(format!("{}.designcraft", uids[1])).exists());
+        assert!(quit_frame(&mut app, &ctx, true).is_empty());
+        assert!(app.session.documents().is_empty());
+        assert!(path.exists());
+        assert_eq!(designcraft_engine::Session::new().execute("file.open", &json!({"path": path})).unwrap()["index"], 0);
+        assert_eq!(std::fs::read_dir(app.session.recovery_dir.as_ref().unwrap()).unwrap().count(), 0);
     }
 
     #[test]

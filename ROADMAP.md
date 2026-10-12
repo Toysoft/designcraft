@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~0% and ~15–25 h away; beta ~28 points and ~420–750 h beyond that (the core-workflow gate, not the percentage: ready for real work is already ~47%)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (orderly native exit recovery) · **Target:** Adobe InDesign 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (cancelable macOS Dock Quit) · **Target:** Adobe InDesign 2026
 
 DesignCraft aims at full Adobe InDesign parity, and to be better: faster, open (documented JSON
 format + IDML), scriptable by agents (MCP), and available on the web.
@@ -129,6 +129,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-12** · macOS Dock Quit uses the same unsaved-document prompts as window and menu Quit. Repeated requests keep the current answers; Cancel retains every tab and unsaved recovery checkpoint, and completed Save/Don't Save answers exit through the ordinary event loop. No readiness percentage change.
 - **2026-10-12** · Orderly native exit writes the latest recovery state after finalizing current quit approvals; incomplete or stale plans keep their documents, and Undo to the saved state clears stale recovery. Unavailable or failed recovery is reported. Cancelable macOS Dock Quit remains open (#544). No readiness percentage change.
 - **2026-10-12** · Recovered documents keep a checkpoint until saved, closed or reverted, including a second crash before autosave. Restarted document IDs and explicit recovery folders preserve other snapshots; failed republishing retains the original. No readiness percentage change.
 - **2026-10-12** · Book numbering and style updates prepare every chapter before saving. Only closed native chapters are changed; imported IDML remains a read-only style/PDF source. If a later disk write fails, the error names the completed chapters; the batch is not a whole-book transaction. No readiness percentage change.

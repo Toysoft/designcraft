@@ -299,6 +299,15 @@ fn main() -> eframe::Result {
             b.with_x11();
         }));
     }
+    // AppKit Dock Quit otherwise terminates before egui can cancel the close. Route it through
+    // ordinary CloseRequested events, preserving the same transactional Save/Don't Save flow.
+    #[cfg(target_os = "macos")]
+    {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::macos::EventLoopBuilderExtMacOS;
+            builder.with_close_requested_on_terminate(true);
+        }));
+    }
     eframe::run_native(
         "DesignCraft",
         options,
