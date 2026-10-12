@@ -33,8 +33,8 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 ## Blocking (beta can't be declared while these are open)
 
 ### 1. Basic editing fails for many users (U, S)
-- **Missing:** object copy/paste on Windows and Linux (#351, #348, #312, #185, #164, #201, text RTF
-  paste #212); Paste in Place onto the selected page (#348); right-click context menus that don't
+- **Missing:** object paste on Windows and Linux while the system clipboard is empty (⌘C/⌘V on
+  objects now work otherwise; #351, #348, #312, #185, #164, #201, text RTF paste #212); Paste in Place onto the selected page (#348); right-click context menus that don't
   open (#238, #187, #160, #312); threading (gap 0); double-click word selection in fields
   (#189); character formatting set at a caret is discarded (#289).
 - **Evidence:** 16 issues from 2026-10-05 to 2026-10-10, mostly against the 0.4/0.5 release builds.

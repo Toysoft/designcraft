@@ -88,7 +88,7 @@ and its second character starts at 3. An offset inside a character snaps back to
 | `export_png` | Write a page as PNG (or JPEG by extension) |
 | `screenshot` | Whole app window → image content (connected only; captured to a temp file and read back) |
 | `select_tool` | Activate a tool (`selection`, `type`, `rectangleFrame`, `line`, …) |
-| `pointer` | Mouse gesture events (`down`/`drag`/`up`/`move`/`doubleclick`) for the active tool, optional `tool` |
+| `pointer` | Mouse gesture events (`down`/`drag`/`up`/`move`/`doubleclick`, `clicks: 3–5` on a `down` for triple to five clicks) for the active tool, optional `tool` |
 | `key` | Key press with modifiers (headless: active tool → command shortcuts → tool shortcuts) |
 | `type_text` | Type at the text insertion point (or into the focused dialog field in the app) |
 | `click` / `drag` | Real pointer input at screen points (connected only) |

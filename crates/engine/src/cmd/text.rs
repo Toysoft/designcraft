@@ -22,24 +22,12 @@ pub fn specs() -> Vec<CommandSpec> {
             release
         ),
         cmd!(noundo "text.extendTo", "Extend Text Selection", [], None, "{frame, point}", has_doc, |s, p| place(s, p, true)),
-        cmd!(noundo "text.selectWord", "Select Word", [], None, "{frame, point}", has_doc, |s, p| {
-            place(s, p, false)?;
-            let st = s.doc_mut()?;
-            let Some(t) = st.selection.text else { return ok() };
-            let text = &st.doc.text_story(t.story, t.cell).map(|x| x.text.clone()).unwrap_or_default();
-            let (a, b) = word_bounds(text, t.focus);
-            st.selection.text = Some(TextSel { anchor: a, focus: b, ..t });
-            ok()
+        cmd!(noundo "text.selectWord", "Select Word", [], None, "{frame, point} — the word there (or the run of spaces or punctuation): a double click", has_doc, |s, p| select_unit(s, p, "word")),
+        cmd!(noundo "text.selectLine", "Select Line", [], None, "{frame, point} — the composed line there: a triple click", has_doc, |s, p| select_unit(s, p, "line")),
+        cmd!(noundo "text.selectParagraph", "Select Paragraph", [], None, "{frame, point} — the paragraph there, without its return: four clicks", has_doc, |s, p| {
+            select_unit(s, p, "paragraph")
         }),
-        cmd!(noundo "text.selectSentence", "Select Sentence", [], None, "{frame, point} — the sentence under the point (triple click)", has_doc, |s, p| {
-            select_around(s, p, "text.selectSentence", sentence_bounds)
-        }),
-        cmd!(noundo "text.selectParagraph", "Select Paragraph", [], None, "{frame, point} — the paragraph under the point (quadruple click)", has_doc, |s, p| {
-            select_around(s, p, "text.selectParagraph", para_bounds)
-        }),
-        cmd!(noundo "text.selectStory", "Select Story", [], None, "{frame, point} — all the text of the story under the point, threaded frames included (quintuple click)", has_doc, |s, p| {
-            select_around(s, p, "text.selectStory", |t, _| (0, t.len()))
-        }),
+        cmd!(noundo "text.selectStory", "Select Story Text", [], None, "{frame, point} — all of the story's text: five clicks", has_doc, |s, p| select_unit(s, p, "story")),
         cmd!(noundo "text.select", "Select Text", [], None, "{story, anchor, focus} (UTF-8 byte offsets into the story text, as find.find reports them: á or — counts 2 or 3)", has_doc, |s, p| {
             let sid = StoryId(p.get("story").and_then(Value::as_u64).unwrap_or(0));
             let st = s.doc_mut()?;
@@ -161,8 +149,24 @@ pub fn specs() -> Vec<CommandSpec> {
             s,
             &json!({"align": "leftJustified"})
         )),
-        cmd!("type.bold", "Bold", [], Some("Cmd+Shift+B"), "{}", has_text_or_frames, |s, _| format_chars(s, &json!({"fontStyle": "Bold"}))),
-        cmd!("type.italic", "Italic", [], Some("Cmd+Shift+I"), "{}", has_text_or_frames, |s, _| format_chars(s, &json!({"fontStyle": "Italic"}))),
+        cmd!(
+            "type.bold",
+            "Bold",
+            [],
+            Some("Cmd+Shift+B"),
+            "{on?: bool} — toggles bold through the family's linked styles (Italic → Bold Italic); without `on`, the opposite of the first selected character",
+            has_text_or_frames,
+            |s, p| toggle_style(s, p, true)
+        ),
+        cmd!(
+            "type.italic",
+            "Italic",
+            [],
+            Some("Cmd+Shift+I"),
+            "{on?: bool} — toggles italic through the family's linked styles (Bold → Bold Italic); without `on`, the opposite of the first selected character",
+            has_text_or_frames,
+            |s, p| toggle_style(s, p, false)
+        ),
         cmd!("type.underline", "Underline", [], Some("Cmd+Shift+U"), "{}", has_text_or_frames, |s, _| format_chars(s, &json!({"underline": true}))),
         cmd!("type.allCaps", "All Caps", [], Some("Cmd+Shift+K"), "{}", has_text_or_frames, |s, _| format_chars(
             s,
@@ -632,66 +636,45 @@ pub fn prev_word(s: &str, i: usize) -> usize {
     }
     0
 }
-fn word_bounds(s: &str, i: usize) -> (usize, usize) {
-    let a = s[..i.min(s.len())].char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map(|(k, _)| k).unwrap_or(i);
-    let b = s[i.min(s.len())..].char_indices().find(|(_, c)| !is_word(*c)).map(|(k, _)| i + k).unwrap_or(s.len());
-    (a, b)
+/// What a double click selects a run of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Word,
+    Space,
+    Punct,
+    Break,
 }
 
-/// Selects `bounds(text, byte)` around the byte under `point` in `frame`. Unlike a caret
-/// placement, a press inside the current selection is no start of a text drag here: it is the
-/// third or later click of a row, which lands in the word or sentence just selected.
-fn select_around(s: &mut Session, p: &Value, id: &str, bounds: fn(&str, usize) -> (usize, usize)) -> Result<Value> {
-    let frame = id_param(p, "frame").ok_or_else(|| bad(id, "missing frame"))?;
-    let pt = point_param(p, "point").unwrap_or(Point::ZERO);
-    let (sid, b, cell) = hit_byte(s, frame, pt).ok_or_else(|| bad(id, "not a text frame"))?;
-    let st = s.doc_mut()?;
-    let text = st.doc.text_story(sid, cell).map(|x| x.text.clone()).unwrap_or_default();
-    let (anchor, focus) = bounds(&text, floor_char_boundary(&text, b));
-    st.selection = Selection::text(TextSel { story: sid, anchor, focus, frame: Some(frame), cell });
-    st.revision += 1;
-    Ok(json!({"story": sid.0, "anchor": anchor, "focus": focus}))
-}
-
-/// The paragraph around byte `i`, without its `\n`.
-fn para_bounds(s: &str, i: usize) -> (usize, usize) {
-    let i = i.min(s.len());
-    let a = s.get(..i).and_then(|t| t.rfind('\n')).map_or(0, |k| k + 1);
-    let b = s.get(i..).and_then(|t| t.find('\n')).map_or(s.len(), |k| i + k);
-    (a, b)
-}
-
-/// The sentence around byte `i`, within its paragraph: it ends after `.`, `!`, `?` or `…` (and
-/// any closing quotes or brackets) followed by a space or the paragraph end, or after a CJK full
-/// stop, and takes the spaces after it, as deleting a sentence should leave none behind.
-fn sentence_bounds(s: &str, i: usize) -> (usize, usize) {
-    let (pa, pb) = para_bounds(s, i);
-    let para = s.get(pa..pb).unwrap_or("");
-    let mut start = 0;
-    let mut it = para.char_indices().peekable();
-    while let Some((_, c)) = it.next() {
-        let cjk = matches!(c, '。' | '！' | '？');
-        if !cjk && !matches!(c, '.' | '!' | '?' | '…') {
-            continue;
-        }
-        while it.peek().is_some_and(|&(_, c)| {
-            matches!(c, '.' | '!' | '?' | '…' | '。' | '！' | '？' | '"' | '\'' | '”' | '’' | '»' | '›' | ')' | ']' | '」' | '』' | '）')
-        }) {
-            it.next();
-        }
-        if !cjk && it.peek().is_some_and(|&(_, c)| !c.is_whitespace()) {
-            continue;
-        }
-        while it.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
-            it.next();
-        }
-        let end = it.peek().map_or(para.len(), |&(k, _)| k);
-        if pa + end > i || end == para.len() {
-            return (pa + start, pa + end);
-        }
-        start = end;
+fn char_class(c: char) -> CharClass {
+    if is_word(c) {
+        CharClass::Word
+    } else if matches!(c, '\n' | '\u{2028}') {
+        CharClass::Break
+    } else if c.is_whitespace() {
+        CharClass::Space
+    } else {
+        CharClass::Punct
     }
-    (pa + start, pb)
+}
+
+/// The run a double click at byte `i` selects: the word touching it (inside the word or at either
+/// edge), else the spaces or punctuation there. Never a paragraph return.
+fn word_bounds(s: &str, i: usize) -> (usize, usize) {
+    let i = floor_char_boundary(s, i.min(s.len()));
+    let (head, tail) = s.split_at(i);
+    let before = head.chars().next_back().map(char_class);
+    let after = tail.chars().next().map(char_class);
+    let class = if before == Some(CharClass::Word) || after == Some(CharClass::Word) {
+        CharClass::Word
+    } else {
+        match after.filter(|c| *c != CharClass::Break).or(before) {
+            Some(c) if c != CharClass::Break => c,
+            _ => return (i, i),
+        }
+    };
+    let a = head.char_indices().rev().take_while(|(_, c)| char_class(*c) == class).last().map_or(i, |(k, _)| k);
+    let b = tail.char_indices().find(|(_, c)| char_class(*c) != class).map_or(s.len(), |(k, _)| i + k);
+    (a, b)
 }
 
 /// Type ▸ Story Direction.
@@ -732,13 +715,7 @@ fn move_caret(s: &mut Session, p: &Value) -> Result<Value> {
     let t = st.selection.text.ok_or_else(|| bad("text.move", "no caret"))?;
     let story = st.doc.text_story(t.story, t.cell).ok_or(designcraft_doc::DocError::NoStory(t.story))?;
     let text = story.text.clone();
-    let cs = s.cache.get(&st.doc, t.story, None);
-    // In a cell, lines come from the cell's own composition.
-    let cs = match t.cell {
-        Some(c) if c.footnote_id().is_some() => compose::find_note(&cs, c.row as u64).map(|(_, n)| n.text.clone()).unwrap_or(cs),
-        Some(c) => compose::find_cell(&cs, c.table, c.row, c.col).map(|(_, _, pc)| pc.text.clone()).unwrap_or(cs),
-        None => cs,
-    };
+    let cs = composition_of(s, &st.doc, &t);
     let pos = t.focus.min(text.len());
     // Vertical lines run top to bottom and follow each other right to left: Down and Up move along
     // the line (Right and Left of horizontal text), Left and Right to the next and previous line.
@@ -783,6 +760,53 @@ fn move_caret(s: &mut Session, p: &Value) -> Result<Value> {
     stm.selection.text = Some(if extend { TextSel { focus: new, ..t } } else { TextSel { anchor: new, focus: new, ..t } });
     stm.revision += 1;
     Ok(json!({"pos": new}))
+}
+
+/// The composition the text selection's lines come from: a table cell or footnote has its own.
+fn composition_of(s: &Session, doc: &designcraft_doc::Document, t: &TextSel) -> std::sync::Arc<compose::ComposedStory> {
+    let cs = s.cache.get(doc, t.story, None);
+    match t.cell {
+        Some(c) if c.footnote_id().is_some() => compose::find_note(&cs, c.row as u64).map(|(_, n)| n.text.clone()).unwrap_or(cs),
+        Some(c) => compose::find_cell(&cs, c.table, c.row, c.col).map(|(_, _, pc)| pc.text.clone()).unwrap_or(cs),
+        None => cs,
+    }
+}
+
+/// Multiple clicks with the Type tool: select the word (or run of spaces), line, paragraph or
+/// whole story at the point.
+fn select_unit(s: &mut Session, p: &Value, unit: &str) -> Result<Value> {
+    // A press inside the selection keeps it for dragging; these clicks select afresh.
+    if let Some(st) = s.active_mut() {
+        st.selection.text = None;
+    }
+    place(s, p, false)?;
+    s.text_drag = false;
+    let st = s.doc()?;
+    let Some(t) = st.selection.text else { return ok() };
+    let Some(story) = st.doc.text_story(t.story, t.cell) else { return ok() };
+    let text = &story.text;
+    let pos = floor_char_boundary(text, t.focus.min(text.len()));
+    let (a, b) = match unit {
+        "word" => word_bounds(text, pos),
+        "line" => {
+            let cs = composition_of(s, &st.doc, &t);
+            line_of(&cs, pos).unwrap_or((pos, pos))
+        }
+        "paragraph" => paragraph_bounds(text, pos),
+        _ => (0, text.len()),
+    };
+    let st = s.doc_mut()?;
+    st.selection.text = Some(TextSel { anchor: a, focus: b, ..t });
+    st.revision += 1;
+    Ok(json!({"story": t.story.0, "anchor": a, "focus": b}))
+}
+
+/// The paragraph around byte `i`, without its closing return.
+fn paragraph_bounds(s: &str, i: usize) -> (usize, usize) {
+    let i = floor_char_boundary(s, i.min(s.len()));
+    let a = s.get(..i).and_then(|h| h.rfind('\n')).map_or(0, |k| k + 1);
+    let b = s.get(i..).and_then(|t| t.find('\n')).map_or(s.len(), |k| i + k);
+    (a, b)
 }
 
 fn line_of(cs: &compose::ComposedStory, pos: usize) -> Option<(usize, usize)> {
@@ -931,6 +955,87 @@ pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
             });
         }
         ok()
+    })
+}
+
+/// Type ▸ Bold / Italic: each run of the text keeps its family and the rest of its style and
+/// takes the family's style-linked face (Italic → Bold Italic, Bold Condensed → Condensed).
+/// Runs whose family has no such face keep theirs; an error when none could change.
+fn toggle_style(s: &mut Session, p: &Value, bold: bool) -> Result<Value> {
+    let id = if bold { "type.bold" } else { "type.italic" };
+    let targets = format_targets(s);
+    let st = s.doc()?;
+    let doc = &st.doc;
+    let resolved = |story: &designcraft_doc::Story, pos: usize, caret: bool| {
+        let para = story.paras.get(story.para_at(pos)).or(story.paras.last())?;
+        let (_, base) = doc.styles.resolve_para(para);
+        let f = if caret { story.char_format_at(pos) } else { story.format_after(pos) };
+        Some(doc.styles.resolve_char(&base, f))
+    };
+    let has = |style: &str| if bold { designcraft_fonts::style_is_bold(style) } else { designcraft_fonts::style_is_italic(style) };
+    // On or off: as asked, else the opposite of the first character's.
+    let on = match p.get("on").and_then(Value::as_bool) {
+        Some(on) => on,
+        None => {
+            let first =
+                targets.first().and_then(|t| doc.text_story(t.story, t.cell).and_then(|story| resolved(story, t.range.start, t.range.is_empty())));
+            !first.is_some_and(|c| has(&c.font_style))
+        }
+    };
+    let fonts = designcraft_fonts::FontDb::global().scoped(doc.font_scope);
+    let link = |family: &str, style: &str| {
+        let styles = fonts.styles(family);
+        if bold {
+            designcraft_fonts::linked_style(&styles, style, Some(on), None)
+        } else {
+            designcraft_fonts::linked_style(&styles, style, None, Some(on))
+        }
+    };
+    // (story, cell, range, new style) for every run that changes.
+    let mut plan: Vec<(StoryId, Option<CellAddr>, std::ops::Range<usize>, String)> = Vec::new();
+    let mut missing: Option<String> = None;
+    for t in &targets {
+        let Some(story) = doc.text_story(t.story, t.cell) else { continue };
+        let runs: Vec<std::ops::Range<usize>> = if t.range.is_empty() {
+            // A caret formats only an empty story's typing format (as `type.char`).
+            if !story.is_empty() {
+                continue;
+            }
+            vec![t.range.clone()]
+        } else {
+            story.runs().map(|(r, _)| r.start.max(t.range.start)..r.end.min(t.range.end)).filter(|r| !r.is_empty()).collect()
+        };
+        for r in runs {
+            let Some(c) = resolved(story, r.start, r.is_empty()) else { continue };
+            if has(&c.font_style) == on {
+                continue;
+            }
+            match link(&c.font_family, &c.font_style) {
+                Some(style) => plan.push((t.story, t.cell, r, style)),
+                None => missing = Some(c.font_family.clone()),
+            }
+        }
+    }
+    if plan.is_empty() {
+        return match missing {
+            Some(family) => Err(bad(id, format!("{family} has no {} style to switch to", if bold { "bold" } else { "italic" }))),
+            None => Ok(json!({"changed": 0, "on": on})),
+        };
+    }
+    let n = plan.len();
+    s.edit(|d, _| {
+        for (sid, cell, r, style) in &plan {
+            let Some(st) = d.text_story_mut(*sid, *cell) else { continue };
+            if r.is_empty() {
+                if let Some(run) = st.chars.first_mut() {
+                    run.format.over.font_style = Some(style.clone());
+                    st.rev += 1;
+                }
+                continue;
+            }
+            st.format_chars(r.clone(), |f| f.over.font_style = Some(style.clone()));
+        }
+        Ok(json!({"changed": n, "on": on}))
     })
 }
 
@@ -2009,42 +2114,134 @@ mod story_query_contract_tests {
 }
 
 #[cfg(test)]
-mod multi_click_tests {
-    use super::{para_bounds, sentence_bounds};
+mod click_selection_tests {
+    use designcraft_doc::StoryId;
+    use serde_json::{Value, json};
 
-    fn sentence(s: &str, at: &str) -> String {
-        let i = s.find(at).unwrap();
-        let (a, b) = sentence_bounds(s, i);
-        s[a..b].to_string()
+    use crate::Session;
+
+    /// A text frame at [72, 72, 400, 200] holding `text`; returns (frame, story).
+    fn frame(s: &mut Session, text: &str) -> (u64, StoryId) {
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": text})).unwrap();
+        (r["id"].as_u64().unwrap(), StoryId(r["story"].as_u64().unwrap()))
+    }
+
+    fn caret_x(s: &Session, sid: StoryId, pos: usize) -> f64 {
+        let cs = s.cache.get(&s.doc().unwrap().doc, sid, None);
+        crate::compose::caret(&cs, pos).unwrap().1
     }
 
     #[test]
-    fn sentences_end_at_a_stop_before_a_space_or_the_paragraph_end() {
-        let s = "It costs 3.5 euros. \u{201C}Really?\u{201D} (Twice!) Yes\u{2026} fine.\nNext one. Last";
-        assert_eq!(sentence(s, "costs"), "It costs 3.5 euros. ");
-        assert_eq!(sentence(s, "Really"), "\u{201C}Really?\u{201D} ");
-        assert_eq!(sentence(s, "Twice"), "(Twice!) ");
-        assert_eq!(sentence(s, "Yes"), "Yes\u{2026} ");
-        assert_eq!(sentence(s, "fine"), "fine.");
-        assert_eq!(sentence(s, "one"), "Next one. ");
-        assert_eq!(sentence(s, "Last"), "Last");
-        // The caret at the very end of a paragraph is in its last sentence.
-        let end = s.find('\n').unwrap();
-        assert_eq!(sentence_bounds(s, end), (s.find("fine").unwrap(), end));
+    fn a_space_typed_at_the_end_moves_the_caret() {
+        let mut s = Session::new();
+        let (_, sid) = frame(&mut s, "Hello");
+        let before = caret_x(&s, sid, 5);
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 5})).unwrap();
+        s.execute("text.insert", &json!({"text": " "})).unwrap();
+        let after = caret_x(&s, sid, 6);
+        assert!(after > before + 1.0, "caret stayed at {after} (was {before})");
+        s.execute("text.insert", &json!({"text": " "})).unwrap();
+        assert!(caret_x(&s, sid, 7) > after + 1.0);
+    }
+
+    fn sel(s: &Session) -> (usize, usize) {
+        let t = s.doc().unwrap().selection.text.unwrap();
+        (t.anchor, t.focus)
+    }
+
+    /// Run a Type tool selection command at byte `pos` (clicking just right of that glyph edge).
+    fn click(s: &mut Session, id: u64, sid: StoryId, cmd: &str, pos: usize) -> Value {
+        let cs = s.cache.get(&s.doc().unwrap().doc, sid, None);
+        let (_, x, baseline, _, _) = crate::compose::caret(&cs, pos).unwrap();
+        s.execute(cmd, &json!({"frame": id, "point": [x + 0.1, baseline - 2.0]})).unwrap()
     }
 
     #[test]
-    fn cjk_full_stops_end_sentences_without_a_space() {
-        let s = "これは文です。次の文！最後";
-        assert_eq!(sentence(s, "次"), "次の文！");
-        assert_eq!(sentence(s, "最後"), "最後");
+    fn double_click_selects_the_word_or_the_spaces() {
+        let mut s = Session::new();
+        let (id, sid) = frame(&mut s, "one two   three, four");
+        click(&mut s, id, sid, "text.selectWord", 5);
+        assert_eq!(sel(&s), (4, 7), "inside a word");
+        click(&mut s, id, sid, "text.selectWord", 7);
+        assert_eq!(sel(&s), (4, 7), "at a word's end");
+        click(&mut s, id, sid, "text.selectWord", 8);
+        assert_eq!(sel(&s), (7, 10), "on spaces");
     }
 
     #[test]
-    fn paragraphs_stop_at_returns() {
-        let s = "One.\nTwo two.\n";
-        assert_eq!(para_bounds(s, 6), (5, 13));
-        assert_eq!(para_bounds(s, 0), (0, 4));
-        assert_eq!(para_bounds(s, s.len()), (s.len(), s.len()));
+    fn more_clicks_select_the_line_paragraph_and_story() {
+        let mut s = Session::new();
+        let text = "First paragraph.\nSecond one here.\nThird.";
+        let (id, sid) = frame(&mut s, text);
+        let second = text.find("one").unwrap();
+        click(&mut s, id, sid, "text.selectParagraph", second);
+        assert_eq!(sel(&s), (17, 33));
+        // A press inside the selection (a fourth click after a triple) still selects.
+        click(&mut s, id, sid, "text.selectLine", second);
+        let (a, b) = sel(&s);
+        assert_eq!(&text[a..b.min(text.len())].trim_end_matches('\n'), &"Second one here.");
+        click(&mut s, id, sid, "text.selectStory", second);
+        assert_eq!(sel(&s), (0, text.len()));
+        assert!(!s.text_drag, "the next release must not collapse the selection");
+    }
+}
+
+#[cfg(test)]
+mod bold_italic_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// A Source Serif 4 story "Plain words here" with its middle word selected; returns the story.
+    fn setup(s: &mut Session, family: &str) -> u64 {
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Plain words here"})).unwrap();
+        let sid = r["story"].as_u64().unwrap();
+        s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 16})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"fontFamily": family, "fontStyle": "Regular"}})).unwrap();
+        s.execute("text.select", &json!({"story": sid, "anchor": 6, "focus": 11})).unwrap();
+        sid
+    }
+
+    fn style(s: &mut Session) -> String {
+        s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["fontStyle"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn bold_and_italic_toggle_and_combine() {
+        let mut s = Session::new();
+        setup(&mut s, "Source Serif 4");
+        s.execute("type.bold", &json!({})).unwrap();
+        assert_eq!(style(&mut s), "Bold");
+        s.execute("type.italic", &json!({})).unwrap();
+        assert_eq!(style(&mut s), "Bold Italic");
+        s.execute("type.bold", &json!({})).unwrap();
+        assert_eq!(style(&mut s), "Italic");
+        s.execute("type.italic", &json!({})).unwrap();
+        assert_eq!(style(&mut s), "Regular");
+    }
+
+    #[test]
+    fn a_mixed_selection_turns_on_from_its_first_character_and_keeps_each_slant() {
+        let mut s = Session::new();
+        let sid = setup(&mut s, "Source Serif 4");
+        s.execute("type.italic", &json!({})).unwrap(); // "words" italic
+        s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 16})).unwrap();
+        s.execute("type.bold", &json!({})).unwrap();
+        s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 5})).unwrap();
+        assert_eq!(style(&mut s), "Bold");
+        s.execute("text.select", &json!({"story": sid, "anchor": 6, "focus": 11})).unwrap();
+        assert_eq!(style(&mut s), "Bold Italic");
+    }
+
+    #[test]
+    fn a_family_without_the_linked_style_reports_it() {
+        let mut s = Session::new();
+        setup(&mut s, "Source Sans 3");
+        s.execute("type.bold", &json!({})).unwrap();
+        let e = s.execute("type.italic", &json!({})).unwrap_err().to_string();
+        assert!(e.contains("Source Sans 3 has no italic"), "{e}");
+        assert_eq!(style(&mut s), "Bold", "unchanged");
     }
 }

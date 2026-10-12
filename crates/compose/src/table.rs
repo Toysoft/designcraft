@@ -439,6 +439,7 @@ fn emit(
         first_in_para: first,
         last_in_para: last,
         end_x: right,
+        trailing: vec![],
         spacing: 1.0,
         hj: 0,
         keep_violation: false,

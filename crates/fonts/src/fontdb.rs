@@ -808,6 +808,96 @@ fn style_italic(style: &str) -> bool {
     s.contains("italic") || s.contains("oblique") || s == "it"
 }
 
+/// Is `style` bold (semibold or heavier)?
+pub fn style_is_bold(style: &str) -> bool {
+    style_weight(base_style(style)) >= 600.0
+}
+
+/// Is `style` italic (or oblique)?
+pub fn style_is_italic(style: &str) -> bool {
+    style_italic(base_style(style))
+}
+
+/// A style name without its weight and slant words: its width or optical size (`Condensed`).
+fn style_rest(style: &str) -> String {
+    const WORDS: &[&str] = &[
+        "italic",
+        "oblique",
+        "extralight",
+        "ultralight",
+        "semibold",
+        "demibold",
+        "extrabold",
+        "ultrabold",
+        "hairline",
+        "thin",
+        "light",
+        "medium",
+        "bold",
+        "black",
+        "heavy",
+        "regular",
+        "normal",
+        "book",
+        "roman",
+        "plain",
+    ];
+    let mut s = norm(style);
+    for w in WORDS {
+        s = s.replace(w, "");
+    }
+    s
+}
+
+/// Bold and Italic by style linking: the style of a family's `styles` that turns bold (weight
+/// 700; off is 400) or italic on or off in `current` and keeps the rest of it, as a family's
+/// linked Regular, Italic, Bold and Bold Italic do: Bold on Italic is Bold Italic, Italic off on
+/// Bold Condensed Italic is Bold Condensed. `None` when the family has no such style.
+pub fn linked_style(styles: &[String], current: &str, bold: Option<bool>, italic: Option<bool>) -> Option<String> {
+    let cur = base_style(current);
+    let weight = match bold {
+        Some(true) => 700.0,
+        Some(false) => 400.0,
+        None => style_weight(cur),
+    };
+    let slant = italic.unwrap_or_else(|| style_italic(cur));
+    let rest = style_rest(cur);
+    styles
+        .iter()
+        .filter(|s| style_italic(s) == slant && (style_weight(s) - weight).abs() < 1.0)
+        .min_by_key(|s| (style_rest(s) != rest, s.len()))
+        .cloned()
+}
+
+#[cfg(test)]
+mod style_link_tests {
+    use super::linked_style;
+
+    fn styles(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bold_and_italic_combine_through_the_linked_styles() {
+        let f = styles(&["Regular", "Italic", "Bold", "Bold Italic", "Bold Condensed", "Bold Condensed Italic", "Condensed", "Light"]);
+        assert_eq!(linked_style(&f, "Regular", Some(true), None).as_deref(), Some("Bold"));
+        assert_eq!(linked_style(&f, "Italic", Some(true), None).as_deref(), Some("Bold Italic"));
+        assert_eq!(linked_style(&f, "Bold Italic", Some(false), None).as_deref(), Some("Italic"));
+        assert_eq!(linked_style(&f, "Bold", None, Some(true)).as_deref(), Some("Bold Italic"));
+        assert_eq!(linked_style(&f, "Bold Condensed Italic", None, Some(false)).as_deref(), Some("Bold Condensed"));
+        assert_eq!(linked_style(&f, "Condensed", Some(true), None).as_deref(), Some("Bold Condensed"));
+        assert_eq!(linked_style(&f, "Light", Some(true), None).as_deref(), Some("Bold"));
+        assert_eq!(linked_style(&f, "Bold {wght:650}", None, Some(true)).as_deref(), Some("Bold Italic"));
+    }
+
+    #[test]
+    fn a_family_without_the_style_has_no_link() {
+        let f = styles(&["Regular", "Bold"]);
+        assert_eq!(linked_style(&f, "Regular", None, Some(true)), None);
+        assert_eq!(linked_style(&[], "Regular", Some(true), None), None);
+    }
+}
+
 impl FontDb {
     /// A database holding the bundled fonts, then the craft-fonts Japanese faces (Mincho first,
     /// so they are the fallback for Japanese text after the requested and bundled fonts; empty

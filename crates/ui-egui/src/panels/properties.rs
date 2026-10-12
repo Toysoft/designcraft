@@ -1347,6 +1347,27 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         crate::rtl::label(ui, c["fill"].as_str().unwrap_or(""));
     });
     ui.horizontal(|ui| {
+        // Bold and Italic switch to the family's linked styles (`type.bold` / `type.italic`).
+        let style = c["fontStyle"].as_str().unwrap_or("");
+        for (id, label, on, text) in [
+            ("type.bold", "Bold", designcraft_fonts::style_is_bold(style), egui::RichText::new("B").strong()),
+            ("type.italic", "Italic", designcraft_fonts::style_is_italic(style), egui::RichText::new("I").italics()),
+        ] {
+            let tip = match crate::menus::shortcut_of(app, id) {
+                Some(sc) => format!("{} ({})", crate::i18n::tr(&app.ui.language, label), crate::menus::shortcut_text(&sc)),
+                None => crate::i18n::tr(&app.ui.language, label).to_string(),
+            };
+            if ui
+                .selectable_label(on, text)
+                .on_hover_ui(|ui| {
+                    crate::rtl::label(ui, tip.as_str());
+                })
+                .clicked()
+                && let Err(e) = app.run(id, json!({}))
+            {
+                app.status(e);
+            }
+        }
         let caps = c["capitalization"].as_str() == Some("allCaps");
         if ui
             .selectable_label(caps, "TT")

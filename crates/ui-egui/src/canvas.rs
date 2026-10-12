@@ -1366,13 +1366,15 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
-/// Presses in a row, this one included: each within egui's double-click delay and distance of the
-/// one before. Counted on the press, as text selection wants (egui counts releases, up to three).
-fn count_click(ui: &egui::Ui, id: egui::Id, at: Pos2, now: f64) -> u8 {
+/// Presses in a row at one spot, counted at each press (1, 2 = double click, … 5, then 1 again):
+/// egui only reports a double click at the release, never with the press, and stops at three.
+fn press_count(ui: &egui::Ui, pane: u8, at: Pos2) -> u8 {
+    let id = egui::Id::new(("canvas_presses", pane));
+    let now = ui.input(|i| i.time);
     let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
     let last: Option<(f64, Pos2, u8)> = ui.data(|d| d.get_temp(id));
     let n = match last {
-        Some((t, p, n)) if now - t < delay && p.distance(at) < dist => n.saturating_add(1),
+        Some((t, p, n)) if now - t < delay && p.distance(at) < dist && n < 5 => n + 1,
         _ => 1,
     };
     ui.data_mut(|d| d.insert_temp(id, (now, at, n)));
@@ -1421,13 +1423,13 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     let mut events: Vec<PointerEvent> = Vec::new();
     let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
     let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
-    let (pressed, released, origin, latest, now) =
-        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos(), i.time));
+    let (pressed, released, origin, latest) =
+        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos()));
     if pressed
         && !space
         && let Some(o) = origin.filter(|o| (if xf.rot == 0 { rect.contains(*o) } else { resp.rect.contains(*o) }) && resp.hovered())
     {
-        let clicks = count_click(ui, egui::Id::new(("canvas_clicks", app.pane)), o, now);
+        let clicks = press_count(ui, app.pane, o);
         let kind = if clicks == 2 { PointerKind::DoubleClick } else { PointerKind::Down };
         events.push(PointerEvent { kind, pos: pos(o), mods: m, clicks });
         down = true;
@@ -1488,17 +1490,30 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             }
             egui::Event::Paste(t) if wants_text => {
                 // Formatted when the system clipboard still holds what was copied here;
-                // Shift (⇧⌘V) pastes without formatting.
-                let plain = ui.input(|i| i.modifiers.shift);
+                // Shift (⇧⌘V) or Paste without Formatting pastes plain text.
+                let plain = ui.input(|i| i.modifiers.shift) || std::mem::take(&mut app.paste_plain);
                 let id = if plain { "edit.pasteWithoutFormatting" } else { "edit.paste" };
-                let _ = app.run(id, json!({"text": t}));
+                if let Err(e) = app.run(id, json!({"text": t})) {
+                    app.status(e);
+                }
             }
-            egui::Event::Copy | egui::Event::Cut if wants_text => {
+            egui::Event::Copy | egui::Event::Cut => {
+                // Copied text goes to the system clipboard too; objects stay in DesignCraft's.
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
-                if let Ok(r) = app.run(id, json!({}))
-                    && let Some(t) = r.get("text").and_then(serde_json::Value::as_str)
-                {
-                    ui.ctx().copy_text(t.to_string());
+                match app.run(id, json!({})) {
+                    Ok(r) => {
+                        if let Some(t) = r.get("text").and_then(serde_json::Value::as_str) {
+                            ui.ctx().copy_text(t.to_string());
+                        }
+                    }
+                    Err(e) if wants_text => app.status(e),
+                    Err(_) => {}
+                }
+            }
+            // ⌘V with objects copied: egui turns the key into a paste of the system clipboard.
+            egui::Event::Paste(_) if app.session.clipboard.is_some() => {
+                if let Err(e) = app.run("edit.paste", json!({})) {
+                    app.status(e);
                 }
             }
             egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -1917,5 +1932,268 @@ mod tests {
         let Some(rect) = h.state().canvas_rect else { return };
         right_click(&mut h, pos2(rect.center().x, rect.min.y - RULER / 2.0));
         assert!(h.query_by_label("   Points").is_none());
+    }
+}
+
+/// Issue #23: clicks, ⌘-clicks, clipboard and Bold/Italic while editing text, through real input.
+#[cfg(test)]
+mod text_editing_tests {
+    use designcraft_doc::{SpreadRef, StoryId};
+    use serde_json::Value;
+
+    use super::*;
+
+    const TEXT: &str = "one two three";
+
+    struct App {
+        ctx: egui::Context,
+        app: DesignApp,
+        frame: u64,
+        story: StoryId,
+    }
+
+    impl App {
+        /// A document with one text frame holding [`TEXT`], nothing selected.
+        fn new() -> Self {
+            let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({})).unwrap();
+            let r = app.run("frame.create", json!({"rect": [72, 72, 400, 200], "content": "text", "text": TEXT})).unwrap();
+            app.run("edit.deselectAll", json!({})).unwrap();
+            let mut t = App { ctx: egui::Context::default(), app, frame: r["id"].as_u64().unwrap(), story: StoryId(r["story"].as_u64().unwrap()) };
+            t.idle();
+            t
+        }
+
+        fn step(&mut self, events: Vec<egui::Event>, modifiers: egui::Modifiers, menu: Option<&str>) -> egui::FullOutput {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1400.0, 900.0))),
+                events: std::iter::once(egui::Event::ModifiersChanged(modifiers)).chain(events).collect(),
+                ..Default::default()
+            };
+            self.app.raw_input_hook(&mut input);
+            let app = &mut self.app;
+            let mut out = self.ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                if let Some(id) = menu {
+                    crate::menus::activate_native(app, &ctx, id, &Value::Null);
+                }
+                app.logic(&ctx);
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            out
+        }
+
+        /// Frames enough apart that the next press starts a new click count.
+        fn idle(&mut self) {
+            for _ in 0..30 {
+                self.step(vec![], egui::Modifiers::NONE, None);
+            }
+        }
+
+        /// Screen point just inside the glyph at story byte `b`.
+        fn at(&self, b: usize) -> Pos2 {
+            let st = self.app.session.doc().unwrap();
+            let cs = self.app.session.cache.get(&st.doc, self.story, None);
+            let (_, x, baseline, _, _) = designcraft_engine::compose::caret(&cs, b).unwrap();
+            self.screen(Point::new(x + 1.0, baseline - 3.0))
+        }
+
+        fn screen(&self, spread: Point) -> Pos2 {
+            let st = self.app.session.doc().unwrap();
+            let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+            let slot = layout.slots.iter().find(|s| s.spread == SpreadRef::Doc(0)).unwrap();
+            Xf::new(self.app.canvas_rect.unwrap(), self.app.view().unwrap()).to_screen(slot.to_canvas(spread))
+        }
+
+        /// `n` presses in a row at `p`.
+        fn click(&mut self, p: Pos2, n: usize, modifiers: egui::Modifiers) {
+            self.step(vec![egui::Event::PointerMoved(p)], modifiers, None);
+            for _ in 0..n {
+                let button = |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers };
+                // A press and its release in different frames, as with a real mouse.
+                self.step(vec![button(true)], modifiers, None);
+                self.step(vec![button(false)], modifiers, None);
+            }
+            self.step(vec![], modifiers, None);
+        }
+
+        fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+            let ev = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+            self.step(vec![ev(true), ev(false)], modifiers, None);
+            self.step(vec![], egui::Modifiers::NONE, None);
+        }
+
+        fn sel(&self) -> Option<(usize, usize)> {
+            self.app.session.doc().unwrap().selection.text.map(|t| (t.range().start, t.range().end))
+        }
+
+        fn select(&mut self, a: usize, b: usize) {
+            self.app.run("text.select", json!({"story": self.story.0, "anchor": a, "focus": b})).unwrap();
+        }
+
+        fn text(&self) -> String {
+            self.app.session.doc().unwrap().doc.story(self.story).unwrap().text.clone()
+        }
+
+        fn style(&mut self) -> String {
+            self.app.run("type.selectionAttrs", json!({})).unwrap()["chars"]["fontStyle"].as_str().unwrap().to_string()
+        }
+    }
+
+    #[test]
+    fn double_clicking_a_text_frame_with_the_selection_tool_edits_its_text() {
+        let mut t = App::new();
+        assert_eq!(t.app.session.tool_id(), "selection");
+        let p = t.at(5);
+        t.click(p, 2, egui::Modifiers::NONE);
+        assert_eq!(t.app.session.tool_id(), "type");
+        assert_eq!(t.sel(), Some((5, 5)), "the caret goes where the frame was double-clicked");
+    }
+
+    #[test]
+    fn more_clicks_select_the_word_line_paragraph_and_story() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        let p = t.at(5);
+        for (n, want) in [(1, (5, 5)), (2, (4, 7)), (3, (0, TEXT.len())), (4, (0, TEXT.len())), (5, (0, TEXT.len()))] {
+            t.click(p, n, egui::Modifiers::NONE);
+            assert_eq!(t.sel(), Some(want), "{n} clicks");
+            t.idle();
+        }
+        // On the spaces: the spaces.
+        t.app.run("story.setText", json!({"story": t.story.0, "text": "one   two"})).unwrap();
+        t.step(vec![], egui::Modifiers::NONE, None);
+        let p = t.at(4);
+        t.click(p, 2, egui::Modifiers::NONE);
+        assert_eq!(t.sel(), Some((3, 6)));
+    }
+
+    #[test]
+    fn command_click_off_the_text_stops_editing_so_tool_keys_work() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        let p = t.at(5);
+        t.click(p, 1, egui::Modifiers::NONE);
+        assert!(t.sel().is_some());
+        t.idle();
+        let empty = t.screen(Point::new(300.0, 500.0));
+        t.click(empty, 1, egui::Modifiers::COMMAND);
+        assert_eq!(t.sel(), None, "⌘-click on the page leaves the text");
+        assert_eq!(t.app.session.tool_id(), "type");
+        assert!(!t.app.session.doc().unwrap().doc.story(t.story).unwrap().text.contains('v'));
+        t.key(egui::Key::V, egui::Modifiers::NONE);
+        assert_eq!(t.app.session.tool_id(), "selection");
+    }
+
+    #[test]
+    fn edit_menu_copy_and_paste_use_the_system_clipboard() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        t.select(4, 7);
+        t.step(vec![], egui::Modifiers::NONE, Some("edit.copy"));
+        let out = t.step(vec![], egui::Modifiers::NONE, None);
+        assert!(out.platform_output.commands.contains(&egui::OutputCommand::CopyText("two".into())), "{:?}", out.platform_output.commands);
+        // Paste asks for the system clipboard's text and pastes what arrives.
+        t.select(TEXT.len(), TEXT.len());
+        // (A native menu item is chosen before `logic`, which asks in the same frame.)
+        let out = t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
+        assert!(out.viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::RequestPaste));
+        t.step(vec![egui::Event::Paste(" from elsewhere".into())], egui::Modifiers::NONE, None);
+        assert_eq!(t.text(), "one two three from elsewhere");
+        // Nothing arrives (an empty system clipboard): DesignCraft's own clipboard pastes.
+        t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
+        for _ in 0..3 {
+            t.step(vec![], egui::Modifiers::NONE, None);
+        }
+        assert_eq!(t.text(), "one two three from elsewheretwo");
+    }
+
+    #[test]
+    fn copy_and_paste_keys_work_on_objects() {
+        let mut t = App::new();
+        t.app.run("selection.set", json!({"ids": [t.frame]})).unwrap();
+        t.step(vec![egui::Event::Copy], egui::Modifiers::NONE, None);
+        assert!(t.app.session.clipboard.is_some());
+        t.step(vec![egui::Event::Paste("anything".into())], egui::Modifiers::NONE, None);
+        let items = t.app.session.doc().unwrap().doc.spread(SpreadRef::Doc(0)).unwrap().items.len();
+        assert_eq!(items, 2, "⌘V pasted the copied frame");
+    }
+
+    #[test]
+    fn shift_command_b_and_i_are_bold_and_italic() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        t.select(4, 7);
+        let shift_cmd = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        t.key(egui::Key::B, shift_cmd);
+        assert_eq!(t.style(), "Bold");
+        t.key(egui::Key::I, shift_cmd);
+        assert_eq!(t.style(), "Bold Italic");
+        t.key(egui::Key::B, shift_cmd);
+        assert_eq!(t.style(), "Italic");
+        // ⌘B is not Bold, even while typing.
+        t.key(egui::Key::B, egui::Modifiers::COMMAND);
+        assert_eq!(t.style(), "Italic");
+    }
+
+    #[test]
+    fn x_brings_stroke_to_the_front_and_shift_x_swaps_fill_and_stroke() {
+        let mut t = App::new();
+        let id = designcraft_doc::ItemId(t.frame);
+        let colours = |t: &App| {
+            let it = t.app.session.doc().unwrap().doc.item(id).unwrap().clone();
+            (it.fill.swatch, it.stroke.swatch)
+        };
+        t.app.run("selection.set", json!({"ids": [t.frame]})).unwrap();
+        t.app.run("object.fill", json!({"swatch": "[Paper]"})).unwrap();
+        t.app.run("object.stroke", json!({"swatch": "[Black]"})).unwrap();
+        // X: Stroke in front, and back.
+        assert!(!t.app.stroke_front);
+        t.key(egui::Key::X, egui::Modifiers::NONE);
+        assert!(t.app.stroke_front);
+        t.key(egui::Key::X, egui::Modifiers::NONE);
+        assert!(!t.app.stroke_front);
+        // Shift+X: the frame's fill and stroke trade places.
+        t.key(egui::Key::X, egui::Modifiers::SHIFT);
+        assert_eq!(colours(&t), ("[Black]".to_string(), "[Paper]".to_string()));
+        // With formatting affecting text: the text's, not the frame's.
+        t.app.run("window.formattingAffectsText", json!({"on": true})).unwrap();
+        t.app.run("type.char", json!({"attrs": {"fill": "[Black]", "stroke": "[Paper]"}})).unwrap();
+        t.key(egui::Key::X, egui::Modifiers::SHIFT);
+        let c = t.app.run("type.selectionAttrs", json!({})).unwrap()["chars"].clone();
+        assert_eq!((c["fill"].as_str(), c["stroke"].as_str()), (Some("[Paper]"), Some("[Black]")));
+        assert_eq!(colours(&t), ("[Black]".to_string(), "[Paper]".to_string()), "the frame is unchanged");
+    }
+
+    #[test]
+    fn x_types_while_editing_text() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        t.select(0, 0);
+        t.step(vec![egui::Event::Text("x".into())], egui::Modifiers::NONE, None);
+        t.key(egui::Key::X, egui::Modifiers::NONE);
+        assert!(t.text().starts_with('x'));
+        assert!(!t.app.stroke_front);
+    }
+
+    #[test]
+    fn formatting_affects_text_colours_the_text_instead_of_its_frame() {
+        let mut t = App::new();
+        let fill = |t: &mut App| t.app.run("type.selectionAttrs", json!({})).unwrap()["chars"]["fill"].as_str().unwrap().to_string();
+        let frame_fill = |t: &App| t.app.session.doc().unwrap().doc.item(designcraft_doc::ItemId(t.frame)).unwrap().fill.swatch.clone();
+        t.app.run("selection.set", json!({"ids": [t.frame]})).unwrap();
+        assert!(!crate::panels::formatting_affects_text(&mut t.app), "a selected frame: the container");
+        t.app.run("window.formattingAffectsText", json!({})).unwrap();
+        crate::panels::apply_swatch(&mut t.app, false, "[Paper]", None).unwrap();
+        assert_eq!(fill(&mut t), "[Paper]", "all of the frame's text");
+        assert_eq!(frame_fill(&t), "[None]", "not the frame");
+        // Typing: the text, by itself; back to the frame: the container.
+        t.select(0, 3);
+        assert!(crate::panels::formatting_affects_text(&mut t.app));
+        t.app.run("selection.set", json!({"ids": [t.frame]})).unwrap();
+        assert!(!crate::panels::formatting_affects_text(&mut t.app));
+        crate::panels::apply_swatch(&mut t.app, false, "[Paper]", None).unwrap();
+        assert_eq!(frame_fill(&t), "[Paper]");
     }
 }

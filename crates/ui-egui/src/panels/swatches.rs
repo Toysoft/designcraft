@@ -11,21 +11,24 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let doc = st.doc.clone();
-    let text = st.selection.text.is_some();
-    let fill_cur = super::sel_info(app).map(|i| i.fill);
+    // Clicks apply to the fill or stroke in front in the Tools panel, of the text or the frames.
+    let text = super::formatting_affects_text(app);
+    let stroke = app.stroke_front;
+    let fill_cur = super::target_swatch(app, stroke).map(|s| s.0);
+    let applies = match (text, stroke) {
+        (true, false) => "Applies to text",
+        (true, true) => "Applies to text stroke",
+        (false, false) => "Applies to fill",
+        (false, true) => "Applies to stroke",
+    };
     ui.horizontal(|ui| {
-        crate::rtl::label(
-            ui,
-            egui::RichText::new(crate::i18n::tr(&app.ui.language, if text { "Applies to text" } else { "Applies to fill" }))
-                .size(11.0)
-                .color(t.text_dim),
-        );
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, applies)).size(11.0).color(t.text_dim));
     });
     // Unnamed colours (mixed in the Color panel) aren't listed until Add to Swatches; swatches in
     // colour groups are listed under their folder.
     let grouped: Vec<&str> = doc.color_groups.iter().flat_map(|g| g.swatches.iter().map(String::as_str)).collect();
     for sw in doc.swatches.iter().filter(|w| !w.hidden && !grouped.contains(&w.name.as_str())) {
-        swatch_row(app, ui, &doc, sw, 0.0, fill_cur.as_deref(), text);
+        swatch_row(app, ui, &doc, sw, 0.0, fill_cur.as_deref(), stroke);
     }
     for g in &doc.color_groups {
         let open_id = egui::Id::new(("color_group_open", &g.name));
@@ -58,7 +61,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         if open {
             for n in &g.swatches {
                 if let Some(sw) = doc.swatches.iter().find(|w| w.name == *n) {
-                    swatch_row(app, ui, &doc, sw, 16.0, fill_cur.as_deref(), text);
+                    swatch_row(app, ui, &doc, sw, 16.0, fill_cur.as_deref(), stroke);
                 }
             }
         }
@@ -114,8 +117,8 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     });
 }
 
-/// One Swatches panel row: chip, name, type; click applies to fill (or text), the context menu
-/// to stroke, colour groups and delete.
+/// One Swatches panel row: chip, name, type; a click applies it to the fill (or `stroke`) of the
+/// frames or text (Formatting affects), the context menu to the stroke, colour groups and delete.
 fn swatch_row(
     app: &mut DesignApp,
     ui: &mut egui::Ui,
@@ -123,7 +126,7 @@ fn swatch_row(
     sw: &designcraft_color::swatch::Swatch,
     indent: f32,
     fill_cur: Option<&str>,
-    text: bool,
+    stroke: bool,
 ) {
     let t = Tokens::get(ui.ctx());
     let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
@@ -154,13 +157,16 @@ fn swatch_row(
         icons::paint(ui.painter(), egui::Rect::from_min_size(egui::pos2(row.max.x - 64.0, row.min.y + 4.0), vec2(13.0, 13.0)), "lock", t.text_dim);
     }
     ui.painter().text(row.right_center() - vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, kind, egui::FontId::proportional(10.5), t.text_dim);
-    if resp.clicked() {
-        let r = if text { app.run("type.char", json!({"attrs": {"fill": sw.name}})) } else { app.run("object.fill", json!({"swatch": sw.name})) };
-        let _ = r;
+    if resp.clicked()
+        && let Err(e) = super::apply_swatch(app, stroke, &sw.name, None)
+    {
+        app.status(e);
     }
     resp.context_menu(|ui| {
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Apply to Stroke"))).clicked() {
-            let _ = app.run("object.stroke", json!({"swatch": sw.name}));
+            if let Err(e) = super::apply_swatch(app, true, &sw.name, None) {
+                app.status(e);
+            }
             ui.close();
         }
         if !sw.locked {

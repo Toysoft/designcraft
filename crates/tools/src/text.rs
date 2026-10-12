@@ -45,26 +45,33 @@ impl Tool for TypeTool {
                 self.drawing = false;
                 self.selecting = None;
                 self.cell_drag = None;
+                // Cmd-click is the Selection tool for a moment: it selects the object clicked, or
+                // deselects off any object, leaving the text (then V, T… switch tools).
+                if ev.mods.cmd {
+                    self.start = None;
+                    let ids: Vec<u64> = cx.hit(ev.pos).map(|(_, id)| id.0).into_iter().collect();
+                    return vec![Action::Exec("selection.set".into(), json!({"ids": ids}))];
+                }
                 if let Some((_, id)) = cx.hit(ev.pos)
                     && let Some(it) = cx.doc.item(id)
                     && !matches!(it.content, designcraft_doc::Content::Graphic(_) | designcraft_doc::Content::Group { .. })
                 {
                     let sp = cx.layout.spread_at(ev.pos).map(|(_, p)| p).unwrap_or(ev.pos);
-                    // Clicks in a row select a word, a sentence, a paragraph, then the whole story.
-                    let unit = match (ev.kind, ev.clicks) {
-                        (PointerKind::DoubleClick, _) => Some("text.selectWord"),
-                        (_, 3) => Some("text.selectSentence"),
-                        (_, 4) => Some("text.selectParagraph"),
-                        (_, 5..) => Some("text.selectStory"),
-                        _ => None,
-                    };
                     // Whole rows/columns selected: wait to see whether this is a drag.
-                    if unit.is_none() && !ev.mods.shift && whole_rows_or_cols(cx) {
+                    if ev.kind == PointerKind::Down && ev.clicks <= 1 && !ev.mods.shift && whole_rows_or_cols(cx) {
                         self.cell_drag = Some((id.0, sp));
                         return vec![];
                     }
                     self.selecting = Some(id.0);
-                    let cmd = unit.unwrap_or(if ev.mods.shift { "text.extendTo" } else { "text.placeCaret" });
+                    // Two clicks select the word, three the line, four the paragraph, five the story.
+                    let cmd = match (ev.kind, ev.clicks) {
+                        (PointerKind::DoubleClick, _) => "text.selectWord",
+                        (_, 3) => "text.selectLine",
+                        (_, 4) => "text.selectParagraph",
+                        (_, 5) => "text.selectStory",
+                        _ if ev.mods.shift => "text.extendTo",
+                        _ => "text.placeCaret",
+                    };
                     return vec![Action::Exec(cmd.into(), json!({"frame": id.0, "point": [sp.x, sp.y]}))];
                 }
                 vec![]
@@ -147,7 +154,11 @@ impl Tool for TypeTool {
         }
     }
 
-    fn cursor(&self, cx: &ToolContext, p: Point, _m: Mods) -> Cursor {
+    fn cursor(&self, cx: &ToolContext, p: Point, m: Mods) -> Cursor {
+        // ⌘ held: a click selects objects (see `pointer`).
+        if m.cmd {
+            return Cursor::Arrow;
+        }
         match cx.hit(p) {
             Some((_, id)) if cx.doc.item(id).is_some_and(|i| i.is_text_frame()) => Cursor::Text,
             _ => Cursor::Text,

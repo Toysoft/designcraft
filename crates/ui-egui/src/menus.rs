@@ -56,6 +56,24 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.preferences", "Preferences…", Some("Cmd+K"), "{}"),
     ("window.uiScale", "UI Scaling", None, "{scale: 0.5–3 (1 = 100%)} — the size of the whole interface"),
     ("app.keyboardShortcuts", "Keyboard Shortcuts…", None, "{} — view and change the shortcut of any command"),
+    (
+        "window.toggleFillStroke",
+        "Fill/Stroke Toggle",
+        Some("X"),
+        "{stroke?: bool} → {stroke} — brings the Tools panel's Stroke (or Fill) to the front: swatches apply to it; toggles without `stroke`",
+    ),
+    (
+        "window.swapFillStroke",
+        "Swap Fill and Stroke",
+        Some("Shift+X"),
+        "{} → {fill, stroke} — the selected objects' fill and stroke trade swatches (the text's while formatting affects text)",
+    ),
+    (
+        "window.formattingAffectsText",
+        "Formatting Affects Text",
+        Some("J"),
+        "{on?: bool} → {on, applies} — swatches colour the text (of the text selection or the selected text frames) instead of the frames; toggles without `on`",
+    ),
     ("window.richBlack", "Appearance of Black", None, "{on: bool} — show 100% black as rich black on screen (off: accurately)"),
     ("window.setShortcut", "Set Shortcut", None, "{id, shortcut: \"Cmd+Alt+J\" | \"\" (none) | null (default)} → {shortcut, conflicts: [ids]}"),
     ("window.resetShortcuts", "Reset Shortcuts", None, "{} — every command back to its default shortcut"),
@@ -1320,6 +1338,16 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
                 "zone": ui.snap_zone,
             }))
         }
+        "window.toggleFillStroke" => {
+            app.stroke_front = p.get("stroke").and_then(Value::as_bool).unwrap_or(!app.stroke_front);
+            Ok(json!({"stroke": app.stroke_front}))
+        }
+        "window.swapFillStroke" => crate::panels::swap_fill_stroke(app),
+        "window.formattingAffectsText" => {
+            let on = p.get("on").and_then(Value::as_bool).unwrap_or_else(|| !crate::panels::formatting_affects_text(app));
+            app.format_text = Some(on);
+            Ok(json!({"on": on, "applies": crate::panels::formatting_affects_text(app)}))
+        }
         "window.richBlack" => {
             app.ui.rich_black = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.rich_black);
             app.canvas.shown = None;
@@ -1880,6 +1908,19 @@ pub fn close_document(app: &mut DesignApp, index: Option<usize>) {
 /// A menu item was chosen. An engine command whose label ends in "…" and that takes parameters
 /// opens a dialog built from its parameter documentation (see [`crate::dialogs::command_fields`]).
 pub fn activate(app: &mut DesignApp, id: &str, params: &Value) {
+    // Copy, Cut and Paste of text go through the system clipboard, as the keys do: the canvas
+    // takes the clipboard events.
+    if params.is_null() && app.session.active().is_some_and(|d| d.selection.text.is_some()) {
+        match id {
+            "edit.copy" => return app.synthetic.push(egui::Event::Copy),
+            "edit.cut" => return app.synthetic.push(egui::Event::Cut),
+            "edit.paste" | "edit.pasteWithoutFormatting" => {
+                app.paste_request = Some((id == "edit.pasteWithoutFormatting", false));
+                return;
+            }
+            _ => {}
+        }
+    }
     if params.is_null() && id == "file.close" {
         close_document(app, None);
         return;

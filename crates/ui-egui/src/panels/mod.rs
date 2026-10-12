@@ -52,6 +52,61 @@ pub fn sel_tint(app: &DesignApp, stroke: bool) -> f32 {
     st.selection.items.first().and_then(|id| st.doc.item(*id)).map_or(1.0, |it| if stroke { it.stroke.tint } else { it.fill.tint })
 }
 
+/// Formatting affects text (the Tools panel's T button, J): swatches colour the text — the text
+/// selection, or all the text of the selected text frames — instead of the frames. It turns on
+/// by itself when typing starts and off when typing ends; the buttons and J switch it.
+pub fn formatting_affects_text(app: &mut DesignApp) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    let editing = st.selection.text.is_some();
+    let frames = st.selection.items.iter().any(|id| st.doc.item(*id).is_some_and(|i| i.is_text_frame()));
+    if editing != app.format_text_editing {
+        app.format_text_editing = editing;
+        app.format_text = None;
+    }
+    (editing || frames) && app.format_text.unwrap_or(editing)
+}
+
+/// Swap Fill and Stroke (Shift+X): the selected objects' fill and stroke swatches trade places,
+/// or the text's while formatting affects text.
+pub fn swap_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
+    let fill = target_swatch(app, false).ok_or("select an object or text")?;
+    let stroke = target_swatch(app, true).ok_or("select an object or text")?;
+    apply_swatch(app, false, &stroke.0, Some(f64::from(stroke.1)))?;
+    apply_swatch(app, true, &fill.0, Some(f64::from(fill.1)))?;
+    Ok(json!({"fill": stroke.0, "stroke": fill.0}))
+}
+
+/// The fill (or stroke) swatch and tint that formatting acts on: the text's while formatting
+/// affects text, else the first selected object's.
+pub fn target_swatch(app: &mut DesignApp, stroke: bool) -> Option<(String, f32)> {
+    if formatting_affects_text(app) {
+        let a = text_attrs(app)?;
+        let c = &a["chars"];
+        let (key, tint) = if stroke { ("stroke", "strokeTint") } else { ("fill", "fillTint") };
+        return Some((c[key].as_str()?.to_string(), c[tint].as_f64().unwrap_or(1.0) as f32));
+    }
+    let i = sel_info(app)?;
+    Some((if stroke { i.stroke } else { i.fill }, sel_tint(app, stroke)))
+}
+
+/// Apply a swatch (and tint) to the fill or stroke of the text or of the selected objects, as
+/// Formatting affects container / text says.
+pub fn apply_swatch(app: &mut DesignApp, stroke: bool, swatch: &str, tint: Option<f64>) -> Result<Value, String> {
+    if formatting_affects_text(app) {
+        let mut attrs = serde_json::Map::new();
+        attrs.insert(if stroke { "stroke" } else { "fill" }.into(), json!(swatch));
+        if let Some(t) = tint {
+            attrs.insert(if stroke { "strokeTint" } else { "fillTint" }.into(), json!(t));
+        }
+        return app.run("type.char", json!({"attrs": attrs}));
+    }
+    let mut p = json!({"swatch": swatch});
+    if let Some(t) = tint {
+        p["tint"] = json!(t);
+    }
+    app.run(if stroke { "object.stroke" } else { "object.fill" }, p)
+}
+
 pub fn sel_info(app: &DesignApp) -> Option<SelInfo> {
     let st = app.session.active()?;
     if st.selection.items.is_empty() {

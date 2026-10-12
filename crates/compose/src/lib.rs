@@ -190,6 +190,9 @@ pub struct Line {
     pub last_in_para: bool,
     /// x after the last glyph (caret at line end).
     pub end_x: f64,
+    /// Spaces at the line's end that the line break leaves out of alignment, as (story byte,
+    /// advance): a caret after them still stands past them.
+    pub trailing: Vec<(usize, f64)>,
     /// Word-space ratio actually used vs desired (H&J violation highlighting), 1.0 = desired.
     pub spacing: f64,
     /// H&J violation: 0 = within the paragraph's minimum/maximum word spacing, 1–3 = how far out
@@ -1068,6 +1071,13 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                     first_in_para: line_no == 0,
                     last_in_para: last,
                     end_x,
+                    trailing: glyphs
+                        .get(e.min(g0 + b.next)..g0 + b.next)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|g| g.len > 0 && g.is_space())
+                        .map(|g| (g.byte, g.adv))
+                        .collect(),
                     spacing: ratio,
                     hj: hj_severity(ratio, pp.word_space_min, pp.word_space_max),
                     keep_violation: false,
@@ -2995,7 +3005,8 @@ pub fn caret_x(l: &Line, pos: usize) -> f64 {
     }
     match l.glyphs.iter().rev().find(|g| g.len > 0) {
         Some(g) if g.rtl => g.x,
-        _ => l.end_x,
+        // Past the spaces typed at the line's end (they hang outside the alignment).
+        _ => l.end_x + l.trailing.iter().filter(|(b, _)| *b < pos).map(|(_, adv)| adv).sum::<f64>(),
     }
 }
 

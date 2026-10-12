@@ -194,15 +194,13 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
 /// utility button and the Screen Mode well.
 fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
     let t = Tokens::get(ui.ctx());
-    let info = crate::panels::sel_info(app);
     let doc = app.session.active().map(|d| d.doc.clone());
-    let text_id = egui::Id::new("proxy_text");
     let stroke_front = app.ui.stroke_front;
-    let text_mode: bool = ui.data(|d| d.get_temp(text_id)).unwrap_or(false);
-    let (fill_sw, stroke_sw) = match &info {
-        Some(i) => (i.fill.clone(), i.stroke.clone()),
-        None => ("[None]".to_string(), "[Black]".to_string()),
-    };
+    // The proxy shows (and its buttons set) the text's colours while formatting affects text.
+    let text_mode = crate::panels::formatting_affects_text(app);
+    let (default_fill, default_stroke) = if text_mode { ("[Black]", "[None]") } else { ("[None]", "[Black]") };
+    let fill_sw = crate::panels::target_swatch(app, false).map_or_else(|| default_fill.to_string(), |s| s.0);
+    let stroke_sw = crate::panels::target_swatch(app, true).map_or_else(|| default_stroke.to_string(), |s| s.0);
     let x0 = ui.max_rect().min.x + (width - 30.0) / 2.0;
     // Row 1: default colours + swap.
     let (row, _) = ui.allocate_exact_size(vec2(width, 11.0), Sense::hover());
@@ -314,7 +312,7 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
             })
             .clicked()
         {
-            ui.data_mut(|d| d.insert_temp(text_id, k == 1));
+            app.format_text = Some(k == 1);
         }
     }
     ui.add_space(5.0);
@@ -328,14 +326,13 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
     let chip = egui::Rect::from_center_size(well.center(), vec2(14.0, 14.0));
     crate::widgets::paint_chip(ui.painter(), chip, None, None);
     flyout_triangle(ui.painter(), well, t.icon);
-    let target = if stroke_front { "object.stroke" } else { "object.fill" };
     if resp.clicked() {
         let _ = app.run("color.applyNone", json!({}));
     }
     egui::Popup::context_menu(&resp).show(|ui| {
         for (label, sw) in [("Apply Color", "[Black]"), ("Apply None", "[None]")] {
             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).clicked() {
-                let _ = app.run(target, json!({"swatch": sw}));
+                let _ = crate::panels::apply_swatch(app, stroke_front, sw, None);
                 ui.close();
             }
         }
@@ -423,13 +420,22 @@ fn tool_button(ui: &mut egui::Ui, icon: &str, active: bool, tip: &str) -> egui::
     })
 }
 
-/// Default Fill and Stroke (D): no fill, a black stroke.
+/// Default Fill and Stroke (D): no fill, a black stroke. While formatting affects text, the text's
+/// colours instead: black fill, no stroke.
 pub(crate) fn default_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
+    if crate::panels::formatting_affects_text(app) {
+        crate::panels::apply_swatch(app, false, "[Black]", None)?;
+        return crate::panels::apply_swatch(app, true, "[None]", None);
+    }
     app.run("object.defaultFillStroke", json!({}))
 }
 
-/// Swap Fill and Stroke (Shift+X): each selected object's fill and stroke trade places.
+/// Swap Fill and Stroke (Shift+X): each selected object's fill and stroke trade places (one undo
+/// step). While formatting affects text, the text's fill and stroke trade places instead.
 pub(crate) fn swap_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
+    if crate::panels::formatting_affects_text(app) {
+        return crate::panels::swap_fill_stroke(app);
+    }
     app.run("object.swapFillStroke", json!({}))
 }
 
@@ -441,6 +447,9 @@ pub(crate) fn toggle_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
 
 /// Apply None (/): to the fill or the stroke, whichever is in front of the proxy.
 pub(crate) fn apply_none(app: &mut DesignApp) -> Result<Value, String> {
+    if crate::panels::formatting_affects_text(app) {
+        return crate::panels::apply_swatch(app, app.ui.stroke_front, "[None]", None);
+    }
     let target = if app.ui.stroke_front { "object.stroke" } else { "object.fill" };
     app.run(target, json!({"swatch": "[None]"}))
 }
