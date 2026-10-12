@@ -1622,8 +1622,14 @@ fn hair(painter: &egui::Painter) -> f32 {
 
 const RULER_ORIGIN_DRAG: &str = "canvas_ruler_origin_drag";
 
+/// A plain click (press+release with no real movement) must not move the origin: only an
+/// actual drag does, matching InDesign. This is the slack, in screen points, below which
+/// movement is still considered "just a click".
+const RULER_ORIGIN_DRAG_THRESHOLD: f32 = 2.0;
+
 /// Dragging the ruler zero-point crosshair (the corner box where the two rulers meet): sets a
-/// custom ruler origin live as the pointer moves. Double-clicking it resets to the default
+/// custom ruler origin live once the pointer has moved past a small threshold (a plain click
+/// with no movement leaves the origin untouched). Double-clicking it resets to the default
 /// origin (the current spread's first page). Returns true while it owns the pointer.
 fn ruler_origin_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, xf: &Xf) -> bool {
     let id = egui::Id::new(RULER_ORIGIN_DRAG);
@@ -1640,32 +1646,42 @@ fn ruler_origin_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Respon
             i.pointer.button_double_clicked(egui::PointerButton::Primary),
         )
     });
-    let dragging: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
-    if !dragging {
-        if !pressed {
-            return false;
+    // The pointer position where this gesture started, remembered across frames so later
+    // frames can tell a drag from a stationary click.
+    let gesture_origin: Option<Pos2> = ui.data(|d| d.get_temp(id));
+    let gesture_origin = match gesture_origin {
+        Some(o) => o,
+        None => {
+            if !pressed {
+                return false;
+            }
+            let Some(o) = press_origin.filter(|o| corner.contains(*o)) else { return false };
+            o
         }
-        let Some(_) = press_origin.filter(|o| corner.contains(*o)) else { return false };
-    }
+    };
     // Double-click completes (fires on release): reset to the default origin instead of
     // leaving it at the clicked point.
     if released && dbl {
         if let Some(v) = app.view_mut() {
             v.ruler_origin = None;
         }
-        ui.data_mut(|d| d.remove::<bool>(id));
+        ui.data_mut(|d| d.remove::<Pos2>(id));
         return true;
     }
-    if let Some(p) = latest
+    let moved = latest.is_some_and(|p| p.distance(gesture_origin) > RULER_ORIGIN_DRAG_THRESHOLD);
+    if moved
+        && let Some(p) = latest
         && let Some(v) = app.view_mut()
     {
         v.ruler_origin = Some(xf.to_canvas(p));
     }
-    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    if moved {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
     if released {
-        ui.data_mut(|d| d.remove::<bool>(id));
+        ui.data_mut(|d| d.remove::<Pos2>(id));
     } else {
-        ui.data_mut(|d| d.insert_temp(id, true));
+        ui.data_mut(|d| d.insert_temp(id, gesture_origin));
     }
     true
 }
@@ -1918,6 +1934,19 @@ mod tests {
         assert!((origin.y - expected.y).abs() < 1.0, "origin.y = {}, expected = {}", origin.y, expected.y);
         // Double-clicking the corner resets it to the default origin.
         double_click(&mut h, corner);
+        assert!(h.state().view().unwrap().ruler_origin.is_none());
+    }
+
+    #[test]
+    fn clicking_the_ruler_corner_without_dragging_leaves_the_origin_untouched() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let mut h = fast_harness(app);
+        let rect = h.state().canvas_rect.unwrap();
+        let corner = rect.min - vec2(RULER / 2.0, RULER / 2.0);
+        // A plain click (press and release at the same point, no movement) must not act like
+        // a drag: InDesign only moves the zero point when you actually drag the crosshair.
+        drag(&mut h, corner, corner);
         assert!(h.state().view().unwrap().ruler_origin.is_none());
     }
 }
