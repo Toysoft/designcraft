@@ -186,7 +186,7 @@ fn services() -> Services {
         })),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
-        write: Some(Box::new(|p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string()))),
+        write: Some(Box::new(|p: &str, b: &[u8]| designcraft_engine::atomic::write_atomic(std::path::Path::new(p), b).map_err(|e| e.to_string()))),
         ..Default::default()
     }
 }
@@ -351,5 +351,39 @@ mod tests {
         assert!(place.iter().any(|filter| filter.extensions.contains(&"png")));
         let documents = super::open_filters("");
         assert!(documents.iter().any(|filter| filter.extensions.contains(&"designcraft")));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod atomic_writer_tests {
+    #[test]
+    fn desktop_write_preserves_an_existing_reader_and_private_symlink_target() {
+        use std::io::Read;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("designcraft-desktop-atomic-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let fixture = Fixture(dir);
+        let target = fixture.0.join(format!("{}.png", "a".repeat(243)));
+        let old = b"previous private export";
+        std::fs::write(&target, old).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = fixture.0.join("linked.png");
+        symlink(target.file_name().unwrap(), &alias).unwrap();
+        let mut reader = std::fs::File::open(&target).unwrap();
+        let mut write = super::services().write.unwrap();
+        write(alias.to_str().unwrap(), b"complete new export").unwrap();
+        let mut observed = Vec::new();
+        reader.read_to_end(&mut observed).unwrap();
+        assert!(observed == old, "desktop export changed bytes under an existing reader");
+        assert_eq!(std::fs::read(&target).unwrap(), b"complete new export");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::symlink_metadata(alias).unwrap().file_type().is_symlink());
     }
 }
