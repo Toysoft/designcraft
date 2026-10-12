@@ -705,3 +705,50 @@ fn pen_click_snaps_to_a_guide() {
     let x = p["anchors"][0]["p"][0].as_f64().unwrap();
     assert!((x - 100.0).abs() < 1e-6, "anchor x {x}");
 }
+
+#[test]
+fn the_content_grabber_and_direct_selection_move_a_graphic_inside_its_frame() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let photo = ItemId(d.alloc());
+    let mut it = Item::new(photo, lid, Shape::Rectangle, shapes::rectangle(Rect::new(100.0, 100.0, 300.0, 300.0)));
+    it.content = designcraft_doc::Content::Graphic(designcraft_doc::Graphic {
+        asset: designcraft_doc::AssetId(1),
+        size: (400.0, 400.0),
+        xf: designcraft_geom::Affine::translate((0.0, 0.0)),
+        auto_fit: Default::default(),
+        fit_align: 4,
+        crop: [0.0; 4],
+    });
+    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let at = |x: f64, y: f64| (x + off.x, y + off.y);
+    let ev = |k: PointerKind, (x, y): (f64, f64)| PointerEvent::new(k, x, y);
+    let cx = ctx(&d, &s, &c, &l);
+    // Selection tool: over the frame, its content grabber shows at the centre.
+    let mut t = create("selection");
+    t.pointer(&cx, &ev(PointerKind::Move, at(140.0, 260.0)));
+    assert_eq!(t.overlays(&cx).len(), 1, "the content grabber shows");
+    t.pointer(&cx, &ev(PointerKind::Move, at(350.0, 350.0)));
+    assert!(t.overlays(&cx).is_empty(), "off the frame it goes");
+    assert_eq!(t.cursor(&cx, Point::new(at(200.0, 200.0).0, at(200.0, 200.0).1), Mods::default()), Cursor::Hand);
+    let a = t.pointer(&cx, &ev(PointerKind::Down, at(201.0, 202.0)));
+    assert_eq!(a, vec![Action::Exec("selection.set".into(), serde_json::json!({"ids": [photo.0], "content": true}))]);
+    let a = t.pointer(&cx, &ev(PointerKind::Drag, at(221.0, 192.0)));
+    assert_eq!(a[0], Action::Begin("Move".into()));
+    assert_eq!(a[1], Action::Preview("transform.move".into(), serde_json::json!({"dx": 20.0, "dy": -10.0, "content": true})));
+    assert_eq!(t.pointer(&cx, &ev(PointerKind::Up, at(221.0, 192.0))), vec![Action::Commit]);
+    // Away from the centre the frame moves as before.
+    let sel = Selection { items: vec![photo], ..Default::default() };
+    let cx2 = ctx(&d, &sel, &c, &l);
+    t.pointer(&cx2, &ev(PointerKind::Down, at(120.0, 120.0)));
+    let a = t.pointer(&cx2, &ev(PointerKind::Drag, at(140.0, 120.0)));
+    assert!(a.iter().any(|x| matches!(x, Action::Preview(cmd, p) if cmd == "transform.move" && p.get("content").is_none())), "{a:?}");
+    t.pointer(&cx2, &ev(PointerKind::Up, at(140.0, 120.0)));
+    // Direct Selection: dragging anywhere on the graphic moves it.
+    let mut t = create("directSelection");
+    t.pointer(&cx, &ev(PointerKind::Down, at(130.0, 260.0)));
+    let a = t.pointer(&cx, &ev(PointerKind::Drag, at(130.0, 230.0)));
+    assert_eq!(a.last(), Some(&Action::Preview("transform.move".into(), serde_json::json!({"dx": 0.0, "dy": -30.0, "content": true}))));
+}

@@ -42,7 +42,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move",
             ["Object", "Transform"],
             None,
-            "{dx, dy, copy?: bool, ids?, toSpread?} → {moved, ids: the objects moved (with copy, the copies)}",
+            "{dx, dy, copy?: bool, ids?, toSpread?, content?: bool (the placed graphic inside each frame moves, the frame stays; default: whether the selection is content, when no ids are given)} → {moved, ids: the objects moved (with copy, the copies)}",
             has_selection,
             transform_move
         ),
@@ -976,6 +976,12 @@ fn transform_move(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = targets(s, p)?;
     let (dx, dy) = (f64_or(p, "dx", 0.0), f64_or(p, "dy", 0.0));
     let copy = bool_or(p, "copy", false);
+    // The content grabber / Direct Selection: placed graphics move inside their frames.
+    let explicit = p.get("ids").is_some() || p.get("id").is_some();
+    let content = p.get("content").and_then(Value::as_bool).unwrap_or(!explicit && s.doc()?.selection.content);
+    if content && !copy {
+        return move_content(s, &ids, Vec2::new(dx, dy));
+    }
     let to: Option<SpreadRef> = p.get("toSpread").and_then(|v| serde_json::from_value(v.clone()).ok());
     s.edit(|d, sel| {
         let ids = if copy {
@@ -1007,6 +1013,35 @@ fn transform_move(s: &mut Session, p: &Value) -> Result<Value> {
             it.xf = Affine::translate((dx, dy)) * it.xf;
         }
         Ok(json!({"moved": ids.len(), "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()}))
+    })
+}
+
+/// Move the placed graphic of each frame in `ids` by `d` (spread space) inside its frame; objects
+/// without one move themselves. Locked objects stay.
+fn move_content(s: &mut Session, ids: &[ItemId], d: Vec2) -> Result<Value> {
+    s.edit(|doc, _| {
+        let mut moved = Vec::new();
+        for id in ids {
+            let Some(loc) = doc.find(*id) else { continue };
+            let pxf = doc.parent_xf(&loc);
+            let it = doc.item_mut(*id).ok_or(designcraft_doc::DocError::NoItem(*id))?;
+            if it.locked {
+                continue;
+            }
+            let full = pxf * it.xf;
+            match &mut it.content {
+                Content::Graphic(g) if full.determinant().abs() > 1e-12 => {
+                    // The spread movement in the frame's inner space.
+                    let inv = full.inverse();
+                    let inner = inv * Point::new(d.x, d.y) - inv * Point::ORIGIN;
+                    g.xf = Affine::translate(inner) * g.xf;
+                }
+                // As transform.move moves it.
+                _ => it.xf = Affine::translate(d) * it.xf,
+            }
+            moved.push(id.0);
+        }
+        Ok(json!({"moved": moved.len(), "ids": moved}))
     })
 }
 
@@ -2811,5 +2846,66 @@ mod swatch_name_tests {
             s.execute("object.fill", &json!({"swatch": sw, "ids": [id]})).unwrap();
             s.execute("object.stroke", &json!({"swatch": sw, "ids": [id]})).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod move_content_tests {
+    use super::*;
+
+    /// A 100 x 100 frame at (100, 100) holding a 200 x 200 image at its origin.
+    fn frame_with_image(s: &mut Session) -> ItemId {
+        s.execute("file.new", &json!({})).unwrap();
+        let f = ItemId(s.execute("frame.create", &json!({"rect": [100, 100, 200, 200], "content": "graphic"})).unwrap()["id"].as_u64().unwrap());
+        s.edit(|d, _| {
+            let it = d.item_mut(f).unwrap();
+            it.content = Content::Graphic(designcraft_doc::Graphic {
+                asset: designcraft_doc::AssetId(1),
+                size: (200.0, 200.0),
+                xf: Affine::translate((100.0, 100.0)),
+                auto_fit: Default::default(),
+                fit_align: 4,
+                crop: [0.0; 4],
+            });
+            Ok(())
+        })
+        .unwrap();
+        f
+    }
+
+    fn graphic_xf(s: &Session, id: ItemId) -> Affine {
+        s.doc().unwrap().doc.item(id).unwrap().graphic().unwrap().xf
+    }
+
+    #[test]
+    fn moving_the_content_moves_the_graphic_inside_its_frame() {
+        let mut s = Session::new();
+        let f = frame_with_image(&mut s);
+        let frame = s.doc().unwrap().doc.item(f).unwrap().bounds();
+        // Selected as content (the content grabber, Direct Selection): the graphic moves.
+        s.execute("selection.set", &json!({"ids": [f.0], "content": true})).unwrap();
+        s.execute("transform.move", &json!({"dx": -30, "dy": 10})).unwrap();
+        assert_eq!(graphic_xf(&s, f).translation(), Vec2::new(70.0, 110.0));
+        assert_eq!(s.doc().unwrap().doc.item(f).unwrap().bounds(), frame, "the frame stays");
+        // Named ids move the frame unless `content` says otherwise.
+        s.execute("transform.move", &json!({"dx": 5, "dy": 0, "ids": [f.0]})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.item(f).unwrap().bounds().x0, frame.x0 + 5.0);
+        s.execute("transform.move", &json!({"dx": 0, "dy": -10, "ids": [f.0], "content": true})).unwrap();
+        assert_eq!(graphic_xf(&s, f).translation(), Vec2::new(70.0, 100.0));
+        // A rotated frame: the graphic follows the pointer on the page.
+        s.execute("transform.rotate", &json!({"angle": 90, "ids": [f.0]})).unwrap();
+        let before = s.doc().unwrap().doc.item(f).map(|it| it.xf * graphic_xf(&s, f) * Point::ORIGIN).unwrap();
+        s.execute("transform.move", &json!({"dx": 12, "dy": 0, "ids": [f.0], "content": true})).unwrap();
+        let after = s.doc().unwrap().doc.item(f).map(|it| it.xf * graphic_xf(&s, f) * Point::ORIGIN).unwrap();
+        assert!(((after - before) - Vec2::new(12.0, 0.0)).hypot() < 1e-9, "{before:?} → {after:?}");
+    }
+
+    #[test]
+    fn a_frame_without_a_graphic_moves_itself_in_content_mode() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let t = ItemId(s.execute("frame.create", &json!({"rect": [100, 100, 200, 200], "content": "text"})).unwrap()["id"].as_u64().unwrap());
+        s.execute("transform.move", &json!({"dx": 10, "dy": 0, "ids": [t.0], "content": true})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.item(t).unwrap().bounds().x0, 110.0);
     }
 }

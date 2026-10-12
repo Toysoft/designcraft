@@ -3,6 +3,8 @@
 //! Click selects the frontmost item (Shift toggles), drag moves (Alt duplicates, Shift constrains),
 //! the 8 bounding-box handles resize (Shift keeps proportions, Alt from centre, Cmd scales content),
 //! empty-canvas drags make a marquee, double-clicking a text frame switches to the Type tool.
+//! A placed graphic moves inside its frame by its content grabber (the ring at the frame's centre,
+//! Selection tool) or by dragging it with the Direct Selection tool.
 
 use designcraft_doc::{ItemId, SpreadRef};
 use designcraft_geom::{Affine, Point, Rect, Vec2};
@@ -37,6 +39,12 @@ enum Drag {
     Marquee {
         start: Point,
         cur: Point,
+    },
+    /// Moving the placed graphic inside its frame (content grabber / Direct Selection).
+    Content {
+        start: Point,
+        spread: SpreadRef,
+        moving: bool,
     },
     Anchor {
         id: u64,
@@ -97,6 +105,8 @@ pub struct SelectionTool {
     direct: bool,
     drag: Drag,
     hover_handle: Option<usize>,
+    /// The content grabber showing: the canvas centre of the graphic frame under the pointer.
+    hover_grabber: Option<Point>,
     guides: Vec<Overlay>,
     /// Selected item to toggle if this Shift press never becomes a drag.
     shift_release: Option<u64>,
@@ -104,7 +114,7 @@ pub struct SelectionTool {
 
 impl SelectionTool {
     pub fn new(direct: bool) -> Self {
-        Self { direct, drag: Drag::None, hover_handle: None, guides: vec![], shift_release: None }
+        Self { direct, drag: Drag::None, hover_handle: None, hover_grabber: None, guides: vec![], shift_release: None }
     }
 }
 
@@ -364,6 +374,31 @@ fn positive_pad(v: f64) -> f64 {
     if v.is_finite() && v > 0.0 { v } else { 0.0 }
 }
 
+/// Radius (screen pixels) of the content grabber ring.
+const GRABBER_PX: f64 = 9.0;
+
+/// Is `id` a frame holding a placed graphic?
+fn has_graphic(cx: &ToolContext, id: ItemId) -> bool {
+    cx.doc.item(id).is_some_and(|it| it.graphic().is_some())
+}
+
+/// The graphic frame under canvas point `p`, its spread, and the canvas centre of the frame,
+/// where InDesign shows the content grabber while the pointer is over the frame.
+fn graphic_frame_at(cx: &ToolContext, p: Point) -> Option<(ItemId, SpreadRef, Point)> {
+    let (sr, id) = cx.hit(p)?;
+    if !has_graphic(cx, id) {
+        return None;
+    }
+    let loc = cx.doc.find(id)?;
+    let b = cx.doc.parent_xf(&loc).transform_rect_bbox(cx.doc.item(id)?.bounds());
+    Some((id, sr, cx.layout.to_canvas(sr, b.center())))
+}
+
+/// The content grabber under canvas point `p` (its ring, at the centre of the graphic frame there).
+fn grabber_at(cx: &ToolContext, p: Point) -> Option<(ItemId, SpreadRef, Point)> {
+    graphic_frame_at(cx, p).filter(|(_, _, c)| (p - *c).hypot() <= cx.tol(GRABBER_PX))
+}
+
 impl Tool for SelectionTool {
     fn id(&self) -> &'static str {
         if self.direct { "directSelection" } else { "selection" }
@@ -374,6 +409,7 @@ impl Tool for SelectionTool {
         match ev.kind {
             PointerKind::Move => {
                 self.hover_handle = handle_at(cx, p);
+                self.hover_grabber = if self.direct || self.hover_handle.is_some() { None } else { graphic_frame_at(cx, p).map(|(_, _, c)| c) };
                 vec![]
             }
             PointerKind::Down => {
@@ -403,6 +439,14 @@ impl Tool for SelectionTool {
                         Drag::Resize { handle, start: p, from: cx.layout.xf(loc.spread).inverse().transform_rect_bbox(b), spread: loc.spread };
                     return vec![Action::Begin("Resize".into())];
                 }
+                // The content grabber: select the graphic and move it inside its frame.
+                if !self.direct
+                    && !ev.mods.shift
+                    && let Some((id, sr, _)) = grabber_at(cx, p)
+                {
+                    self.drag = Drag::Content { start: p, spread: sr, moving: false };
+                    return vec![Action::Exec("selection.set".into(), json!({"ids": [id.0], "content": true}))];
+                }
                 // Cmd+Shift-click a parent item on a page: override it there and select the copy.
                 if ev.mods.cmd
                     && ev.mods.shift
@@ -427,7 +471,10 @@ impl Tool for SelectionTool {
                             out.push(Action::Exec("selection.set".into(), json!({"ids": [id.0], "content": self.direct})));
                         }
                         self.drag = Drag::Pending { start: p, hit: true };
-                        let _ = sr;
+                        // Direct Selection drags a placed graphic inside its frame.
+                        if self.direct && !ev.mods.shift && !ev.mods.alt && has_graphic(cx, id) {
+                            self.drag = Drag::Content { start: p, spread: sr, moving: false };
+                        }
                         out
                     }
                     None => {
@@ -437,6 +484,24 @@ impl Tool for SelectionTool {
                 }
             }
             PointerKind::Drag => match self.drag.clone() {
+                Drag::Content { start, spread, moving } => {
+                    if !moving && (p - start).hypot() < cx.tol(3.0) {
+                        return vec![];
+                    }
+                    let mut d = p - start;
+                    if ev.mods.shift {
+                        if d.x.abs() > d.y.abs() {
+                            d.y = 0.0;
+                        } else {
+                            d.x = 0.0;
+                        }
+                    }
+                    let ds = cx.layout.delta_to_spread(spread, d);
+                    self.drag = Drag::Content { start, spread, moving: true };
+                    let mut out = if moving { vec![] } else { vec![Action::Begin("Move".into())] };
+                    out.push(Action::Preview("transform.move".into(), json!({"dx": ds.x, "dy": ds.y, "content": true})));
+                    out
+                }
                 Drag::Pending { start, hit } => {
                     if (p - start).hypot() < cx.tol(3.0) {
                         return vec![];
@@ -683,6 +748,13 @@ impl Tool for SelectionTool {
                 let d = std::mem::replace(&mut self.drag, Drag::None);
                 match d {
                     Drag::Move { .. } | Drag::Resize { .. } | Drag::Anchor { .. } | Drag::Rotate { .. } => vec![Action::Commit],
+                    Drag::Content { moving, .. } => {
+                        if moving {
+                            vec![Action::Commit]
+                        } else {
+                            vec![]
+                        }
+                    }
                     Drag::Pending { .. } => match release {
                         Some(id) => vec![Action::Exec("selection.toggle".into(), json!({"id": id}))],
                         None => vec![],
@@ -739,8 +811,9 @@ impl Tool for SelectionTool {
         }
     }
 
-    fn overlays(&self, _cx: &ToolContext) -> Vec<Overlay> {
+    fn overlays(&self, cx: &ToolContext) -> Vec<Overlay> {
         match &self.drag {
+            Drag::None if self.hover_grabber.is_some() => self.hover_grabber.map(|c| grabber_ring(cx, c)).into_iter().collect(),
             Drag::Marquee { start, cur } => vec![Overlay::Marquee(Rect::from_points(*start, *cur))],
             Drag::Move { .. } | Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Anchor { .. } => self.guides.clone(),
             _ => vec![],
@@ -748,8 +821,14 @@ impl Tool for SelectionTool {
     }
 
     fn cursor(&self, cx: &ToolContext, p: Point, _m: Mods) -> Cursor {
+        if let Drag::Content { moving: true, .. } = self.drag {
+            return Cursor::HandGrab;
+        }
         if self.direct {
             return Cursor::ArrowHollow;
+        }
+        if matches!(self.drag, Drag::None) && grabber_at(cx, p).is_some() {
+            return Cursor::Hand;
         }
         match self.drag {
             Drag::Move { .. } => return Cursor::Move,
@@ -767,6 +846,14 @@ impl Tool for SelectionTool {
     fn busy(&self) -> bool {
         !matches!(self.drag, Drag::None)
     }
+}
+
+/// The content grabber's ring (two circles) around canvas point `c`.
+fn grabber_ring(cx: &ToolContext, c: Point) -> Overlay {
+    use designcraft_geom::Shape as _;
+    let mut path = designcraft_geom::kurbo::Circle::new(c, cx.tol(GRABBER_PX)).to_path(0.05);
+    path.extend(designcraft_geom::kurbo::Circle::new(c, cx.tol(GRABBER_PX * 0.45)).to_path(0.05));
+    Overlay::Path { path, color: [43, 155, 255], dashed: false }
 }
 
 fn handle_cursor(h: usize) -> Cursor {
