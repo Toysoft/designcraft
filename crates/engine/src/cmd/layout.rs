@@ -82,14 +82,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Pages…",
             ["Layout", "Pages"],
             Some("Cmd+Shift+P"),
-            "{count?: 1, after?: page index (default: last), parent?: \"A\"|null}",
+            "{count?: 1, after?: page index (default: last), parent?: id|\"A-Parent\"|\"A\"|null}",
             has_doc,
             |s, p| {
                 let count = p.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 9999) as usize;
                 let st = s.doc()?;
                 let n = st.doc.page_count();
                 let after = p.get("after").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(n - 1);
-                let parent = parent_ref(&st.doc, p.get("parent")).unwrap_or_else(|| st.doc.parents.first().map(|x| x.id));
+                let parent = parent_ref("layout.pages.insert", &st.doc, p.get("parent"))?.unwrap_or_else(|| st.doc.parents.first().map(|x| x.id));
                 s.edit(|d, _| {
                     let ids = d.insert_pages(Some(after), count, parent)?;
                     Ok(json!({"pages": ids.len(), "total": d.page_count()}))
@@ -155,7 +155,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Parent to Pages…",
             ["Layout", "Pages"],
             None,
-            "{pages: [index], parent: \"A\"|null}",
+            "{pages: [index], parent: id|\"A-Parent\"|\"A\"|null (null or \"[None]\" clears)}",
             has_doc,
             |s, p| {
                 let pages: Vec<usize> = p
@@ -163,7 +163,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect())
                     .unwrap_or_default();
-                let parent = parent_ref(&s.doc()?.doc, p.get("parent")).unwrap_or(None);
+                let parent = parent_ref("layout.pages.applyParent", &s.doc()?.doc, p.get("parent"))?.unwrap_or(None);
                 s.edit(|d, _| {
                     d.apply_parent(&pages, parent)?;
                     ok()
@@ -179,13 +179,42 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"id": id.0, "prefix": prefix}))
             })
         }),
-        cmd!(noundo "layout.parents.edit", "Edit Parents", [], None, "{on: bool} — show parent spreads on the canvas", has_doc, |s, p| {
-            let st = s.doc_mut()?;
-            st.editing_parents = p.get("on").and_then(Value::as_bool).unwrap_or(!st.editing_parents);
-            st.selection = Default::default();
-            st.revision += 1;
-            ok()
-        }),
+        cmd!(
+            noundo "layout.parents.edit",
+            "Edit Parents",
+            [],
+            None,
+            "{on?: bool, parent?: id|\"A-Parent\"|\"A\"} — show parent spreads on the canvas; `parent` shows that parent (and implies on). Turning on without `parent` shows the first parent",
+            has_doc,
+            |s, p| {
+                const ID: &str = "layout.parents.edit";
+                let doc = s.doc()?.doc.clone();
+                let parent = match p.get("parent") {
+                    None | Some(Value::Null) => None,
+                    v => match parent_ref(ID, &doc, v)? {
+                        Some(Some(id)) => Some(id),
+                        _ => return Err(bad(ID, "`parent` names a parent to show")),
+                    },
+                };
+                let st = s.doc_mut()?;
+                let was = st.editing_parents;
+                let on = p.get("on").and_then(Value::as_bool).unwrap_or(parent.is_some() || !was);
+                st.editing_parents = on;
+                st.selection = Default::default();
+                st.revision += 1;
+                // The parent to show: the one asked for, or the first when editing starts.
+                let index = match parent {
+                    Some(id) => doc.parent_index(id),
+                    None if !was && !doc.parents.is_empty() => Some(0),
+                    None => None,
+                };
+                let shown = index.filter(|_| on);
+                if let Some(i) = shown {
+                    s.ui_requests.push(crate::UiRequest::View { params: json!({"showSpread": designcraft_doc::SpreadRef::Parent(i)}) });
+                }
+                Ok(json!({"on": on, "parent": shown.and_then(|i| doc.parents.get(i)).map(|x| x.id.0)}))
+            }
+        ),
         cmd!(
             "layout.marginsAndColumns",
             "Margins and Columns…",
@@ -609,13 +638,34 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-/// `"A"` → that parent's id; `null` → Some(None) (= [None]); missing → None (use default).
-fn parent_ref(d: &designcraft_doc::Document, v: Option<&Value>) -> Option<Option<SpreadId>> {
-    match v? {
-        Value::Null => Some(None),
-        Value::String(s) if s == "[None]" => Some(None),
-        Value::String(s) => Some(d.parents.iter().find(|p| p.parent.as_ref().is_some_and(|i| i.prefix == *s || i.label() == *s)).map(|p| p.id)),
-        _ => None,
+/// A parent named by a command parameter: its id (a number), its full label (`"A-Parent"`), or
+/// its prefix (`"A"`) when only one parent has it. `null` or `"[None]"` → `Some(None)` (no parent);
+/// missing → `None` (the command's default). Unknown or ambiguous names are errors, so a typo never
+/// clears a page's parent.
+fn parent_ref(cmd: &str, d: &designcraft_doc::Document, v: Option<&Value>) -> Result<Option<Option<SpreadId>>> {
+    let Some(v) = v else { return Ok(None) };
+    match v {
+        Value::Null => Ok(Some(None)),
+        Value::String(s) if s == "[None]" => Ok(Some(None)),
+        Value::Number(n) => {
+            let id = n.as_u64().ok_or_else(|| bad(cmd, format!("no parent with id {n}")))?;
+            d.parents.iter().find(|p| p.id.0 == id).map(|p| Some(Some(p.id))).ok_or_else(|| bad(cmd, format!("no parent with id {id}")))
+        }
+        Value::String(s) => {
+            let by = |f: &dyn Fn(&designcraft_doc::ParentInfo) -> bool| -> Vec<SpreadId> {
+                d.parents.iter().filter(|p| p.parent.as_ref().is_some_and(f)).map(|p| p.id).collect()
+            };
+            let mut hits = by(&|i| i.label() == *s);
+            if hits.is_empty() {
+                hits = by(&|i| i.prefix == *s);
+            }
+            match hits.as_slice() {
+                [id] => Ok(Some(Some(*id))),
+                [] => Err(bad(cmd, format!("no parent named `{s}`"))),
+                _ => Err(bad(cmd, format!("more than one parent is named `{s}`: give its id"))),
+            }
+        }
+        _ => Err(bad(cmd, "`parent` is a parent id, a parent name or null")),
     }
 }
 
@@ -919,5 +969,63 @@ mod adjust_tests {
         s.execute("layout.marginsAndColumns", &json!({"margins": 36})).unwrap();
         let b2 = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
         assert_eq!(b, b2);
+    }
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use serde_json::json;
+
+    fn parent_of(s: &crate::Session, page: usize) -> Option<u64> {
+        s.doc().unwrap().doc.page(page).unwrap().parent.map(|p| p.0)
+    }
+
+    #[test]
+    fn parents_with_one_prefix_stay_distinct() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"pages": 2})).unwrap();
+        let a = s.execute("layout.parents.new", &json!({"prefix": "IMG", "name": "Parent"})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("layout.parents.new", &json!({"prefix": "IMG", "name": "Half"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("layout.pages.applyParent", &json!({"pages": [0], "parent": b})).unwrap();
+        assert_eq!(parent_of(&s, 0), Some(b));
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "IMG-Half"})).unwrap();
+        assert_eq!(parent_of(&s, 1), Some(b));
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "IMG-Parent"})).unwrap();
+        assert_eq!(parent_of(&s, 1), Some(a));
+        // A prefix two parents share, or a name no parent has, is an error and changes nothing.
+        assert!(s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "IMG"})).is_err());
+        assert!(s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "Nope"})).is_err());
+        assert!(s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": 999_999})).is_err());
+        assert_eq!(parent_of(&s, 1), Some(a));
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "[None]"})).unwrap();
+        assert_eq!(parent_of(&s, 1), None);
+    }
+
+    #[test]
+    fn edit_parents_shows_the_named_parent() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let ids: Vec<u64> =
+            ["B", "C", "D"].iter().map(|p| s.execute("layout.parents.new", &json!({"prefix": p})).unwrap()["id"].as_u64().unwrap()).collect();
+        s.ui_requests.clear();
+        let r = s.execute("layout.parents.edit", &json!({"parent": ids[2]})).unwrap();
+        assert_eq!(r, json!({"on": true, "parent": ids[2]}));
+        assert!(s.doc().unwrap().editing_parents);
+        let n = s.doc().unwrap().doc.parent_index(designcraft_doc::SpreadId(ids[2])).unwrap();
+        let shown: Vec<_> = s
+            .ui_requests
+            .iter()
+            .filter_map(|r| match r {
+                crate::UiRequest::View { params } => params.get("showSpread").cloned(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, vec![json!({"kind": "parent", "index": n})]);
+        let r = s.execute("layout.parents.edit", &json!({"on": true, "parent": "C-Parent"})).unwrap();
+        assert_eq!(r["parent"], ids[1]);
+        assert!(s.execute("layout.parents.edit", &json!({"parent": "Z-Parent"})).is_err());
+        let r = s.execute("layout.parents.edit", &json!({"on": false})).unwrap();
+        assert_eq!(r, json!({"on": false, "parent": null}));
+        assert!(!s.doc().unwrap().editing_parents);
     }
 }

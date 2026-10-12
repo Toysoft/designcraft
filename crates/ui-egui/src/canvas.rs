@@ -114,11 +114,32 @@ pub fn fit(app: &mut DesignApp, rect: Rect, what: &str) {
         let Some(u) = sel.into_iter().reduce(|a, b| a.union(b)) else { return };
         b = u.inflate(u.width().max(u.height()) * 0.05 + 1.0, u.width().max(u.height()) * 0.05 + 1.0);
     }
+    fit_bounds(app, rect, b);
+}
+
+/// Zoom and scroll so canvas rectangle `b` fills the canvas `rect`.
+fn fit_bounds(app: &mut DesignApp, rect: Rect, b: DRect) {
     let pad = 40.0;
-    let zoom = ((rect.width() as f64 - 2.0 * pad) / b.width()).min((rect.height() as f64 - 2.0 * pad) / b.height()).clamp(0.05, 40.0);
+    let zoom =
+        ((rect.width() as f64 - 2.0 * pad) / b.width().max(1e-6)).min((rect.height() as f64 - 2.0 * pad) / b.height().max(1e-6)).clamp(0.05, 40.0);
     let origin = Point::new(b.center().x - rect.width() as f64 / 2.0 / zoom, b.center().y - rect.height() as f64 / 2.0 / zoom);
     if let Some(v) = app.view_mut() {
         *v = View { zoom, origin, fitted: true, rotation: v.rotation };
+    }
+}
+
+/// Fit spread `r` (a document or parent spread on the canvas as it is laid out now) in the canvas.
+/// Before the canvas has a size, the next frame fits whatever spread is current.
+pub fn show_spread(app: &mut DesignApp, r: SpreadRef) {
+    let Some(st) = app.session.active() else { return };
+    let Some(b) = CanvasLayout::new(&st.doc, st.editing_parents).slot(r).map(|s| s.bounds) else { return };
+    match app.canvas_rect {
+        Some(rect) => fit_bounds(app, rect, b),
+        None => {
+            if let Some(v) = app.view_mut() {
+                v.fitted = false;
+            }
+        }
     }
 }
 
@@ -182,6 +203,9 @@ pub fn set_zoom(app: &mut DesignApp, z: f64) {
 }
 
 pub fn apply_view_request(app: &mut DesignApp, p: &Value) {
+    if let Some(r) = p.get("showSpread").and_then(|v| serde_json::from_value::<SpreadRef>(v.clone()).ok()) {
+        show_spread(app, r);
+    }
     // Power Zoom (Hand tool, Alt-press): zoom out to the spread, aim a view-sized rectangle, zoom
     // back in where it was released.
     if let Some(phase) = p.get("powerZoom").and_then(Value::as_str) {

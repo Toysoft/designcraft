@@ -979,7 +979,14 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         "app.deleteAllGuides" => {
             let Some(st) = app.session.active() else { return Some(Err("no document open".into())) };
             let page = crate::canvas::current_page(app).unwrap_or(0);
-            let spread = if st.editing_parents { json!({"kind": "parent", "index": 0}) } else { json!(st.doc.page_loc(page).map_or(0, |l| l.0)) };
+            let spread = if st.editing_parents {
+                // The parent spread the canvas shows.
+                let layout = designcraft_tools::CanvasLayout::new(&st.doc, true);
+                let shown = crate::canvas::current_slot(app, &layout).and_then(|i| layout.slots.get(i)).map(|s| s.spread);
+                json!(shown.unwrap_or(designcraft_doc::SpreadRef::Parent(0)))
+            } else {
+                json!(st.doc.page_loc(page).map_or(0, |l| l.0))
+            };
             return Some(app.run("guide.deleteAll", json!({"spread": spread})));
         }
         "app.deletePage" | "app.duplicateSpread" => {

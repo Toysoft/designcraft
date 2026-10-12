@@ -3,38 +3,61 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use designcraft_doc::{SpreadId, SpreadRef};
 use egui::{Color32, Sense, Stroke, StrokeKind, vec2};
 use serde_json::json;
 
 use crate::theme::Tokens;
 use crate::{DesignApp, icons};
 
-type ThumbKey = (u64, u64, usize);
+/// What a thumbnail shows: a document page (absolute index) or a whole parent spread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ThumbOf {
+    Page(usize),
+    Parent(SpreadId),
+}
+
+type ThumbKey = (u64, u64, ThumbOf);
 
 static THUMBS: Mutex<Option<HashMap<ThumbKey, egui::TextureHandle>>> = Mutex::new(None);
 
-fn thumb(app: &mut DesignApp, ctx: &egui::Context, abs: usize, h: f32) -> Option<egui::TextureHandle> {
+/// Widest parent thumbnail, in pixels (a spread of many pages stays a small texture).
+const MAX_THUMB_W: f64 = 1024.0;
+
+fn thumb(app: &mut DesignApp, ctx: &egui::Context, of: ThumbOf, h: f32) -> Option<egui::TextureHandle> {
     let st = app.session.active()?;
-    let key = (st.uid, st.revision, abs);
+    let key = (st.uid, st.revision, of);
     let mut g = THUMBS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
     if let Some(t) = map.get(&key) {
         return Some(t.clone());
     }
-    let page = st.doc.page(abs)?;
-    let scale = (h as f64 * ctx.pixels_per_point() as f64) / page.height;
+    let px = h as f64 * ctx.pixels_per_point() as f64;
     let mut r = designcraft_render::Renderer::new();
     r.threads = 0;
-    let img = r.render_page(
-        &st.doc,
-        &app.session.cache,
-        abs,
-        scale,
-        false,
-        &designcraft_render::RenderOptions { printing_only: true, ..Default::default() },
-    )?;
+    let opts = designcraft_render::RenderOptions { printing_only: true, ..Default::default() };
+    let (img, name) = match of {
+        ThumbOf::Page(abs) => {
+            let page = st.doc.page(abs)?;
+            let img = r.render_page(&st.doc, &app.session.cache, abs, px / page.height.max(1e-6), false, &opts)?;
+            (img, format!("thumb{abs}"))
+        }
+        ThumbOf::Parent(id) => {
+            let i = st.doc.parent_index(id)?;
+            let b = st.doc.parents.get(i)?.bounds();
+            if !(b.width() > 0.0 && b.height() > 0.0) {
+                return None;
+            }
+            let scale = (px / b.height()).min(MAX_THUMB_W / b.width());
+            let (w, h) = ((b.width() * scale).round().max(1.0) as u32, (b.height() * scale).round().max(1.0) as u32);
+            let view = designcraft_geom::Affine::scale(scale) * designcraft_geom::Affine::translate(-b.origin().to_vec2());
+            let o = designcraft_render::RenderOptions { background: Some([255, 255, 255, 255]), ..opts };
+            let placed = [designcraft_render::Placed { spread: SpreadRef::Parent(i), xf: designcraft_geom::Affine::IDENTITY }];
+            (r.render(&st.doc, &app.session.cache, &placed, w, h, view, &o), format!("thumbp{}", id.0))
+        }
+    };
     let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels);
-    let tex = ctx.load_texture(format!("thumb{abs}"), ci, egui::TextureOptions::LINEAR);
+    let tex = ctx.load_texture(name, ci, egui::TextureOptions::LINEAR);
     // Drop thumbnails of older revisions.
     let (uid, rev) = (st.uid, st.revision);
     map.retain(|k, _| !(k.0 == uid && k.1 != rev));
@@ -47,8 +70,8 @@ fn thumb(app: &mut DesignApp, ctx: &egui::Context, abs: usize, h: f32) -> Option
 enum PageDrag {
     /// A document page (absolute index).
     Page(usize),
-    /// A parent (prefix; `None` = [None]).
-    Parent(Option<String>),
+    /// A parent (`None` = [None]).
+    Parent(Option<SpreadId>),
 }
 
 /// Selected-page tint (multiplied over the thumbnail).
@@ -60,14 +83,41 @@ const THUMB_H: f32 = 37.0;
 /// Parent rows.
 const ROW_H: f32 = 29.0;
 
-/// Paint a blank page icon of `n` pages (parents list), right-aligned at `right`.
-fn blank_spread(p: &egui::Painter, right: egui::Pos2, n: usize, aspect: f32, t: &Tokens) {
-    let h = 24.0;
-    let w = h * aspect;
-    let n = n.max(1);
-    for k in 0..n {
-        let r = egui::Rect::from_min_size(egui::pos2(right.x - w * (n - k) as f32, right.y - h / 2.0), vec2(w, h));
-        p.rect_filled(r, 0.0, Color32::WHITE);
+/// Parent icon height.
+const PARENT_THUMB_H: f32 = 24.0;
+
+/// Paint a parent's icon right-aligned at `right`: its rendered spread, or blank pages of `aspect`
+/// for [None] (`parent` = `None`) and when the spread can't be rendered.
+fn parent_icon(app: &mut DesignApp, ui: &egui::Ui, right: egui::Pos2, parent: Option<(usize, SpreadId)>, aspect: f32, t: &Tokens) {
+    let h = PARENT_THUMB_H;
+    let doc = app.session.active().map(|st| st.doc.clone());
+    let spread = parent.and_then(|(i, _)| doc.as_ref()?.parents.get(i).cloned());
+    // Page outlines in icon coordinates (left, width), from the spread's own pages.
+    let (pages, total): (Vec<(f32, f32)>, f32) = match &spread {
+        Some(sp) if sp.bounds().height() > 0.0 => {
+            let b = sp.bounds();
+            let k = h as f64 / b.height();
+            (sp.pages.iter().map(|p| (((p.x - b.x0) * k) as f32, (p.width * k) as f32)).collect(), (b.width() * k) as f32)
+        }
+        _ => {
+            let n = spread.as_ref().map_or(1, |sp| sp.pages.len().max(1));
+            let w = h * aspect;
+            ((0..n).map(|k| (w * k as f32, w)).collect(), w * n as f32)
+        }
+    };
+    let area = egui::Rect::from_min_size(egui::pos2(right.x - total, right.y - h / 2.0), vec2(total, h));
+    let tex = parent.and_then(|(_, id)| thumb(app, ui.ctx(), ThumbOf::Parent(id), h));
+    let p = ui.painter();
+    match tex {
+        Some(tex) => {
+            p.image(tex.id(), area, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(area, 0.0, Color32::WHITE);
+        }
+    }
+    for (x, w) in pages {
+        let r = egui::Rect::from_min_size(egui::pos2(area.min.x + x, area.min.y), vec2(w, h));
         p.rect_stroke(r, 0.0, Stroke::new(0.5, t.border), StrokeKind::Inside);
     }
 }
@@ -80,26 +130,38 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let aspect = (doc.settings.page_width / doc.settings.page_height.max(1.0)) as f32;
     let mut drop: Option<(PageDrag, usize)> = None;
     ui.spacing_mut().item_spacing.y = 0.0;
-    // ---- Parents: [None] and each parent, 29 pt rows with a blank thumbnail at the right.
-    let mut rows: Vec<(String, Option<String>, usize)> = vec![("[None]".into(), None, 1)];
-    for p in &doc.parents {
+    // ---- Parents: [None] and each parent, 29 pt rows with the parent's thumbnail at the right.
+    // While parents are edited, the row of the parent the canvas shows is selected.
+    let cur_parent = if editing_parents {
+        let layout = designcraft_tools::CanvasLayout::new(&doc, true);
+        crate::canvas::current_slot(app, &layout).and_then(|i| layout.slots.get(i)).and_then(|s| match s.spread {
+            SpreadRef::Parent(i) => Some(i),
+            SpreadRef::Doc(_) => None,
+        })
+    } else {
+        None
+    };
+    let mut rows: Vec<(String, Option<(usize, SpreadId)>)> = vec![("[None]".into(), None)];
+    for (i, p) in doc.parents.iter().enumerate() {
         let label = p.parent.as_ref().map(|i| i.label()).unwrap_or_default();
-        rows.push((label, p.parent.as_ref().map(|i| i.prefix.clone()), p.pages.len()));
+        rows.push((label, Some((i, p.id))));
     }
-    for (label, prefix, n) in rows {
+    for (label, parent) in rows {
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
-        let active = editing_parents && prefix.is_some();
+        let active = parent.is_some_and(|(i, _)| cur_parent == Some(i));
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, &label));
         if active {
             ui.painter().rect_filled(r, 0.0, t.row_selected);
         } else if resp.hovered() {
             ui.painter().rect_filled(r, 0.0, t.hover);
         }
         ui.painter().text(r.left_center() + vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.5), t.text_strong);
-        blank_spread(ui.painter(), egui::pos2(r.max.x - 10.0, r.center().y), n, aspect, &t);
-        resp.dnd_set_drag_payload(PageDrag::Parent(prefix.clone()));
-        if resp.double_clicked() && prefix.is_some() {
-            let _ = app.run("layout.parents.edit", json!({"on": true}));
-            app.views.clear();
+        parent_icon(app, ui, egui::pos2(r.max.x - 10.0, r.center().y), parent, aspect, &t);
+        resp.dnd_set_drag_payload(PageDrag::Parent(parent.map(|(_, id)| id)));
+        if resp.double_clicked()
+            && let Some((_, id)) = parent
+        {
+            let _ = app.run("layout.parents.edit", json!({"on": true, "parent": id.0}));
         }
         if resp.dragged() {
             drag_ghost(ui, &label, &t);
@@ -132,7 +194,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             let resp = ui.interact(pr, ui.id().with(("page", abs)), Sense::click_and_drag());
             let selected = abs == cur && !editing_parents;
             let tint = if selected { SELECTED_TINT } else { Color32::WHITE };
-            if let Some(tex) = thumb(app, ui.ctx(), abs, THUMB_H) {
+            if let Some(tex) = thumb(app, ui.ctx(), ThumbOf::Page(abs), THUMB_H) {
                 ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
             } else {
                 ui.painter().rect_filled(pr, 0.0, tint);
@@ -167,7 +229,10 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             if resp.clicked() || resp.double_clicked() {
                 if editing_parents {
                     let _ = app.run("layout.parents.edit", json!({"on": false}));
-                    app.views.clear();
+                    // The canvas refits to the page's spread once it is centred.
+                    if let Some(v) = app.view_mut() {
+                        v.fitted = false;
+                    }
                 }
                 crate::canvas::go_to_page(app, abs);
             }
@@ -209,8 +274,8 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         Some((PageDrag::Page(from), to)) if from != to => {
             let _ = app.run("layout.pages.move", json!({"from": from, "to": to}));
         }
-        Some((PageDrag::Parent(prefix), to)) => {
-            let _ = app.run("layout.pages.applyParent", json!({"pages": [to], "parent": prefix}));
+        Some((PageDrag::Parent(parent), to)) => {
+            let _ = app.run("layout.pages.applyParent", json!({"pages": [to], "parent": parent.map(|id| id.0)}));
         }
         _ => {}
     }
@@ -264,7 +329,7 @@ fn page_menu(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Docu
         for pp in &doc.parents {
             let l = pp.parent.as_ref().map(|i| i.label()).unwrap_or_default();
             if ui.button(&l).clicked() {
-                let _ = app.run("layout.pages.applyParent", json!({"pages": [abs], "parent": pp.parent.as_ref().map(|i| i.prefix.clone())}));
+                let _ = app.run("layout.pages.applyParent", json!({"pages": [abs], "parent": pp.id.0}));
                 ui.close();
             }
         }
@@ -279,4 +344,50 @@ fn drag_ghost(ui: &egui::Ui, label: &str, t: &Tokens) {
     let r = egui::Rect::from_min_size(p + vec2(10.0, 8.0), g.size() + vec2(10.0, 6.0));
     painter.rect(r, 2.0, t.panel_darker, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     painter.galley(r.min + vec2(5.0, 3.0), g, t.text_strong);
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Modifiers, PointerButton, vec2};
+    use egui_kittest::kittest::{NodeT, Queryable};
+    use serde_json::json;
+
+    use crate::test_window;
+
+    #[test]
+    fn double_clicking_a_parent_shows_that_parent() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        for prefix in ["B", "C", "D"] {
+            app.run("layout.parents.new", json!({"prefix": prefix})).unwrap();
+        }
+        app.ui.dock_tab = "pages".into();
+        let mut h = test_window::open(app, vec2(1400.0, 900.0));
+        let names = ["A-Parent", "B-Parent", "C-Parent", "D-Parent"];
+        for name in names {
+            assert_ne!(h.get_by_label(name).accesskit_node().toggled(), Some(egui::accesskit::Toggled::True), "{name} is not selected yet");
+        }
+        // Both clicks in one frame: the harness's event queue spaces events too far apart for a
+        // double click.
+        let at = h.get_by_label("C-Parent").rect().center();
+        h.input_mut().events.push(Event::PointerMoved(at));
+        for pressed in [true, false, true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        }
+        h.run_steps(4);
+        let app = &h.state().app;
+        assert!(app.session.active().unwrap().editing_parents);
+        let st = app.session.active().unwrap();
+        let layout = designcraft_tools::CanvasLayout::new(&st.doc, true);
+        let slot = crate::canvas::current_slot(app, &layout).unwrap();
+        assert_eq!(layout.slots[slot].spread, designcraft_doc::SpreadRef::Parent(2));
+        for name in names {
+            assert_eq!(h.get_by_label(name).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True), name == "C-Parent", "{name}");
+        }
+        // Parent rows show a rendered thumbnail.
+        let id = st.doc.parents[2].id;
+        let rev = (st.uid, st.revision);
+        let thumbs = super::THUMBS.lock().unwrap();
+        assert!(thumbs.as_ref().unwrap().keys().any(|k| (k.0, k.1) == rev && k.2 == super::ThumbOf::Parent(id)));
+    }
 }
