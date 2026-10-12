@@ -1022,6 +1022,15 @@ pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     designcraft_images::pixel_size(bytes)
 }
 
+/// Natural size of a placed graphic, unrounded: a PDF page (crop box) and an SVG in points, a raster
+/// in pixels. Placed graphics are drawn at this size; `image_size` rounds it to whole pixels for display.
+pub fn natural_size(bytes: &[u8], page: usize) -> Option<(f64, f64)> {
+    if is_pdf(bytes) {
+        return pdf_page_size(bytes, page).map(|(w, h)| (w.max(1e-3), h.max(1e-3)));
+    }
+    designcraft_images::natural_size(bytes)
+}
+
 /// MIME type guess for encoded image bytes.
 /// Is this a PDF file (placed PDFs are graphics)?
 pub fn is_pdf(bytes: &[u8]) -> bool {

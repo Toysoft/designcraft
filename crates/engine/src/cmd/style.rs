@@ -716,13 +716,18 @@ pub fn parse_color(v: &Value) -> Option<designcraft_color::Color> {
     use designcraft_color::Color;
     match v {
         Value::String(s) => Color::from_hex(s),
+        // One scale per colour, not per component: {c: 0.7, y: 12.2} is C 0.7 %, Y 12.2 %. Only a colour whose
+        // components are all within 0..1 is read as fractions (the older form).
         Value::Array(a) if a.len() >= 3 => {
-            let f = |i: usize| a[i].as_f64().map(|x| if x > 1.0 { x / 255.0 } else { x } as f32);
-            Some(Color::rgb(f(0)?, f(1)?, f(2)?))
+            let v = [a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?];
+            let scale = if v.iter().any(|&x| x > 1.0) { 255.0 } else { 1.0 };
+            Some(Color::rgb((v[0] / scale) as f32, (v[1] / scale) as f32, (v[2] / scale) as f32))
         }
         Value::Object(o) => {
-            let g = |k: &str| o.get(k).and_then(Value::as_f64).map(|x| if x > 1.0 { x / 100.0 } else { x } as f32);
-            Some(Color::cmyk(g("c")?, g("m")?, g("y")?, g("k")?))
+            let g = |k: &str| o.get(k).and_then(Value::as_f64);
+            let v = [g("c")?, g("m")?, g("y")?, g("k")?];
+            let scale = if v.iter().any(|&x| x > 1.0) { 100.0 } else { 1.0 };
+            Some(Color::cmyk((v[0] / scale) as f32, (v[1] / scale) as f32, (v[2] / scale) as f32, (v[3] / scale) as f32))
         }
         _ => None,
     }
@@ -1039,6 +1044,20 @@ fn rename_in(it: &mut designcraft_doc::Item, from: &str, to: &str) {
 #[cfg(test)]
 mod color_tests {
     use super::*;
+
+    #[test]
+    fn percent_components_at_most_one_stay_percent() {
+        use designcraft_color::Color;
+        // {"c": 0.7, ..., "y": 12.2} is a pale cream (C 0.7 %, Y 12.2 %), not C 70 %.
+        let Some(Color::Cmyk { c, m, y, k }) = parse_color(&json!({"c": 0.7, "m": 0, "y": 12.2, "k": 0})) else { panic!("not CMYK") };
+        assert!((c - 0.007).abs() < 1e-6 && m == 0.0 && (y - 0.122).abs() < 1e-6 && k == 0.0, "got {c} {m} {y} {k}");
+        // Fractions (every component within 0..1) keep working.
+        let Some(Color::Cmyk { c, k, .. }) = parse_color(&json!({"c": 0.5, "m": 0, "y": 0, "k": 1})) else { panic!("not CMYK") };
+        assert!((c - 0.5).abs() < 1e-6 && (k - 1.0).abs() < 1e-6);
+        // RGB arrays follow the same rule: [1, 128, 255] is 0..255.
+        let Some(Color::Rgb { r, g, b }) = parse_color(&json!([1, 128, 255])) else { panic!("not RGB") };
+        assert!((r - 1.0 / 255.0).abs() < 1e-6 && (g - 128.0 / 255.0).abs() < 1e-6 && (b - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn style_groups_rename_every_use() {

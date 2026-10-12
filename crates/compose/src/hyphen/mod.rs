@@ -1,6 +1,7 @@
 //! Hyphenation. English uses the bundled dictionary and patterns below. Other languages use the
 //! Liang patterns compiled into `hypher`, one cargo feature per language: Spanish is Javier Bezos's
-//! `hyph-es.tex` 5.0 from hyph-utf8, MIT (see NOTICE).
+//! `hyph-es.tex` 5.0 from hyph-utf8, MIT; Portuguese is `hyph-pt.tex` 1.4 from hyph-utf8 (Pedro J.
+//! de Rezende, J. Joao Dias Almeida, Leonardo Araujo, Aline Benevides), BSD-3-Clause (see NOTICE).
 //!
 //! English lookup order for each word:
 //! 1. the **dictionary** ([`Dictionary::en_us`]) — the public-domain Moby Hyphenator II word list
@@ -387,6 +388,25 @@ mod tests {
         assert_eq!(h("teatro"), "tea-tro", "a vowel run stays whole");
         assert_eq!(h("calle"), "ca-lle", "ll stays whole");
         assert!(Lang::for_language("French").is_none(), "only languages built in");
+    }
+
+    #[test]
+    fn portuguese_uses_the_hyph_pt_patterns() {
+        let pt = Lang::for_language("Portuguese: Brazilian").unwrap();
+        assert_eq!(pt, Lang::for_language("Portuguese").unwrap());
+        assert_eq!(pt, Lang::for_language("pt_BR").unwrap());
+        assert_ne!(pt, Lang::for_language("Spanish").unwrap());
+        // hyph-pt's own minimum: three letters after the last break.
+        let lim = Limits { before_last: 3, ..Limits::default() };
+        let h = |w: &str| {
+            let pts = hyphen_points_in(w, &lim, pt);
+            w.chars().enumerate().map(|(i, c)| if pts.contains(&i) { format!("-{c}") } else { c.to_string() }).collect::<String>()
+        };
+        assert_eq!(h("matemática"), "ma-te-má-tica");
+        assert_eq!(h("orientação"), "ori-en-ta-ção");
+        assert_eq!(h("Universidade"), "Uni-ver-si-dade");
+        assert_eq!(h("experiência"), "ex-pe-ri-ên-cia");
+        assert_eq!(h("pós-graduação"), "pós-gra-du-a-ção", "each part of a compound");
     }
 
     #[test]

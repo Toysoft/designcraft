@@ -478,6 +478,7 @@ fn percent_decode_keeps_malformed_escapes() {
     assert_eq!(import::percent_decode("a%20b%2"), "a b%2");
     assert_eq!(import::percent_decode("%é%zz"), "%é%zz");
     assert_eq!(import::uri_to_path("file:///C:/a%20b"), "C:/a b");
+    assert_eq!(import::uri_to_path("file:/a%bé"), "/a%bé");
 }
 
 #[test]
