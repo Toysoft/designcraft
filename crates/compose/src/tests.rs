@@ -2788,3 +2788,30 @@ fn empty_paragraphs_get_no_bullet_or_number() {
         assert_eq!(list_labels(&cs, LABEL_CHARS), ["1.", "", "2.", ""], "list `{name}`");
     }
 }
+
+#[test]
+fn same_para_style_spacing_replaces_space_between_same_style_paragraphs() {
+    let rect = Rect::new(0.0, 0.0, 300.0, 700.0);
+    let base = ParaAttrs { space_before: Some(5.0), space_after: Some(10.0), ..Default::default() };
+    // `other_last`: the last paragraph gets a different paragraph style.
+    let baselines = |para: ParaAttrs, other_last: bool| {
+        let (mut d, sid, _) = doc_with("A\n\nB", rect, para);
+        if other_last && let Some(st) = d.stories.get_mut(&sid) {
+            std::sync::Arc::make_mut(st).paras[2].style = "Other".into();
+        }
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        all_lines(&cs).iter().map(|l| l.baseline).collect::<Vec<_>>()
+    };
+    let tight_attrs = ParaAttrs { same_para_style_spacing: Some(Some(0.0)), ..base.clone() };
+    let normal = baselines(base.clone(), false);
+    let tight = baselines(tight_attrs.clone(), false);
+    let wide = baselines(ParaAttrs { same_para_style_spacing: Some(Some(20.0)), ..base }, false);
+    let mixed = baselines(tight_attrs, true);
+    assert_eq!(normal.len(), 3);
+    // Ordinary spacing: space after (10) + space before (5) between each pair, empty paragraph included.
+    assert!((normal[1] - normal[0] - 14.4 - 15.0).abs() < 1e-6, "{normal:?}");
+    assert!((tight[1] - tight[0] - 14.4).abs() < 1e-6 && (tight[2] - tight[1] - 14.4).abs() < 1e-6, "{tight:?}");
+    assert!((wide[2] - wide[1] - 14.4 - 20.0).abs() < 1e-6, "{wide:?}");
+    // A different style keeps the ordinary spacing at its boundary.
+    assert!((mixed[1] - mixed[0] - 14.4).abs() < 1e-6 && (mixed[2] - mixed[1] - 14.4 - 15.0).abs() < 1e-6, "{mixed:?}");
+}

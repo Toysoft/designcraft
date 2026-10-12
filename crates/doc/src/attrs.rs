@@ -809,6 +809,8 @@ attr_set! {
         last_line_indent: f64 = 0.0,
         space_before: f64 = 0.0,
         space_after: f64 = 0.0,
+        /// Space between consecutive paragraphs of the same style; replaces space after/before there (None = ignore).
+        same_para_style_spacing: Option<f64> = None,
         drop_cap_lines: u32 = 0,
         drop_cap_chars: u32 = 0,
         /// Nested styles, in order from the paragraph start.

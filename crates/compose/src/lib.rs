@@ -849,7 +849,12 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             }
         }
         if cur.last_baseline.is_some() {
-            cur.pending += pp.space_before;
+            // Same style as the previous paragraph with a same-style spacing: it replaces space after + before.
+            let same_style = pi.checked_sub(1).and_then(|p| story.paras.get(p)).is_some_and(|prev| prev.style == pf.style && prev.table.is_none());
+            match pp.same_para_style_spacing {
+                Some(gap) if same_style => cur.pending = gap,
+                _ => cur.pending += pp.space_before,
+            }
         }
         if let Some(cfg) = split_cfg
             && cur.split.is_none()

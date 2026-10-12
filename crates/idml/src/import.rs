@@ -1343,6 +1343,8 @@ impl<'r> Importer<'r> {
             a.grep_styles = Some(v);
         }
         a.space_after = e.num("SpaceAfter");
+        // A number, or an enumeration (Ignore) that turns it off even over a based-on style's value.
+        a.same_para_style_spacing = e.prop("SameParaStyleSpacing").map(|v| v.trim().parse::<f64>().ok().filter(|v| v.is_finite()));
         a.drop_cap_lines = u("DropCapLines");
         a.drop_cap_chars = u("DropCapCharacters");
         if let Some(g) = e.prop("GridAlignment") {

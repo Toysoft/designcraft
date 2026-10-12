@@ -1368,6 +1368,12 @@ impl<'a> Ex<'a> {
         n!(last_line_indent, "LastLineIndent");
         n!(space_before, "SpaceBefore");
         n!(space_after, "SpaceAfter");
+        match a.same_para_style_spacing {
+            Some(Some(v)) => el.set("SameParaStyleSpacing", num(v)),
+            // Explicit Ignore: must be written so it still overrides a based-on style's value.
+            Some(None) => el.set("SameParaStyleSpacing", "Nothing"),
+            None => {}
+        }
         n!(drop_cap_lines, "DropCapLines");
         n!(drop_cap_chars, "DropCapCharacters");
         if let Some(g) = a.grid_align {
