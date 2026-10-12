@@ -42,6 +42,8 @@ struct Run {
     root: PathBuf,
     dir: PathBuf,
     lock: std::fs::File,
+    #[cfg(unix)]
+    directory: std::fs::File,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,7 +85,10 @@ pub fn run_dir(root: &Path) -> Result<PathBuf> {
         let locked = validate_recovery_dir(&dir).and_then(|()| {
             let lock = new_lock(&dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
             match lock.try_lock() {
-                Ok(()) => Ok(Some(lock)),
+                Ok(()) => {
+                    validate_lock(&dir, &lock)?;
+                    Ok(Some(lock))
+                }
                 Err(std::fs::TryLockError::WouldBlock) => Ok(None),
                 Err(std::fs::TryLockError::Error(e)) => Err(EngineError::Other(format!("{}: {e}", dir.display()))),
             }
@@ -91,13 +96,21 @@ pub fn run_dir(root: &Path) -> Result<PathBuf> {
         match locked {
             // An app that is starting can take a folder this new for one a run left, and remove
             // it before the lock is held: then the lock is gone, or that app holds it.
-            Ok(Some(lock)) if std::fs::symlink_metadata(dir.join(LOCK)).is_ok() => {
-                runs.push(Run { root: root.to_path_buf(), dir: dir.clone(), lock });
+            Ok(Some(lock)) => {
+                #[cfg(unix)]
+                let directory = std::fs::File::open(&dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+                runs.push(Run {
+                    root: root.to_path_buf(),
+                    dir: dir.clone(),
+                    lock,
+                    #[cfg(unix)]
+                    directory,
+                });
                 return Ok(dir);
             }
             Ok(_) => {}
             Err(e) => {
-                let _ = std::fs::remove_file(dir.join(LOCK));
+                // Never unlink a lock that another starting run may now own.
                 let _ = std::fs::remove_dir(&dir);
                 return Err(e);
             }
@@ -109,26 +122,127 @@ pub fn run_dir(root: &Path) -> Result<PathBuf> {
 #[cfg(not(target_arch = "wasm32"))]
 fn new_lock(dir: &Path) -> std::io::Result<std::fs::File> {
     let mut new = std::fs::OpenOptions::new();
-    new.write(true).create_new(true);
+    new.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         new.mode(0o600);
     }
-    new.open(dir.join(LOCK))
+    let mut file = new.open(dir.join(LOCK))?;
+    // A marker distinguishes the held handle from a replacement at the same pathname on
+    // platforms without portable file-identity metadata. Empty older-version locks remain valid.
+    static NEXT_LOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)?.as_nanos();
+    let marker = format!("{}:{}:{now}", std::process::id(), NEXT_LOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    file.write_all(marker.as_bytes())?;
+    file.sync_all()?;
+    Ok(file)
+}
+
+/// Check the current lock name without accepting a symlink or a lock held through an unlinked
+/// handle. An advisory lock on an old handle does not protect a replacement at the same name.
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_lock(dir: &Path, lock: &std::fs::File) -> Result<()> {
+    let path = dir.join(LOCK);
+    let fail = || EngineError::Other(format!("{}: this run no longer owns its recovery lock", path.display()));
+    let before = std::fs::symlink_metadata(&path).map_err(|_| fail())?;
+    if is_link_like(&before) || !before.file_type().is_file() {
+        return Err(fail());
+    }
+    let named = std::fs::File::open(&path).map_err(|_| fail())?;
+    let held = lock.metadata().map_err(|_| fail())?;
+    let current = named.metadata().map_err(|_| fail())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if held.dev() != before.dev() || held.ino() != before.ino() || held.dev() != current.dev() || held.ino() != current.ino() {
+            return Err(fail());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (held, current);
+    if lock_marker(lock).map_err(|_| fail())? != lock_marker(&named).map_err(|_| fail())? {
+        return Err(fail());
+    }
+    let after = std::fs::symlink_metadata(&path).map_err(|_| fail())?;
+    if is_link_like(&after) || !after.file_type().is_file() {
+        return Err(fail());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if held.dev() != after.dev() || held.ino() != after.ino() {
+            return Err(fail());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_marker(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek};
+    let mut file = file.try_clone()?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(129).read_to_end(&mut bytes)?;
+    if bytes.len() > 128 {
+        return Err(std::io::Error::other("invalid recovery lock marker"));
+    }
+    Ok(bytes)
 }
 
 /// A run's folder that was removed while it runs is made again by the next save: so is its lock.
 #[cfg(not(target_arch = "wasm32"))]
-fn relock(dir: &Path) {
+fn relock(dir: &Path, created: bool) -> Result<()> {
     let mut runs = RUNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(run) = runs.iter_mut().find(|r| r.dir == dir) else { return };
-    if std::fs::symlink_metadata(dir.join(LOCK)).is_err()
-        && let Ok(lock) = new_lock(dir)
-        && lock.try_lock().is_ok()
-    {
-        run.lock = lock;
+    let Some(run) = runs.iter_mut().find(|r| r.dir == dir) else { return Ok(()) };
+    validate_recovery_dir(&run.root)?;
+    #[cfg(unix)]
+    let directory = std::fs::symlink_metadata(dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+    // Reclaim a newly recreated folder only when this operation actually created it. Existing
+    // replacements, including ones without a lock, may contain somebody else's documents.
+    let same_directory = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = run.directory.metadata().map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+            held.dev() == directory.dev() && held.ino() == directory.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            // Without stable directory identity, a valid held lock is the proof of ownership.
+            // A missing lock cannot authorize an existing folder, even on coarse-timestamp disks.
+            validate_lock(dir, &run.lock).is_ok()
+        }
+    };
+    if !created && !same_directory {
+        return Err(EngineError::Other(format!("{}: this run no longer owns its recovery folder", dir.display())));
     }
+    match std::fs::symlink_metadata(dir.join(LOCK)) {
+        Ok(_) => return validate_lock(dir, &run.lock),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(EngineError::Other(format!("{}: {e}", dir.display()))),
+    }
+    let lock = new_lock(dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+    lock.try_lock().map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+    validate_lock(dir, &lock)?;
+    #[cfg(unix)]
+    let replacement_directory = std::fs::File::open(dir).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = replacement_directory.metadata().map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+        if held.dev() != directory.dev() || held.ino() != directory.ino() {
+            return Err(EngineError::Other(format!("{}: recovery folder changed while restoring its lock", dir.display())));
+        }
+    }
+    validate_lock(dir, &lock)?;
+    run.lock = lock;
+    #[cfg(unix)]
+    {
+        run.directory = replacement_directory;
+    }
+    Ok(())
 }
 
 /// Move into `own`, this run's folder, what is left to recover beside it: the entries of runs
@@ -148,7 +262,11 @@ fn take_over(own: &Path) {
             continue;
         }
         // Opened for writing: over NFS an exclusive lock on a file opened for reading is refused.
-        let Ok(lock) = std::fs::OpenOptions::new().write(true).open(dir.join(LOCK)) else { continue };
+        let Ok(metadata) = std::fs::symlink_metadata(dir.join(LOCK)) else { continue };
+        if is_link_like(&metadata) || !metadata.file_type().is_file() {
+            continue;
+        }
+        let Ok(lock) = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(LOCK)) else { continue };
         match lock.try_lock() {
             // Free: the run has ended. Holding it keeps another starting app out.
             Ok(()) => {}
@@ -157,6 +275,10 @@ fn take_over(own: &Path) {
                 log::warn!("recovery data in {} is left there: {e}", dir.display());
                 continue;
             }
+        }
+        if let Err(e) = validate_lock(&dir, &lock) {
+            log::warn!("recovery data in {} is left there: {e}", dir.display());
+            continue;
         }
         move_entries(&dir, own);
         remove_emptied(&dir);
@@ -210,7 +332,7 @@ fn files(dir: &Path, uid: u64) -> (PathBuf, PathBuf) {
 /// Remove a document's recovery entry (it was saved or closed).
 pub fn discard(dir: &Path, uid: u64) {
     #[cfg(not(target_arch = "wasm32"))]
-    if validate_recovery_dir(dir).is_err() {
+    if validate_recovery_dir(dir).is_err() || relock(dir, false).is_err() {
         return;
     }
     let (d, m) = files(dir, uid);
@@ -221,9 +343,11 @@ pub fn discard(dir: &Path, uid: u64) {
 /// Write recovery entries for the dirty documents (and drop those of clean ones). Returns how
 /// many were written.
 pub fn save(s: &Session, dir: &Path) -> Result<usize> {
-    secure_recovery_dir(dir)?;
+    let created = secure_recovery_dir(dir)?;
     #[cfg(not(target_arch = "wasm32"))]
-    relock(dir);
+    relock(dir, created)?;
+    #[cfg(target_arch = "wasm32")]
+    let _ = created;
     let mut n = 0;
     for d in &s.docs {
         if !d.is_dirty() {
@@ -242,35 +366,45 @@ pub fn save(s: &Session, dir: &Path) -> Result<usize> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn secure_recovery_dir(dir: &Path) -> Result<()> {
+fn secure_recovery_dir(dir: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(dir) {
-        Ok(_) => return validate_recovery_dir(dir),
+        Ok(_) => return validate_recovery_dir(dir).map(|()| false),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(EngineError::Other(format!("{}: {e}", dir.display()))),
     }
 
-    // Set the mode while creating directories so existing caller-owned directories are never
-    // chmodded. DirBuilder applies this mode only to components it creates; the process umask may
-    // make it more restrictive.
+    // Create parent directories privately without changing existing caller-owned permissions.
+    // Create the leaf separately so a creation race can never be mistaken for our own folder.
     #[cfg(unix)]
     let create_result = {
         use std::os::unix::fs::DirBuilderExt;
-
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700).create(dir)
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(dir)
     };
     #[cfg(not(unix))]
-    let create_result = std::fs::create_dir_all(dir);
-
-    create_result.map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
-
-    // Re-check after creation. This also fails closed if another process won a creation race with
-    // a symlink or, on Windows, any reparse-point leaf.
-    validate_recovery_dir(dir)
+    let create_result = {
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| EngineError::Other(format!("{}: {e}", dir.display())))?;
+        }
+        std::fs::create_dir(dir)
+    };
+    let created = match create_result {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(EngineError::Other(format!("{}: {e}", dir.display()))),
+    };
+    validate_recovery_dir(dir)?;
+    Ok(created)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn secure_recovery_dir(_dir: &Path) -> Result<()> {
+fn secure_recovery_dir(_dir: &Path) -> Result<bool> {
     Err(EngineError::Other("recovery files are unavailable on the web".into()))
 }
 
@@ -359,7 +493,7 @@ fn write_recovery_file(_path: &Path, _bytes: &[u8]) -> Result<()> {
 pub fn list(dir: &Path) -> Vec<(u64, Value)> {
     let mut out = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
-    if validate_recovery_dir(dir).is_err() {
+    if validate_recovery_dir(dir).is_err() || relock(dir, false).is_err() {
         return out;
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return out };
@@ -385,7 +519,10 @@ pub fn list(dir: &Path) -> Vec<(u64, Value)> {
 /// writes its own). Returns the opened documents' indices.
 pub fn open(s: &mut Session, dir: &Path) -> Result<Vec<usize>> {
     #[cfg(not(target_arch = "wasm32"))]
-    validate_recovery_dir(dir)?;
+    {
+        validate_recovery_dir(dir)?;
+        relock(dir, false)?;
+    }
     let mut opened = Vec::new();
     // For this run's own folder, first bring in what runs that ended left in theirs.
     #[cfg(not(target_arch = "wasm32"))]
@@ -556,6 +693,76 @@ mod tests {
         assert_eq!(save(&dirty_session(), &own).unwrap(), 1);
         let lock = std::fs::File::open(own.join(LOCK)).unwrap();
         assert!(matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+    }
+
+    /// Replacing the name of a live run's lock must not authorize writes under the old handle.
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_a_run_whose_lock_was_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let own = run_dir(root.path()).unwrap();
+        std::fs::remove_file(own.join(LOCK)).unwrap();
+        let replacement = new_lock(&own).unwrap();
+        replacement.try_lock().unwrap();
+        assert!(save(&dirty_session(), &own).is_err());
+        assert!(list(&own).is_empty(), "another owner's folder must not receive our recovery data");
+    }
+
+    /// A blocked attempt to recreate a run's lock must stop the save before it writes documents.
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_a_run_whose_lock_cannot_be_recreated() {
+        let root = tempfile::tempdir().unwrap();
+        let own = run_dir(root.path()).unwrap();
+        std::fs::remove_file(own.join(LOCK)).unwrap();
+        std::fs::create_dir(own.join(LOCK)).unwrap();
+        assert!(save(&dirty_session(), &own).is_err());
+        assert!(list(&own).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discarding_a_document_does_not_touch_a_replaced_runs_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let own = run_dir(root.path()).unwrap();
+        std::fs::remove_file(own.join(LOCK)).unwrap();
+        let replacement = new_lock(&own).unwrap();
+        replacement.try_lock().unwrap();
+        let (doc, meta) = files(&own, 1);
+        std::fs::write(&doc, b"the replacement owner's document").unwrap();
+        std::fs::write(&meta, b"{}").unwrap();
+        discard(&own, 1);
+        assert_eq!(std::fs::read(doc).unwrap(), b"the replacement owner's document");
+        assert!(meta.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_run_rejects_a_symlinked_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let own = run_dir(root.path()).unwrap();
+        std::fs::remove_file(own.join(LOCK)).unwrap();
+        let unrelated = root.path().join("unrelated");
+        std::fs::write(&unrelated, b"unrelated file").unwrap();
+        std::os::unix::fs::symlink(&unrelated, own.join(LOCK)).unwrap();
+        assert!(save(&dirty_session(), &own).is_err());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"unrelated file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_run_directory_is_not_claimed_or_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let own = run_dir(root.path()).unwrap();
+        let session = dirty_session();
+        let uid = session.docs[0].uid;
+        std::fs::remove_dir_all(&own).unwrap();
+        std::fs::create_dir(&own).unwrap();
+        let (doc, _) = files(&own, uid);
+        std::fs::write(&doc, b"another owner's document").unwrap();
+        assert!(save(&session, &own).is_err());
+        assert_eq!(std::fs::read(doc).unwrap(), b"another owner's document");
+        assert!(!own.join(LOCK).exists());
     }
 
     #[cfg(unix)]

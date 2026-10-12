@@ -28,7 +28,7 @@ fn no_book() -> EngineError {
 #[cfg(not(target_arch = "wasm32"))]
 fn save(b: &Book) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(b).map_err(|e| EngineError::Other(e.to_string()))?;
-    std::fs::write(&b.path, bytes).map_err(|e| EngineError::Other(format!("{}: {e}", b.path)))
+    crate::atomic::write_file(&b.path, &bytes)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -52,7 +52,7 @@ fn load(path: &str) -> Result<designcraft_doc::Document> {
 
 fn store(path: &str, d: &designcraft_doc::Document) -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
-    return std::fs::write(path, super::file::to_bytes(d)).map_err(|e| EngineError::Other(format!("{path}: {e}")));
+    return crate::atomic::write_file(path, &super::file::to_bytes(d));
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (path, d);
@@ -210,7 +210,7 @@ pub fn specs() -> Vec<CommandSpec> {
             match str_param(p, "path") {
                 Some(path) => {
                     #[cfg(not(target_arch = "wasm32"))]
-                    std::fs::write(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+                    crate::atomic::write_file(path, &bytes)?;
                     Ok(json!({"path": path, "bytes": bytes.len(), "pages": pages}))
                 }
                 None => Ok(json!({"base64": super::file::base64_encode(&bytes), "bytes": bytes.len(), "pages": pages})),

@@ -29,7 +29,7 @@ impl Library {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = &self.path {
             let bytes = serde_json::to_vec_pretty(self).map_err(|e| crate::EngineError::Other(e.to_string()))?;
-            std::fs::write(p, bytes).map_err(|e| crate::EngineError::Other(format!("{p}: {e}")))?;
+            crate::atomic::write_file(p, &bytes)?;
         }
         Ok(())
     }
