@@ -500,3 +500,84 @@ fn explicit_typing_rejects_stale_selection_and_closed_document() {
     b.session.execute("file.close", &json!({})).unwrap();
     assert!(b.call("ui.text", json!({"text":"X"})).is_err());
 }
+
+#[test]
+fn conventions_core_tools_and_annotations() {
+    let mut s = server();
+    let defs = tool_definitions();
+    for name in
+        ["command_list", "command_run", "command_batch", "doc_inspect", "render_preview", "ui_screenshot", "list_commands", "execute", "batch"]
+    {
+        assert!(defs.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+    for t in &defs {
+        for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+            assert!(t["annotations"][hint].is_boolean(), "{}: {hint}", t["name"]);
+        }
+    }
+    for name in ["save_document", "export_png", "render_page", "screenshot"] {
+        let t = defs.iter().find(|t| t["name"] == name).unwrap();
+        assert_eq!(t["annotations"]["readOnlyHint"], false, "{name} can write a file");
+        assert_eq!(t["annotations"]["destructiveHint"], false);
+        assert_eq!(t["annotations"]["idempotentHint"], true);
+    }
+    assert!(ok(&mut s, "command_list", json!({"filter":"frame", "enabled_only":true})).as_array().unwrap().iter().all(|c| c["enabled"] == true));
+    assert_eq!(ok(&mut s, "doc_inspect", json!({})), ok(&mut s, "inspect_document", json!({})));
+    assert_eq!(call(&mut s, "command_run", json!({"id":"no.such.command"}))["isError"], true);
+    for stop in [true, false] {
+        let r = call(
+            &mut s,
+            "command_batch",
+            json!({"steps":[{"id":"document.history"},{"id":"no.such.command"},{"id":"document.history"}],"stop_on_error":stop}),
+        );
+        assert_eq!(r["isError"], true);
+        let v: Value = serde_json::from_str(&text_of(&r)).unwrap();
+        assert_eq!(v["completed"], if stop { 1 } else { 2 });
+        assert_eq!(v["failed"], 1);
+        assert_eq!(v["results"][1]["ok"], false);
+    }
+    let before = ok(&mut s, "doc_inspect", json!({}));
+    let r = call(&mut s, "render_preview", json!({"max_side":64}));
+    assert_eq!(r["isError"], false, "{r}");
+    let img = image::load_from_memory(&image_of(&r)).unwrap();
+    assert!(img.width().max(img.height()) <= 64);
+    assert_eq!(before, ok(&mut s, "doc_inspect", json!({})));
+}
+
+#[test]
+fn conventions_unknown_arguments_are_protocol_errors() {
+    let mut s = server();
+    for t in tool_definitions() {
+        let r = rpc(&mut s, 1, "tools/call", json!({"name":t["name"],"arguments":{"bogus_arg":1}}));
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(r["error"]["message"].as_str().unwrap().contains("bogus_arg"));
+        assert!(r["error"]["message"].as_str().unwrap().contains("expected:"));
+    }
+    // Engine params remain open: the catalog describes them as prose.
+    assert_eq!(call(&mut s, "command_run", json!({"id":"document.history","params":{"future_param":true}}))["isError"], false);
+}
+
+#[test]
+fn conventions_panicking_backend_keeps_serving() {
+    struct Once(bool);
+    impl Backend for Once {
+        fn call(&mut self, _: &str, _: Value) -> Result<Value, String> {
+            if !self.0 {
+                self.0 = true;
+                panic!("synthetic backend failure");
+            }
+            Ok(json!({"recovered":true}))
+        }
+        fn has_ui(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "test".into()
+        }
+    }
+    let mut s = Server::new(Box::new(Once(false)));
+    let r = call(&mut s, "inspect_document", json!({}));
+    assert_eq!(r["isError"], true);
+    assert!(text_of(&r).contains("synthetic backend failure"));
+    assert_eq!(ok(&mut s, "inspect_document", json!({}))["recovered"], true);
+}
