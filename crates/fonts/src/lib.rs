@@ -438,6 +438,19 @@ mod tests {
     }
 
     #[test]
+    fn a_family_name_keeps_its_spaces_and_falls_back_to_the_trimmed_name() {
+        let db = FontDb::with_font_dirs(Vec::new());
+        db.set_system_fallback(false);
+        db.add_font(testing::font_with("DC Test Space ", &['a']).unwrap());
+        db.add_font(testing::font_with("DC Test Space", &['a']).unwrap());
+        assert_eq!(db.face("DC Test Space ", "Regular").family, "DC Test Space ");
+        assert_eq!(db.face("DC Test Space", "Regular").family, "DC Test Space");
+        assert_eq!(db.face(&format!(" {DEFAULT_FAMILY}\n"), "Regular").family, DEFAULT_FAMILY);
+        assert!(db.has_family(&format!("{DEFAULT_FAMILY} ")));
+        assert_eq!(db.styles(&format!("{DEFAULT_FAMILY} ")), db.styles(DEFAULT_FAMILY));
+    }
+
+    #[test]
     fn outlines_and_metrics() {
         let db = FontDb::global();
         let face = db.face(DEFAULT_FAMILY, "Bold");

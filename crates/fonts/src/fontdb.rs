@@ -721,6 +721,13 @@ fn without_format_suffix(family: &str) -> Option<&str> {
     (!base.is_empty() && FORMATS.iter().any(|f| f.eq_ignore_ascii_case(suffix.trim()))).then_some(base)
 }
 
+/// The names `family` is looked up under when no font has it as written: without surrounding
+/// spaces, then without a format suffix (see [`without_format_suffix`]).
+fn alternate_names(family: &str) -> impl Iterator<Item = &str> {
+    let trimmed = family.trim();
+    (trimmed != family && !trimmed.is_empty()).then_some(trimmed).into_iter().chain(without_format_suffix(trimmed))
+}
+
 /// The named style part of a style with axis settings (`Bold {wght:650}` → `Bold`).
 pub fn base_style(style: &str) -> &str {
     style.split('{').next().unwrap_or(style).trim()
@@ -1228,10 +1235,10 @@ impl ScopedFonts<'_> {
     /// Style names available for `family` (Regular first, then by weight).
     pub fn styles(&self, family: &str) -> Vec<String> {
         let v = self.exact_styles(family);
-        match without_format_suffix(family) {
-            Some(base) if v.is_empty() => self.exact_styles(base),
-            _ => v,
+        if !v.is_empty() {
+            return v;
         }
+        alternate_names(family).map(|f| self.exact_styles(f)).find(|v| !v.is_empty()).unwrap_or_default()
     }
 
     fn exact_styles(&self, family: &str) -> Vec<String> {
@@ -1255,9 +1262,10 @@ impl ScopedFonts<'_> {
 
     /// Resolve a family + style to a face, falling back to the closest style of the family, then to
     /// Source Sans 3 Regular. Installed system fonts are found by name whatever ran before. A
-    /// family with a format suffix (`Minion Pro (OTF)`) that isn't found is looked up without it.
+    /// family that isn't found as written is looked up without surrounding spaces, then without a
+    /// format suffix (`Minion Pro (OTF)` → `Minion Pro`).
     pub fn face(&self, family: &str, style: &str) -> Arc<FontFace> {
-        if let Some(f) = self.find_or_load(family, style).or_else(|| without_format_suffix(family).and_then(|base| self.find_or_load(base, style))) {
+        if let Some(f) = self.find_or_load(family, style).or_else(|| alternate_names(family).find_map(|f| self.find_or_load(f, style))) {
             return f;
         }
         self.find(FALLBACK_FAMILY, style)
@@ -1278,9 +1286,9 @@ impl ScopedFonts<'_> {
     }
 
     /// Is `family` available (the document's, loaded, or installed on the system), as named or
-    /// without a format suffix (see [`ScopedFonts::face`])?
+    /// under an alternate name (see [`ScopedFonts::face`])?
     pub fn has_family(&self, family: &str) -> bool {
-        self.has_exact_family(family) || without_format_suffix(family).is_some_and(|base| self.has_exact_family(base))
+        self.has_exact_family(family) || alternate_names(family).any(|f| self.has_exact_family(f))
     }
 
     fn has_exact_family(&self, family: &str) -> bool {

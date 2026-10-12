@@ -1454,3 +1454,26 @@ fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
     check(&d);
     check(&import_idml(&export_idml(&d)).unwrap());
 }
+
+/// A family name keeps its spaces ("Minion Pro " is a font of its own) and `FontStyle="Nothing"`
+/// leaves the style to the paragraph, also after an export.
+#[test]
+fn applied_font_keeps_spaces_and_font_style_nothing_inherits() {
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+        <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text%3aBody" FontStyle="Bold">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" FontStyle="Nothing"><Properties><AppliedFont type="string">DC Space </AppliedFont></Properties><Content>Spaced</Content></CharacterStyleRange>
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" FontStyle="$ID/Nothing"><Content> plain</Content></CharacterStyleRange>
+        </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let check = |d: &Document| {
+        let s = d.stories.values().find(|s| s.text.contains("Spaced")).unwrap();
+        let (_, base) = d.styles.resolve_para(&s.paras[0]);
+        let runs: Vec<_> = s.runs().map(|(_, f)| f.clone()).collect();
+        assert_eq!(runs[0].over.font_family.as_deref(), Some("DC Space "));
+        for f in &runs {
+            assert_eq!(d.styles.resolve_char(&base, f).font_style, "Bold", "the enclosing range's style");
+        }
+    };
+    let d = import_idml(&fixture_with_story(story)).unwrap();
+    check(&d);
+    check(&import_idml(&export_idml(&d)).unwrap());
+}
