@@ -569,3 +569,25 @@ fn commands_take_non_object_params_without_panicking() {
         assert!(r.is_ok(), "{p}: {r:?}");
     }
 }
+
+#[test]
+fn alt_arrows_kern_the_pair_at_the_caret() {
+    use designcraft_tools::{Mods, ToolKey};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "AV"})).unwrap();
+    let sid = r["story"].as_u64().unwrap();
+    s.set_tool("type");
+    s.execute("text.select", &json!({"story": sid, "anchor": 1, "focus": 1})).unwrap();
+    let v = ViewInfo::at_zoom(1.0);
+    let kern = |s: &Session| s.doc().unwrap().doc.stories[&designcraft_doc::StoryId(sid)].format_after(0).over.kerning;
+    let alt = Mods { alt: true, ..Mods::default() };
+    assert!(s.tool_key(ToolKey::Left, alt, v).unwrap());
+    assert_eq!(kern(&s), Some(designcraft_doc::Kerning::Manual(-20.0)), "Alt+Left tightens by 20/1000 em");
+    assert!(s.tool_key(ToolKey::Right, Mods { cmd: true, ..alt }, v).unwrap());
+    assert_eq!(kern(&s), Some(designcraft_doc::Kerning::Manual(80.0)), "with Cmd, by 100/1000 em");
+    assert_eq!(s.doc().unwrap().selection.text.unwrap().focus, 1, "the caret stays put");
+    // Shift still extends the selection by words.
+    assert!(s.tool_key(ToolKey::Right, Mods { shift: true, ..alt }, v).unwrap());
+    assert_eq!(s.doc().unwrap().selection.text.unwrap().focus, 2);
+}

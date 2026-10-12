@@ -2,7 +2,7 @@
 
 use designcraft_compose as compose;
 use designcraft_doc::story::floor_char_boundary;
-use designcraft_doc::{CellAddr, CharAttrs, Content, ItemId, ParaAttrs, Selection, StoryId, TextSel};
+use designcraft_doc::{CellAddr, CharAttrs, Content, ItemId, Kerning, ParaAttrs, Selection, StoryId, TextSel};
 use designcraft_geom::Point;
 use serde_json::{Value, json};
 
@@ -252,6 +252,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{kind: paragraph|character} — the selected text keeps its look as local formatting, with [No Paragraph Style] / [None]",
             has_text_or_frames,
             break_link
+        ),
+        cmd!(
+            "type.adjustKerning",
+            "Adjust Kerning",
+            [],
+            None,
+            "{by: 1/1000 em} — at a caret, adds to the manual kerning between the characters on either side; on a selection, adds to its tracking (Type tool: Alt+Left/Right by 20, with Cmd by 100)",
+            has_text,
+            adjust_kerning
         ),
         cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection", has_doc, selection_attrs),
     ]
@@ -970,6 +979,35 @@ fn open_type(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"features": list, "figures": otf::figures(&list)}))
 }
 
+/// Keyboard kerning: a caret kerns the pair it sits in (manual kerning belongs to the character
+/// before it), a selection changes its tracking. Both start from the value the text has.
+fn adjust_kerning(s: &mut Session, p: &Value) -> Result<Value> {
+    let by = p.get("by").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad("type.adjustKerning", "missing by"))?;
+    let Some(t) = s.active().and_then(|st| st.selection.text) else { return ok() };
+    if t.anchor != t.focus {
+        let cur = selection_attrs(s, &json!({}))?;
+        let tracking = (cur["chars"]["tracking"].as_f64().unwrap_or(0.0) + by).clamp(-1000.0, 10000.0);
+        return format_chars(s, &json!({"tracking": tracking}));
+    }
+    let st = s.doc()?;
+    let Some(story) = st.doc.text_story(t.story, t.cell) else { return ok() };
+    let pos = floor_char_boundary(&story.text, t.focus.min(story.len()));
+    let Some((prev, _)) = story.text[..pos].char_indices().next_back() else { return ok() };
+    let Some(pf) = story.paras.get(story.para_at(prev)) else { return ok() };
+    let (_, base) = st.doc.styles.resolve_para(pf);
+    let cur = match st.doc.styles.resolve_char(&base, story.format_after(prev)).kerning {
+        Kerning::Manual(v) => v,
+        _ => 0.0,
+    };
+    let k = Kerning::Manual((cur + by).clamp(-1000.0, 10000.0));
+    s.edit(|d, _| {
+        if let Some(st) = d.text_story_mut(t.story, t.cell) {
+            st.format_chars(prev..pos, |f| f.over.kerning = Some(k));
+        }
+        ok()
+    })
+}
+
 fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let targets = format_targets(s);
@@ -1660,6 +1698,36 @@ mod tcy_tests {
         assert_eq!(f(&s).warichu, Some(true));
         s.execute("type.warichu", &json!({})).unwrap();
         assert_eq!(f(&s).warichu, Some(false));
+    }
+
+    #[test]
+    fn kerning_nudges_the_pair_at_the_caret_and_tracking_on_a_selection() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "AVA"})).unwrap();
+        let sid = r["story"].as_u64().unwrap();
+        let over = |s: &Session, pos: usize| s.doc().unwrap().doc.stories[&designcraft_doc::StoryId(sid)].format_after(pos).over.clone();
+        // Caret between A and V: the kerning belongs to the A (it applies after its character).
+        s.execute("text.select", &json!({"story": sid, "anchor": 1, "focus": 1})).unwrap();
+        s.execute("type.adjustKerning", &json!({"by": -20})).unwrap();
+        s.execute("type.adjustKerning", &json!({"by": -20})).unwrap();
+        assert_eq!(over(&s, 0).kerning, Some(designcraft_doc::Kerning::Manual(-40.0)));
+        assert_eq!(over(&s, 1).kerning, None, "only the pair at the caret");
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(over(&s, 0).kerning, Some(designcraft_doc::Kerning::Manual(-20.0)), "one undo step per nudge");
+        // No pair before the first character.
+        s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 0})).unwrap();
+        s.execute("type.adjustKerning", &json!({"by": 20})).unwrap();
+        assert_eq!(over(&s, 0).kerning, Some(designcraft_doc::Kerning::Manual(-20.0)));
+        // A selection changes its tracking instead, from the value it has.
+        s.execute("text.select", &json!({"story": sid, "anchor": 1, "focus": 3})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"tracking": 50}})).unwrap();
+        s.execute("type.adjustKerning", &json!({"by": 100})).unwrap();
+        assert_eq!(over(&s, 1).tracking, Some(150.0));
+        assert_eq!(over(&s, 2).tracking, Some(150.0));
+        assert_eq!(over(&s, 1).kerning, None);
+        assert_eq!(over(&s, 0).tracking, None, "outside the selection");
+        assert!(s.execute("type.adjustKerning", &json!({})).is_err());
     }
 
     #[test]

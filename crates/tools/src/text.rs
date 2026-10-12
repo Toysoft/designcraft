@@ -129,7 +129,12 @@ impl Tool for TypeTool {
         let mv = |dir: &str| {
             vec![Action::Exec("text.move".into(), json!({"dir": dir, "extend": mods.shift, "word": mods.alt || mods.ctrl, "far": mods.cmd}))]
         };
+        // Alt+Left/Right kern as in other layout apps (the pair at the caret, or the selection's
+        // tracking), five times as much with Cmd; with Shift they still select by words.
+        let kern = |sign: f64| vec![Action::Exec("type.adjustKerning".into(), json!({"by": sign * if mods.cmd { 100.0 } else { 20.0 }}))];
         match key {
+            ToolKey::Left if mods.alt && !mods.shift => kern(-1.0),
+            ToolKey::Right if mods.alt && !mods.shift => kern(1.0),
             ToolKey::Left => mv("left"),
             ToolKey::Right => mv("right"),
             ToolKey::Up => mv("up"),
