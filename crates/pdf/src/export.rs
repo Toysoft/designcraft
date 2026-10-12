@@ -1675,21 +1675,24 @@ mod image_content_cache_tests {
         for alpha in [None, Some(2), Some(1)] {
             let mut d = Document::new(&Default::default());
             let bytes = crate::image_fixtures::cmyk_tiff(alpha, false);
+            // RGB-only exports get the RGB the screen shows.
+            let screen_rgb: Vec<u8> =
+                designcraft_images::decode_rgba(&bytes).map_or_else(Vec::new, |img| img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect());
             let a = asset(&mut d, bytes.clone(), "a.tif");
             let b = asset(&mut d, bytes, "b.tif");
             for standard in [Standard::None, Standard::PdfA2b, Standard::PdfX4, Standard::PdfA2b, Standard::None] {
                 let opts = PdfOptions { standard, ..Default::default() };
                 let mut ex = exporter(&d, &cache, &opts);
                 ex.rgb_only = standard == Standard::PdfA2b;
-                // The pinned image decoder does not support CMYKA as RGB. Associated alpha
-                // is also rejected by the ink-preserving path: retain both failure names.
-                let succeeds = alpha.is_none() || (alpha == Some(2) && !ex.rgb_only);
+                // Unassociated alpha (2) decodes as inks, and as RGB for RGB-only exports.
+                // Associated alpha is rejected by both paths: retain both failure names.
+                let succeeds = alpha.is_none() || alpha == Some(2);
                 let first = ex.load_image(a);
                 assert_eq!(first.is_some(), succeeds, "{alpha:?} {standard:?}");
                 if alpha.is_none() {
                     let (space, samples) = image_color_samples(first.unwrap());
                     assert_eq!(space, if ex.rgb_only { "DeviceRGB" } else { "DeviceCMYK" });
-                    assert_eq!(samples, if ex.rgb_only { vec![0, 0, 0, 255, 0, 0] } else { crate::image_fixtures::INKS.to_vec() });
+                    assert_eq!(samples, if ex.rgb_only { screen_rgb.clone() } else { crate::image_fixtures::INKS.to_vec() });
                 }
                 assert_eq!(ex.load_image(b).is_some(), succeeds, "{alpha:?} {standard:?}");
                 assert_eq!(ex.load_image(a).is_some(), succeeds);

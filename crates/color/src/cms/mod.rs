@@ -14,7 +14,7 @@ pub mod icc;
 pub mod icc_out;
 pub mod lab;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -227,6 +227,7 @@ pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, C
     u.push(Arc::new(p));
     drop(u);
     clear_proof_cache();
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     Ok(info)
 }
 
@@ -266,6 +267,19 @@ impl Cms {
     }
     pub fn rgb_is_srgb(&self) -> bool {
         matches!(self.rgb, RgbSpace::Srgb)
+    }
+
+    /// The working CMYK space as an ICC profile, for converting CMYK pixels in bulk. `None` for
+    /// Device CMYK, which has no profile (the `(1−c)(1−k)` formula).
+    pub fn cmyk_icc_profile(&self) -> Option<moxcms::ColorProfile> {
+        match &self.cmyk {
+            CmykSpace::Generic(_) => {
+                static P: OnceLock<Option<moxcms::ColorProfile>> = OnceLock::new();
+                P.get_or_init(|| moxcms::ColorProfile::new_from_slice(icc_out::generic_cmyk_icc()).ok()).clone()
+            }
+            CmykSpace::Device => None,
+            CmykSpace::Icc(p) => Some(p.profile().clone()),
+        }
     }
 
     /// Working RGB → display sRGB.
@@ -604,6 +618,13 @@ impl ProofLut {
 static ACTIVE: RwLock<Option<Arc<Cms>>> = RwLock::new(None);
 static RGB_IS_SRGB: AtomicBool = AtomicBool::new(true);
 static CMYK_IS_DEVICE: AtomicBool = AtomicBool::new(false);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A number that changes whenever the active settings change or a profile is registered: caches
+/// of colour-converted pixels compare it to know when to convert again.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
 
 /// The active colour-management context (Edit → Color Settings).
 pub fn active() -> Arc<Cms> {
@@ -621,9 +642,13 @@ pub fn active_settings() -> ColorSettings {
 /// Replace the active settings (fails, leaving them unchanged, if a profile is unknown).
 pub fn set_active(settings: &ColorSettings) -> Result<(), CmsError> {
     let cms = Cms::new(settings)?;
+    let changed = active().settings != *settings;
     RGB_IS_SRGB.store(cms.rgb_is_srgb(), Ordering::Relaxed);
     CMYK_IS_DEVICE.store(matches!(cms.cmyk, CmykSpace::Device), Ordering::Relaxed);
     *ACTIVE.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(cms));
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
     Ok(())
 }
 

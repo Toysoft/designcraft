@@ -243,6 +243,8 @@ fn successful_fallback_warns_for_both_names_and_preserves_rgb_samples() {
 #[test]
 fn pdfa_rgb_conversion_does_not_poison_later_cmyk_exports() {
     let bytes = fixtures::cmyk_tiff(None, false);
+    // PDF/A gets the RGB the screen shows: converted through the working CMYK space.
+    let rgb: Vec<u8> = designcraft_images::decode_rgba(&bytes).unwrap().pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut d = Document::new(&Default::default());
     place_named(&mut d, bytes.clone(), 36.0, "a.tif", "image/tiff", 0);
     place_named(&mut d, bytes, 66.0, "b.tif", "image/tiff", 0);
@@ -254,7 +256,7 @@ fn pdfa_rgb_conversion_does_not_poison_later_cmyk_exports() {
         if standard == Standard::PdfA2b {
             assert_eq!(report.warnings, ["PDF/A: CMYK colours were converted to RGB (no CMYK output intent profile is available yet)"]);
             assert_eq!(images[0].space, "ICC");
-            assert_eq!(images[0].samples, [0, 0, 0, 255, 0, 0]);
+            assert_eq!(images[0].samples, rgb);
         } else {
             assert!(report.warnings.is_empty());
             assert_eq!(images[0].space, "DeviceCMYK");

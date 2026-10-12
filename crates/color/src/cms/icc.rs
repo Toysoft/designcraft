@@ -66,6 +66,11 @@ impl IccProfile {
         Self::from_profile(name, p)
     }
 
+    /// The parsed profile.
+    pub fn profile(&self) -> &ColorProfile {
+        &self.profile
+    }
+
     fn layout(&self) -> Layout {
         match self.kind {
             ProfileKind::Cmyk => Layout::Rgba, // 4 channels

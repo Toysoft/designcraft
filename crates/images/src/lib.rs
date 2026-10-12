@@ -8,7 +8,9 @@ use std::sync::{Arc, OnceLock};
 
 pub use resvg::usvg;
 
+pub mod colour;
 mod eps;
+mod jpeg;
 mod psd;
 pub use eps::{bounding_box as eps_bounding_box, eps_proxy, is_eps};
 
@@ -154,12 +156,31 @@ pub fn pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
-/// Straight (non-premultiplied) RGBA8 of a raster.
+/// Straight (non-premultiplied) RGBA8 of a raster in display sRGB: an embedded ICC profile is
+/// applied, and CMYK goes through its own profile or the working CMYK space ([`colour`]).
 pub fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
+    use colour::{DisplayColour, Pixels, to_display_rgba};
     if is_psd(bytes) {
         return psd::decode(bytes);
     }
-    Some(decode_to_rgba8(&image::load_from_memory(bytes).ok()?))
+    if let Some((raster, icc)) = jpeg::decode_cmyk(bytes) {
+        return to_display_rgba(Pixels::Cmyk(raster), icc.as_deref(), &DisplayColour::active());
+    }
+    if let Some(raster) = decode_cmyk_tiff(bytes) {
+        return to_display_rgba(Pixels::Cmyk(raster), embedded_icc(bytes).as_deref(), &DisplayColour::active());
+    }
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = decode_to_rgba8(&img);
+    let Some(icc) = embedded_icc(bytes) else { return Some(rgba) };
+    let px = if img.color().has_color() { Pixels::Rgb(rgba) } else { Pixels::Gray(rgba) };
+    to_display_rgba(px, Some(&icc), &DisplayColour::active())
+}
+
+/// The ICC profile embedded in a PNG, JPEG, TIFF or WebP.
+fn embedded_icc(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageDecoder;
+    let mut d = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+    d.icc_profile().ok().flatten()
 }
 
 /// Fresh raster decodes are sRGB in the pinned image decoder. Expanding an L8 value to
@@ -396,8 +417,10 @@ mod tests {
         assert_eq!(mime(&b), "image/tiff");
         assert!(is_cmyk_tiff(&b));
         assert_eq!(decode_cmyk_tiff(&b), Some(CmykRaster { width: 2, height: 1, cmyk: px.to_vec(), alpha: None }));
-        // The screen still gets RGB.
-        assert_eq!(decode_rgba(&b).unwrap().get_pixel(0, 0).0, [0, 0, 0, 255]);
+        // The screen gets RGB through the working CMYK space.
+        let raster = CmykRaster { width: 2, height: 1, cmyk: px.to_vec(), alpha: None };
+        let want = colour::to_display_rgba(colour::Pixels::Cmyk(raster), None, &colour::DisplayColour::active()).unwrap();
+        assert_eq!(decode_rgba(&b).unwrap(), want);
 
         let b = tiff_of::<CMYK16>(2, 1, &[0, 0, 0, 65_535, 0, 32_896, 65_535, 0], false);
         assert_eq!(decode_cmyk_tiff(&b).unwrap().cmyk, [0, 0, 0, 255, 0, 128, 255, 0]);

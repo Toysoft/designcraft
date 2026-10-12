@@ -54,9 +54,9 @@ score below).
 | Format | Ext | InDesign | DesignCraft | Notes | Weight |
 |---|---|---|---|---|---|
 | PDF / AI (PDF-compatible) | `.pdf`, `.ai` | ✓ page boxes, layers, pages | ✓ rendered with hayro, embedded as vector in PDF export, crop to page boxes | layer visibility depth; editable vectors not offered (#227) | 3% |
-| JPEG, PNG, GIF, BMP, WebP | | ✓ | ✓ | CMYK JPEG/TIFF keep inks in PDF (#35) | 2% |
-| TIFF | `.tif` | ✓ incl. CMYK, alpha, paths | ✓ incl. CMYK | clipping paths from 8BIM resources unverified | 1% |
-| PSD | `.psd` | ✓ layers, comps, alpha, paths | ~ composite + Object Layer Options | layer comps partial | 1% |
+| JPEG, PNG, GIF, BMP, WebP | | ✓ | ✓ embedded ICC profiles applied on screen; CMYK JPEGs (incl. YCCK) through their own profile or the working CMYK space | CMYK JPEG/TIFF keep inks in PDF (#35) | 2% |
+| TIFF | `.tif` | ✓ incl. CMYK, alpha, paths | ✓ incl. CMYK, embedded ICC profiles on screen | clipping paths from 8BIM resources unverified | 1% |
+| PSD | `.psd` | ✓ layers, comps, alpha, paths | ~ composite + Object Layer Options; embedded ICC profile and managed CMYK on screen | layer comps partial | 1% |
 | EPS | `.eps` | ✓ (PostScript) | ~ preview only (no interpreter) | | <1% |
 | SVG | `.svg` | ✓ | ✓ (usvg) | | <1% |
 | HEIC | `.heic` | ✓ | ✗ | | <1% |
@@ -74,7 +74,7 @@ score below).
 |---|---|---|---|
 | Adobe Swatch Exchange | `.ase` | read/write | ✓ load and save |
 | Colour books | `.acb` | read (17 libraries ship) | ✗ (licensed libraries; Pantone etc. out of scope, own libraries possible) |
-| ICC profiles | `.icc`, `.icm` | read | ✓ |
+| ICC profiles | `.icc`, `.icm` | read | ✓ (also profiles embedded in placed images) |
 | Colour settings | `.csf` | read/write | ✗ |
 | PDF presets | `.joboptions`, `.pdfs` | read/write | ✗ |
 | Print / flattener / document presets | `.prst`, `.flst`, `.dcst` | read/write | ✗ |

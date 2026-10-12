@@ -29,6 +29,8 @@ struct Cache {
     clock: u64,
     /// Assets that failed to decode (don't retry every frame).
     bad: HashMap<(usize, u32), Arc<Vec<u8>>>,
+    /// The colour settings the pixels were converted with ([`designcraft_color::cms::generation`]).
+    colour: u64,
 }
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
@@ -39,7 +41,13 @@ fn size_of(pm: &Pixmap) -> usize {
 
 fn with<R>(f: impl FnOnce(&mut Cache) -> R) -> R {
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    f(g.get_or_insert_with(Cache::default))
+    let c = g.get_or_insert_with(Cache::default);
+    // Decoding converts CMYK through the working space: new colour settings, new pixels.
+    let colour = designcraft_color::cms::generation();
+    if c.colour != colour {
+        *c = Cache { clock: c.clock, colour, ..Cache::default() };
+    }
+    f(c)
 }
 
 fn lookup(key: (usize, u32, u8)) -> Option<Arc<Pixmap>> {
