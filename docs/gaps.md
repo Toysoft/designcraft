@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (book chapter update safety) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -149,8 +149,11 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 ## Medium
 
 ### 15. Long documents in depth (F)
-- **Missing:** Books beyond a list of documents: style/swatch synchronization, book-wide
-  pagination, book PDF export, book TOC and index; Table of Contents Styles.
+- **Missing:** book-wide TOC and index; Table of Contents Styles and deeper production workflows.
+- **Present:** basic style synchronization, continuous book numbering and merged PDF export.
+  Chapter updates prepare the full batch and write only closed native chapters; IDML is a
+  read-only source. Each file is atomic, but a later I/O failure can leave completed chapters;
+  the error lists them. Cross-file transactional saving remains unavailable.
 - **Estimate:** 30–50 h.
 
 ### 16. Menu items still missing (U)
