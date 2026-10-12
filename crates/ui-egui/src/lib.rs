@@ -812,6 +812,7 @@ impl DesignApp {
 
     /// Open (`file.open`, `file.openBytes`) or place (`file.place`) a file the user chose. A file
     /// that can't be opened or placed gets an alert with the reason, as well as the status line.
+    /// A successful import with warnings keeps the document and shows the warnings in an alert.
     pub fn open_file(&mut self, cmd: &str, params: Value) -> Result<Value, String> {
         let file = match params.get("path").and_then(Value::as_str) {
             Some(path) => std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string()),
@@ -821,6 +822,20 @@ impl DesignApp {
         if let Err(e) = &r {
             let title = if cmd == "file.place" { "Can't Place the File" } else { "Can't Open the File" };
             self.ui.dialog = Some(dialogs::Dialog::new("alert", json!({"title": title, "file": file, "message": e})));
+        } else if let Ok(result) = &r {
+            let warnings: Vec<&str> = result
+                .get("warnings")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|warning| !warning.is_empty())
+                .collect();
+            if !warnings.is_empty() {
+                self.status(format!("{file}: {}", warnings.join("; ")));
+                self.ui.dialog =
+                    Some(dialogs::Dialog::new("alert", json!({"title": "Import Warnings", "file": file, "message": warnings.join("\n")})));
+            }
         }
         r
     }
@@ -1316,6 +1331,99 @@ mod tests {
         let control::Outcome::Done(r) = control::handle(&mut app, &egui::Context::default(), &req) else { panic!("app.open answers") };
         assert_eq!(r["ok"], json!(false), "{r}");
         assert!(app.ui.dialog.is_none(), "a control-channel app.open doesn't raise an alert");
+    }
+}
+
+#[cfg(test)]
+mod import_warning_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn idml(missing_parts: bool) -> Vec<u8> {
+        let missing = if missing_parts { r#"<idPkg:Spread src="Spreads/missing.xml"/><idPkg:Story src="Stories/missing.xml"/>"# } else { "" };
+        let map = format!(
+            r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d"><idPkg:Spread src="Spreads/one.xml"/>{missing}</Document>"#
+        );
+        let spread = r#"<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Spread Self="s"><Page Self="p" GeometricBounds="0 0 100 100" ItemTransform="1 0 0 1 0 0"/><Rectangle Self="r" ItemTransform="1 0 0 1 0 0"/></Spread></idPkg:Spread>"#;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, text) in [("mimetype", designcraft_idml::MIMETYPE), ("designmap.xml", &map), ("Spreads/one.xml", spread)] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn app() -> DesignApp {
+        let mut app = DesignApp::new(Session::new(), Services { inbox: Some(Inbox::default()), ..Default::default() });
+        app.run("file.new", json!({"title": "Existing work"})).unwrap();
+        app.run("frame.create", json!({"rect": [10, 10, 50, 50]})).unwrap();
+        app
+    }
+
+    fn assert_partial_import_warning(app: &mut DesignApp, file: &str) {
+        let dialog = app.ui.dialog.as_ref().expect("partial import must show an alert");
+        assert_eq!(dialog.id, "alert");
+        assert_eq!(dialog.fields["title"], "Import Warnings");
+        assert_eq!(dialog.fields["file"], file);
+        for part in ["Spreads/missing.xml", "Stories/missing.xml"] {
+            assert!(dialog.fields["message"].as_str().unwrap().contains(part), "every missing part is named");
+            assert!(app.ui.status.contains(part), "the status line retains the warning");
+        }
+        assert_eq!(app.session.documents().len(), 2);
+        assert_eq!(app.session.documents()[0].doc.title, "Existing work");
+        assert!(app.session.documents()[0].is_dirty(), "existing unsaved work stays intact");
+        assert_eq!(app.session.documents()[0].doc.spreads[0].items.len(), 1);
+        assert_eq!(app.session.doc().unwrap().doc.spreads.len(), 1);
+        assert_eq!(app.session.doc().unwrap().doc.spreads[0].items.len(), 1, "available document content is kept");
+        dialogs::confirm(app).unwrap();
+        assert!(app.ui.dialog.is_none(), "OK dismisses the warning");
+        assert_eq!(app.session.documents().len(), 2, "dismissing the warning keeps the imported document");
+    }
+
+    #[test]
+    fn byte_open_reports_partial_import_warnings_without_losing_documents() {
+        let mut app = app();
+        let result =
+            app.open_file("file.openBytes", json!({"name": "partial.idml", "base64": designcraft_engine::cmd::base64_encode(&idml(true))})).unwrap();
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 2);
+        assert_partial_import_warning(&mut app, "partial.idml");
+    }
+
+    #[test]
+    fn native_open_reports_partial_import_warnings_without_losing_documents() {
+        let path = std::env::temp_dir().join(format!("designcraft-partial-import-{}", std::process::id())).join("partial.idml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, idml(true)).unwrap();
+        let picked = path.to_string_lossy().to_string();
+        let mut app = app();
+        app.services.pick_open = Some(Box::new(move |_| Some(picked.clone())));
+        let result = app.run("app.openDialog", json!({}));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(path.parent().unwrap()).unwrap();
+        assert_eq!(result.unwrap()["warnings"].as_array().unwrap().len(), 2);
+        assert_partial_import_warning(&mut app, "partial.idml");
+    }
+
+    #[test]
+    fn inbox_open_reports_partial_import_warnings_without_losing_documents() {
+        let mut app = app();
+        let request = app.import_request("open");
+        app.services.inbox.as_ref().unwrap().lock().unwrap().push(ImportedFile { request, name: "partial.idml".into(), bytes: idml(true) });
+        app.drain_inbox();
+        assert_partial_import_warning(&mut app, "partial");
+    }
+
+    #[test]
+    fn complete_import_does_not_show_a_warning() {
+        let mut app = app();
+        let result = app
+            .open_file("file.openBytes", json!({"name": "complete.idml", "base64": designcraft_engine::cmd::base64_encode(&idml(false))}))
+            .unwrap();
+        assert_eq!(result["warnings"], json!([]));
+        assert!(app.ui.dialog.is_none());
+        assert!(app.ui.status.is_empty());
+        assert_eq!(app.session.documents().len(), 2);
     }
 }
 
