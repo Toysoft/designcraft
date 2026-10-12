@@ -1454,3 +1454,43 @@ fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
     check(&d);
     check(&import_idml(&export_idml(&d)).unwrap());
 }
+
+#[test]
+fn vertical_balance_columns_balances_the_imported_frame() {
+    let text = "Balanced columns end at about the same depth when the story ends in the frame. ".repeat(4);
+    let designmap = r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d">
+          <idPkg:Spread src="Spreads/Spread_s.xml"/>
+          <idPkg:Story src="Stories/Story_s1.xml"/>
+        </Document>"#;
+    let spread = r#"<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+          <Spread Self="s">
+            <Page Self="p" GeometricBounds="0 0 400 400" ItemTransform="1 0 0 1 0 0"/>
+            <TextFrame Self="f" ParentStory="s1">
+              <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+                <PathPointType Anchor="0 0"/><PathPointType Anchor="0 150"/>
+                <PathPointType Anchor="300 150"/><PathPointType Anchor="300 0"/>
+              </PathPointArray></GeometryPathType></PathGeometry></Properties>
+              <TextFramePreference TextColumnCount="2" TextColumnGutter="12" VerticalBalanceColumns="true"/>
+            </TextFrame>
+          </Spread>
+        </idPkg:Spread>"#;
+    let story = format!(
+        r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+          <ParagraphStyleRange><CharacterStyleRange><Content>{text}</Content></CharacterStyleRange></ParagraphStyleRange>
+        </Story></idPkg:Story>"#
+    );
+    let mut d = import_idml(&zip_files(&[("designmap.xml", designmap), ("Spreads/Spread_s.xml", spread), ("Stories/Story_s1.xml", &story)])).unwrap();
+    let sid = *d.stories.keys().next().unwrap();
+    let per_column = |d: &Document| {
+        let cs = designcraft_compose::compose_story(d, sid, &Default::default());
+        assert!(!cs.is_overset());
+        let ft = &cs.frames[0];
+        [0, 1].map(|c| ft.lines.iter().filter(|l| l.column == c).count())
+    };
+    let on = per_column(&d);
+    assert!(on[1] > 0 && on[0] - on[1] <= 1, "balanced: {on:?}");
+    let fid = d.stories[&sid].frames[0];
+    d.item_mut(fid).unwrap().text_frame_mut().unwrap().options.balance_columns = false;
+    let off = per_column(&d);
+    assert!(off[0] > off[1] + 1, "unbalanced: {off:?}");
+}

@@ -535,7 +535,10 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
     let mut limits: Rc<Vec<(BandKey, f64)>> = Rc::default();
     let mut trial: Option<Trial> = None;
     let mut balance_runs = 0usize;
-    let balance_budget = 20 * story.paras.iter().filter(|p| matches!(doc.styles.resolve_para(p).0.span_columns, SpanColumns::Span(_))).count();
+    let balance_frames = frames.iter().zip(&cols).filter(|(f, c)| f.opts.balance_columns && c.len() > 1).count();
+    let balance_budget = 20
+        * (story.paras.iter().filter(|p| matches!(doc.styles.resolve_para(p).0.span_columns, SpanColumns::Span(_))).count()
+            + usize::from(balance_frames > 0));
     // Balancing split-column blocks that text follows.
     let mut split_limits: Rc<Vec<(SplitKey, f64)>> = Rc::default();
     let mut split_trial: Option<Trial<SplitKey>> = None;
@@ -545,8 +548,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
     // and in split columns.
     let mut span_paras = vec![false; np];
     let mut split_paras = vec![false; np];
-    'paras: while pi < np {
-        let prange = para_ranges[pi].clone();
+    'paras: while pi <= np {
         cur.pi = pi;
         cur.limits = Rc::clone(&limits);
         cur.split_limits = Rc::clone(&split_limits);
@@ -565,6 +567,19 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             pi = j;
             continue 'paras;
         }
+        if pi >= np {
+            // The story ends here: Balance Columns evens out the columns of its last frame.
+            if balance_frames > 0
+                && let Some(j) = balance_end(&mut trial, &mut limits, &cur, &cols, frames, &out, np, balance_runs < balance_budget)
+            {
+                balance_runs += 1;
+                rewind(j, &snaps, &note_snaps, &mut notes, &mut out, &mut cur, &mut list_counter, &mut force_col, &mut line_cap);
+                pi = j;
+                continue 'paras;
+            }
+            break 'paras;
+        }
+        let prange = para_ranges[pi].clone();
         let pf = &story.paras[pi];
         let (pp, base_chars) = doc.styles.resolve_para(pf);
         // A break character that ends the previous paragraph sends this one on, like a start option.
@@ -792,7 +807,13 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
         // A paragraph start or a break character; Next Column while a paragraph spans columns is
         // the next frame, as above.
         let begin_at = |cur: &mut Cursor, start: StartParagraph| match start {
-            StartParagraph::NextColumn => next_column(cur),
+            StartParagraph::NextColumn => {
+                let (fi, col) = (cur.fi, cur.col);
+                next_column(cur);
+                if cur.fi == fi && cur.col != col {
+                    cur.band.tail = Some((cur.pi, cur.col));
+                }
+            }
             other => cur.start(other, &cols, frames, doc),
         };
         // Paragraph start options.
@@ -1132,7 +1153,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 reference: cur.last_reference,
                 pending: pp.space_after,
             };
-            cur.band = Band { para: pi + 1, line0: ft.lines.len(), above: Some(above) };
+            cur.band = Band { para: pi + 1, line0: ft.lines.len(), above: Some(above), tail: None };
         }
         // Rules and shading for the paragraph.
         if let Some((fi, bl, asc, _)) = first_line_rect {
@@ -1820,6 +1841,9 @@ struct Band {
     line0: usize,
     /// Below a spanning paragraph, its last line: every column of the band continues from it.
     above: Option<Above>,
+    /// After the band's last explicit column break: the paragraph after it and the column it
+    /// starts. Balance Columns evens out only the columns from there on.
+    tail: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1876,6 +1900,54 @@ fn trial_failed<K: TrialKey>(trial: &mut Option<Trial<K>>, limits: &mut Rc<Vec<(
     };
     set_limit(limits, key, Some(bottom));
     Some(key.para())
+}
+
+/// At the end of the story, Balance Columns in the frame the text ends in: lowers the bottom of
+/// the frame's last band of columns (from its last explicit column break on) as far as the text
+/// still fits the frame, so the columns end at about the same depth. Returns the paragraph to
+/// re-lay from while the search goes on; None once the layout is final.
+#[allow(clippy::too_many_arguments)]
+fn balance_end(
+    trial: &mut Option<Trial>,
+    limits: &mut Rc<Vec<(BandKey, f64)>>,
+    cur: &Cursor,
+    cols: &[Vec<Rect>],
+    frames: &[FrameSpec],
+    out: &ComposedStory,
+    np: usize,
+    budget_left: bool,
+) -> Option<usize> {
+    let fi = cur.fi;
+    let (para, col0) = cur.band.tail.unwrap_or((cur.band.para, 0));
+    let key = (fi, para);
+    let active = trial.as_ref().is_some_and(|t| t.key == key && t.span == np);
+    if !active && let Some(t) = trial.take() {
+        set_limit(limits, t.key, None);
+    }
+    let columns = cols.get(fi)?;
+    if !frames.get(fi)?.opts.balance_columns || col0.saturating_add(1) >= columns.len() {
+        return None;
+    }
+    let lines: Vec<&Line> =
+        out.frames.get(fi)?.lines.get(cur.band.line0..).unwrap_or_default().iter().filter(|l| l.column as usize >= col0).collect();
+    let bottom = lines.iter().map(|l| l.baseline + l.descent).filter(|b| b.is_finite()).max_by(f64::total_cmp)?;
+    if lines.len() < 2 || !(active || limit_of(limits, key).is_none() && budget_left) {
+        return None;
+    }
+    let top = cur.clip(*columns.get(col0)?).y0;
+    if !top.is_finite() || bottom <= top {
+        return None;
+    }
+    let mut t = trial.take().unwrap_or(Trial { key, span: np, lo: top, hi: bottom, tries: 0, done: false });
+    // This layout fits: its bottom is the best so far.
+    t.hi = t.hi.min(bottom);
+    let next = if t.done { t.hi } else { t.next() };
+    set_limit(limits, key, Some(next));
+    if t.done {
+        return None;
+    }
+    *trial = Some(t);
+    Some(key.1)
 }
 
 fn set_limit<K: TrialKey>(limits: &mut Rc<Vec<(K, f64)>>, key: K, bottom: Option<f64>) {
@@ -1962,11 +2034,14 @@ impl Cursor {
     fn band_key(&self) -> BandKey {
         (self.fi, self.band.para)
     }
-    /// Column `col` of the current frame limited to the band: below the spanning paragraph above
-    /// it and, while balancing, above the trial bottom.
+    /// The current column of the frame (`col`) limited to the band: below the spanning paragraph
+    /// above it and, while balancing, above the trial bottom (Balance Columns limits only the
+    /// columns after the band's last column break).
     fn clip(&self, col: Rect) -> Rect {
         let y0 = self.band.above.map_or(col.y0, |a| a.top.max(col.y0).min(col.y1.max(col.y0)));
-        let y1 = limit_of(&self.limits, self.band_key()).map_or(col.y1, |b| b.min(col.y1).max(y0));
+        let tail = self.band.tail.filter(|&(_, c)| self.col >= c).map(|(p, _)| (self.fi, p));
+        let limit = limit_of(&self.limits, self.band_key()).or_else(|| tail.and_then(|k| limit_of(&self.limits, k)));
+        let y1 = limit.filter(|b| !b.is_nan()).map_or(col.y1, |b| b.min(col.y1).max(y0));
         Rect::new(col.x0, y0, col.x1, y1)
     }
     /// Move on as a paragraph start option (or a break character) asks.

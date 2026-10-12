@@ -2788,3 +2788,114 @@ fn empty_paragraphs_get_no_bullet_or_number() {
         assert_eq!(list_labels(&cs, LABEL_CHARS), ["1.", "", "2.", ""], "list `{name}`");
     }
 }
+
+// ---------- balance columns ----------
+
+/// A story of `paras` body paragraphs in one frame of `columns` columns, Balance Columns `on`.
+fn balance_doc(paras: usize, columns: u32, rect: Rect, on: bool) -> (Document, StoryId, ItemId) {
+    let (mut d, sid, fid) = doc_with(&vec![LOREM; paras].join("\n"), rect, ParaAttrs::default());
+    let o = &mut d.item_mut(fid).unwrap().text_frame_mut().unwrap().options;
+    o.columns = columns;
+    o.balance_columns = on;
+    (d, sid, fid)
+}
+
+fn column_line_counts(ft: &FrameText) -> Vec<usize> {
+    (0..ft.columns.len() as u32).map(|c| ft.lines.iter().filter(|l| l.column == c).count()).collect()
+}
+
+/// The baseline of each column's last line.
+fn column_ends(ft: &FrameText) -> Vec<f64> {
+    (0..ft.columns.len() as u32).map(|c| ft.lines.iter().filter(|l| l.column == c).map(|l| l.baseline).fold(f64::NEG_INFINITY, f64::max)).collect()
+}
+
+#[test]
+fn balance_columns_evens_out_the_columns_the_story_ends_in() {
+    let rect = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let (d, sid, _) = balance_doc(3, 2, rect, false);
+    let off = compose_story(&d, sid, &ComposeOptions::default());
+    let counts = column_line_counts(&off.frames[0]);
+    assert!(counts[1] > 0 && counts[0] > counts[1] + 2, "fills the first column: {counts:?}");
+
+    let (d, sid, _) = balance_doc(3, 2, rect, true);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(!cs.is_overset());
+    let ft = &cs.frames[0];
+    assert_no_overlap(ft);
+    let on = column_line_counts(ft);
+    assert_eq!(on.iter().sum::<usize>(), counts.iter().sum::<usize>(), "the same lines");
+    assert!(on[0] >= on[1] && on[0] - on[1] <= 1, "{on:?}");
+    let ends = column_ends(ft);
+    assert!((ends[0] - ends[1]).abs() <= 14.4 + 1e-6, "{ends:?}");
+    assert_eq!(all_lines(&cs).last().unwrap().range.end, d.story(sid).unwrap().text.len());
+
+    // A paragraph kept together stays in one column while the columns still balance.
+    let (mut d, sid, _) = balance_doc(3, 2, rect, true);
+    let p = &mut d.story_mut(sid).unwrap().paras[1].para;
+    p.keep_lines_together = Some(true);
+    p.keep_all_lines = Some(true);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(!cs.is_overset());
+    let kept: Vec<u32> = cs.frames[0].lines.iter().filter(|l| l.para == 1).map(|l| l.column).collect();
+    assert!(kept.iter().all(|&c| c == kept[0]), "{kept:?}");
+    let c = column_line_counts(&cs.frames[0]);
+    assert!(c[1] > 0 && c[0].max(c[1]) < counts[0], "{c:?} vs {counts:?}");
+
+    // Three columns: the first two are equal, the last at most two lines shorter.
+    let (d, sid, _) = balance_doc(3, 3, Rect::new(0.0, 0.0, 540.0, 500.0), true);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(!cs.is_overset());
+    let c = column_line_counts(&cs.frames[0]);
+    let total: usize = c.iter().sum();
+    assert_eq!(c[0], total.div_ceil(3), "{c:?}");
+    assert!(c[1] <= c[0] && c[2] <= c[1] && c[0] - c[2] <= 2 && c[2] > 0, "{c:?}");
+    assert_no_overlap(&cs.frames[0]);
+
+    // Vertical stories balance their columns too (bands across the turned frame).
+    let (mut d, sid, _) = balance_doc(2, 2, Rect::new(0.0, 0.0, 400.0, 400.0), true);
+    d.story_mut(sid).unwrap().vertical = true;
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(!cs.is_overset());
+    let c = column_line_counts(&cs.frames[0]);
+    assert!(c[1] > 0 && c[0].abs_diff(c[1]) <= 1, "{c:?}");
+}
+
+#[test]
+fn balance_columns_leaves_a_frame_the_text_runs_on_from() {
+    let rect = Rect::new(0.0, 0.0, 400.0, 150.0);
+    let layout = |on: bool| {
+        let (mut d, sid, f1) = balance_doc(4, 2, rect, on);
+        let lid = d.default_layer();
+        let (f2, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(0.0, 300.0, 400.0, 700.0), lid, "", ParaFormat::default()).unwrap();
+        let o = &mut d.item_mut(f2).unwrap().text_frame_mut().unwrap().options;
+        o.columns = 2;
+        o.balance_columns = on;
+        d.thread(f1, f2).unwrap();
+        compose_story(&d, sid, &ComposeOptions::default())
+    };
+    let (off, on) = (layout(false), layout(true));
+    assert!(!on.is_overset());
+    let first = |cs: &ComposedStory| cs.frames[0].lines.iter().map(|l| (l.column, l.baseline, l.range.clone())).collect::<Vec<_>>();
+    assert_eq!(first(&on), first(&off), "the first frame fills normally");
+    let c = column_line_counts(&on.frames[1]);
+    assert!(c[1] > 0 && c[0] - c[1] <= 1, "the frame the story ends in is balanced: {c:?}");
+}
+
+#[test]
+fn balance_columns_starts_after_a_column_break() {
+    // The first paragraph ends with a column break: the first column holds it alone and the
+    // other two share the rest.
+    let text = format!("{LOREM}{}\n{}", designcraft_doc::story::COLUMN_BREAK, [LOREM; 3].join("\n"));
+    let (mut d, sid, fid) = doc_with(&text, Rect::new(0.0, 0.0, 540.0, 500.0), ParaAttrs::default());
+    let o = &mut d.item_mut(fid).unwrap().text_frame_mut().unwrap().options;
+    o.columns = 3;
+    o.balance_columns = true;
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(!cs.is_overset());
+    let ft = &cs.frames[0];
+    assert_no_overlap(ft);
+    assert!(ft.lines.iter().filter(|l| l.column == 0).all(|l| l.para == 0));
+    assert!(ft.lines.iter().filter(|l| l.para == 0).all(|l| l.column == 0));
+    let c = column_line_counts(ft);
+    assert!(c[2] > 0 && c[1] >= c[2] && c[1] - c[2] <= 1, "{c:?}");
+}

@@ -427,7 +427,7 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
     let units = app.session.active().map(|s| s.doc.settings.horizontal_units).unwrap_or(Unit::Picas);
     let fm = |v: f64| json!(format_measure(v, units));
     let shown = json!({
-        "columns": o.columns, "gutter": fm(o.gutter),
+        "columns": o.columns, "gutter": fm(o.gutter), "balanceColumns": o.balance_columns,
         "insetTop": fm(o.inset[0]), "insetLeft": fm(o.inset[1]), "insetBottom": fm(o.inset[2]), "insetRight": fm(o.inset[3]),
         "verticalJustification": serde_json::to_value(o.vertical_justification).unwrap_or(Value::Null),
         "columnRule": o.column_rule, "columnRuleWeight": format_measure(o.column_rule_weight, Unit::Points), "columnRuleColor": o.column_rule_color,
@@ -459,6 +459,7 @@ fn text_frame_options_dialog(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog)
         text_field(ui, d, "gutter", 80.0);
         ui.end_row();
     });
+    check(ui, d, "balanceColumns", tr("Balance Columns"));
     ui.add_space(6.0);
     crate::rtl::label(ui, egui::RichText::new(tr("Inset spacing")).font(semibold(12.0)));
     egui::Grid::new("tfo_inset").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -550,6 +551,9 @@ fn confirm_text_frame_options(app: &mut DesignApp, d: &mut Dialog) -> Result<Val
             }
         }
         p.insert("inset".into(), json!(inset));
+    }
+    if edited(d, "balanceColumns") {
+        p.insert("balanceColumns".into(), json!(d.b("balanceColumns")));
     }
     if edited(d, "verticalJustification") {
         p.insert("verticalJustification".into(), json!(d.s("verticalJustification")));
@@ -4175,12 +4179,15 @@ mod tests {
         // One inset side edited: the others keep their values.
         open(&mut app, &[("insetLeft", json!("1p0"))]).unwrap();
         assert_eq!(opts(&app).inset, [1.0, 12.0, 3.0, 4.0]);
+        open(&mut app, &[("balanceColumns", json!(true))]).unwrap();
+        let o = opts(&app);
+        assert!(o.balance_columns && o.column_rule && o.columns == 2, "{o:?}");
         // An unknown swatch is an error and the dialog stays open.
         let e = open(&mut app, &[("columnRuleColor", json!("Mauve"))]).unwrap_err();
         assert!(e.contains("Mauve") && app.ui.dialog.is_some(), "{e}");
         assert_eq!(opts(&app).column_rule_color, designcraft_color::swatch::BLACK);
         // Each OK is one undo step.
-        for _ in 0..3 {
+        for _ in 0..4 {
             app.run("edit.undo", json!({})).unwrap();
         }
         assert_eq!(opts(&app), before);

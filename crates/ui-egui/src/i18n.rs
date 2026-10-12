@@ -1296,6 +1296,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Close Path", ["Close Path", "Close Path", "Close Path", "Close Path", "闭合路径"]),
     ("Color Group Options", ["Color Group Options", "Color Group Options", "Color Group Options", "Color Group Options", "颜色组选项"]),
     ("Column Width", ["Column Width", "Column Width", "Column Width", "Column Width", "列宽"]),
+    ("Balance Columns", ["Spalten ausgleichen", "Équilibrer les colonnes", "Equilibrar columnas", "段の高さを揃える", "平衡栏高"]),
     ("Column Rules", ["Spaltenlinien", "Filets de colonne", "Filetes de columna", "段間罫線", "栏间线"]),
     ("Insert Column Rule", ["Spaltenlinie einfügen", "Insérer un filet de colonne", "Insertar filete de columna", "段間罫線を挿入", "插入栏间线"]),
     ("Tint %", ["Farbton %", "Teinte %", "Matiz %", "濃淡 %", "色调 %"]),
