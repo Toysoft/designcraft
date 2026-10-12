@@ -66,6 +66,19 @@ fn list(app: &mut DesignApp, ui: &mut egui::Ui, para: bool) {
                 let base = if para { "Paragraph Style 1" } else { "Character Style 1" };
                 let _ = app.run(cmd, json!({"name": base, "fromSelection": true}));
             }
+            crate::menus::menu_button(ui, "☰", |ui| {
+                let (label, cmd) = if para {
+                    ("Load Paragraph Styles…", "app.loadParagraphStyles")
+                } else {
+                    ("Load Character Styles…", "app.loadCharacterStyles")
+                };
+                for (label, cmd) in [(label, cmd), ("Load All Text Styles…", "app.loadTextStyles")] {
+                    if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).clicked() {
+                        let _ = app.run(cmd, json!({}));
+                        ui.close();
+                    }
+                }
+            });
         });
     });
 }

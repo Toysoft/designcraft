@@ -370,6 +370,50 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Link To:", ["Link To:", "Link To:", "Link To:", "Link To:", "链接到："]),
     ("Load Profile…", ["Load Profile…", "Load Profile…", "Load Profile…", "Load Profile…", "加载配置文件…"]),
     ("Load Swatches…", ["Load Swatches…", "Load Swatches…", "Load Swatches…", "Load Swatches…", "加载色板…"]),
+    (
+        "Load Paragraph Styles…",
+        ["Absatzformate laden…", "Charger les styles de paragraphe…", "Cargar estilos de párrafo…", "段落スタイルを読み込み…", "加载段落样式…"],
+    ),
+    (
+        "Load Character Styles…",
+        ["Zeichenformate laden…", "Charger les styles de caractère…", "Cargar estilos de carácter…", "文字スタイルを読み込み…", "加载字符样式…"],
+    ),
+    (
+        "Load All Text Styles…",
+        [
+            "Alle Textformate laden…",
+            "Charger tous les styles de texte…",
+            "Cargar todos los estilos de texto…",
+            "すべてのテキストスタイルを読み込み…",
+            "加载所有文本样式…",
+        ],
+    ),
+    ("Load Styles", ["Formate laden", "Charger les styles", "Cargar estilos", "スタイルを読み込み", "加载样式"]),
+    (
+        "Differs from this document",
+        ["Weicht von diesem Dokument ab", "Diffère de ce document", "Difiere de este documento", "このドキュメントと異なります", "与此文档不同"],
+    ),
+    (
+        "Redefine Document Style",
+        [
+            "Dokumentformat neu definieren",
+            "Redéfinir le style du document",
+            "Redefinir el estilo del documento",
+            "ドキュメントのスタイルを再定義",
+            "重新定义文档样式",
+        ],
+    ),
+    (
+        "Use Document Style Definition",
+        [
+            "Formatdefinition des Dokuments verwenden",
+            "Utiliser la définition de style du document",
+            "Usar la definición de estilo del documento",
+            "ドキュメントのスタイル定義を使用",
+            "使用文档样式定义",
+        ],
+    ),
+    ("Auto Rename", ["Automatisch umbenennen", "Renommer automatiquement", "Cambiar nombre automáticamente", "自動的に名前を変更", "自动重命名"]),
     ("Load…", ["Load…", "Load…", "Load…", "Load…", "加载…"]),
     ("Make Compound", ["Make Compound", "Make Compound", "Make Compound", "Make Compound", "建立复合路径"]),
     ("Margins", ["Margins", "Margins", "Margins", "Margins", "边距"]),

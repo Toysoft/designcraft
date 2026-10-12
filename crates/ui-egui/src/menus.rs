@@ -13,6 +13,14 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.save", "Save", Some("Cmd+S"), "{}"),
     ("app.saveCopyDialog", "Save a Copy…", Some("Cmd+Alt+S"), "{} — choose where to write a copy (the document stays as it is)"),
     ("app.loadSwatches", "Load Swatches…", None, "{} — pick a swatch exchange (.ase) file"),
+    (
+        "app.loadParagraphStyles",
+        "Load Paragraph Styles…",
+        None,
+        "{} — pick a document (.designcraft or .idml) and choose which of its paragraph styles to load (style.load)",
+    ),
+    ("app.loadCharacterStyles", "Load Character Styles…", None, "{} — the same for its character styles"),
+    ("app.loadTextStyles", "Load All Text Styles…", None, "{} — the same for its paragraph and character styles"),
     ("app.packageDialog", "Package…", Some("Cmd+Alt+Shift+P"), "{} — choose the package folder to create (file.package)"),
     ("app.saveSwatches", "Save Swatches for Exchange…", None, "{path?} — write the colour swatches as .ase"),
     ("app.exportPng", "Export Page as PNG…", Some("Cmd+E"), "{}"),
@@ -894,6 +902,9 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             }
             Ok(Value::Null)
         }
+        "app.loadParagraphStyles" => app.pick_styles("paragraph"),
+        "app.loadCharacterStyles" => app.pick_styles("character"),
+        "app.loadTextStyles" => app.pick_styles(""),
         "app.saveSwatches" => {
             let path = match p.get("path").and_then(Value::as_str) {
                 Some(s) => Some(s.to_string()),

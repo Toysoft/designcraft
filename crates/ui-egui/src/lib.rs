@@ -648,6 +648,28 @@ impl DesignApp {
         Ok(Value::Null)
     }
 
+    /// Load Styles: ask the host for a document whose styles to load; `kind` is `paragraph`,
+    /// `character` or empty for both. A synchronous picker opens the dialog that chooses among
+    /// the file's styles; an asynchronous one (web) loads them all when the file arrives.
+    pub fn pick_styles(&mut self, kind: &str) -> Result<Value, String> {
+        designcraft_engine::cmd::has_doc(&self.session)?;
+        if let Some(pick) = self.services.pick_open.as_mut() {
+            let Some(path) = pick("styles") else { return Ok(Value::Null) };
+            let found = self.run("style.load.list", json!({"path": path}))?;
+            let of = |k: &str| if kind.is_empty() || kind == k { found[k].clone() } else { json!([]) };
+            self.ui.dialog = Some(dialogs::Dialog::new(
+                "loadStyles",
+                json!({"path": path, "paragraph": of("paragraph"), "character": of("character"), "conflicts": "redefine"}),
+            ));
+            return Ok(Value::Null);
+        }
+        let request = self.import_request(&if kind.is_empty() { "styles".to_string() } else { format!("styles:{kind}") });
+        if let Some(open) = self.services.open_async.as_mut() {
+            open(request);
+        }
+        Ok(Value::Null)
+    }
+
     pub fn import_request(&self, purpose: &str) -> ImportRequest {
         ImportRequest { purpose: purpose.into(), target: self.session.active().map(|d| d.uid) }
     }
@@ -708,6 +730,16 @@ impl DesignApp {
 
     fn import_file(&mut self, file: ImportedFile) -> Result<Value, String> {
         let lower = file.name.to_ascii_lowercase();
+        if let Some(kind) = file.request.purpose.strip_prefix("styles") {
+            self.activate_import_target(&file.request)?;
+            let mut params = json!({"name": file.name, "base64": designcraft_engine::cmd::base64_encode(&file.bytes)});
+            match kind {
+                ":paragraph" => params["character"] = json!([]),
+                ":character" => params["paragraph"] = json!([]),
+                _ => {}
+            }
+            return self.run("style.load", params);
+        }
         let layout = opens_as_document(&file.name);
         let place =
             file.request.purpose == "place" || (matches!(file.request.purpose.as_str(), "drop" | "open") && !layout && !lower.ends_with(".ase"));
@@ -1734,5 +1766,138 @@ mod browser_import_tests {
         assert!(dialogs::confirm(&mut app).is_err());
         assert!(app.pending_pdf.is_none());
         assert!(app.session.doc().unwrap().doc.assets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod load_styles_tests {
+    use super::*;
+
+    /// A client's document on disk: Head based on Body, and a Lead character style.
+    fn client_bytes() -> Vec<u8> {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        s.execute("style.paragraph.create", &json!({"name": "Body", "chars": {"size": 10}})).unwrap();
+        s.execute("style.paragraph.create", &json!({"name": "Head", "basedOn": "Body", "chars": {"size": 20}})).unwrap();
+        s.execute("style.character.create", &json!({"name": "Lead", "chars": {"size": 9}})).unwrap();
+        designcraft_engine::cmd::base64_decode(s.execute("file.serialize", &json!({})).unwrap()["base64"].as_str().unwrap())
+    }
+
+    /// An app with a document that has its own 8 pt Body, and a picker that answers with the client's file.
+    fn app_and_file(test: &str) -> (DesignApp, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("designcraft-load-styles-{}-{test}.designcraft", std::process::id()));
+        std::fs::write(&path, client_bytes()).unwrap();
+        let picked = path.to_string_lossy().to_string();
+        let services = Services { pick_open: Some(Box::new(move |purpose| (purpose == "styles").then(|| picked.clone()))), ..Default::default() };
+        let mut app = DesignApp::new(Session::new(), services);
+        app.run("file.new", json!({})).unwrap();
+        app.run("style.paragraph.create", json!({"name": "Body", "chars": {"size": 8}})).unwrap();
+        (app, path)
+    }
+
+    fn names(app: &DesignApp) -> (Vec<String>, Vec<String>) {
+        let st = &app.session.doc().unwrap().doc.styles;
+        (st.paragraph.iter().skip(2).map(|s| s.name.clone()).collect(), st.character.iter().skip(1).map(|s| s.name.clone()).collect())
+    }
+
+    #[test]
+    fn load_all_text_styles_asks_which_styles_of_the_picked_file_to_load() {
+        let (mut app, path) = app_and_file("all");
+        app.run("app.loadTextStyles", json!({})).unwrap();
+        let d = app.ui.dialog.as_mut().expect("the Load Styles dialog");
+        let row = |name: &str, conflict: bool| json!({"name": name, "conflict": conflict});
+        assert_eq!(d.id, "loadStyles");
+        assert_eq!(d.fields["paragraph"], json!([row("[Basic Paragraph]", false), row("Body", true), row("Head", false)]));
+        assert_eq!(d.fields["character"], json!([row("Lead", false)]));
+        // Lead is unchecked; the rest loads, and Body takes the file's definition.
+        d.fields["character"][0]["on"] = json!(false);
+        dialogs::confirm(&mut app).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(app.ui.dialog.is_none());
+        assert_eq!(names(&app), (vec!["Body".to_string(), "Head".to_string()], vec![]));
+        assert_eq!(app.session.doc().unwrap().doc.styles.para("Body").unwrap().chars.size, Some(10.0));
+    }
+
+    #[test]
+    fn the_dialog_applies_the_chosen_conflict_rule() {
+        let (mut app, path) = app_and_file("rename");
+        app.run("app.loadParagraphStyles", json!({})).unwrap();
+        let d = app.ui.dialog.as_mut().unwrap();
+        assert_eq!(d.fields["character"], json!([]), "Load Paragraph Styles offers no character styles");
+        assert_eq!(d.fields["conflicts"], "redefine");
+        d.fields.insert("conflicts".into(), json!("autoRename"));
+        dialogs::confirm(&mut app).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(names(&app), (vec!["Body".to_string(), "Body 2".to_string(), "Head".to_string()], vec![]));
+        assert_eq!(app.session.doc().unwrap().doc.styles.para("Body").unwrap().chars.size, Some(8.0));
+    }
+
+    #[test]
+    fn load_character_styles_offers_only_character_styles() {
+        let (mut app, path) = app_and_file("character");
+        app.run("app.loadCharacterStyles", json!({})).unwrap();
+        assert_eq!(app.ui.dialog.as_ref().unwrap().fields["paragraph"], json!([]));
+        dialogs::confirm(&mut app).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(names(&app), (vec!["Body".to_string()], vec!["Lead".to_string()]));
+    }
+
+    /// A script can put anything into the dialog's rows: drawing and ticking them must not panic.
+    #[test]
+    fn the_dialog_draws_and_ticks_rows_that_are_no_style_rows() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = test_window::open(DesignApp::new(Session::new(), Services::default()), egui::vec2(1200.0, 800.0));
+        h.state_mut().app.ui.dialog = Some(dialogs::Dialog::new(
+            "loadStyles",
+            json!({"path": "x", "conflicts": 3, "paragraph": [1, "Body", null, {"name": 7}, {"name": "Head", "conflict": true}], "character": "none"}),
+        ));
+        h.run_steps(3);
+        let button = h.get_by_label("Deselect All").rect().center();
+        test_window::click_at(&mut h, button);
+        let d = h.state().app.ui.dialog.as_ref().unwrap();
+        assert_eq!(d.fields["paragraph"][4]["on"], false);
+        assert_eq!(d.fields["paragraph"][0], 1, "what is no style row stays as it is");
+        assert!(dialogs::confirm(&mut h.state_mut().app).is_err(), "there is no file `x`");
+    }
+
+    #[test]
+    fn no_file_or_no_document_opens_no_dialog() {
+        let (mut app, path) = app_and_file("none");
+        std::fs::remove_file(&path).unwrap();
+        // The picked file can't be read.
+        assert!(app.run("app.loadTextStyles", json!({})).is_err());
+        assert!(app.ui.dialog.as_ref().is_none_or(|d| d.id != "loadStyles"));
+        // The picker is cancelled.
+        app.ui.dialog = None;
+        app.services.pick_open = Some(Box::new(|_| None));
+        app.run("app.loadTextStyles", json!({})).unwrap();
+        assert!(app.ui.dialog.is_none());
+        // No document: the picker isn't shown at all.
+        app.run("file.close", json!({})).unwrap();
+        app.services.pick_open = Some(Box::new(|_| panic!("asked for a file without a document")));
+        assert!(app.run("app.loadTextStyles", json!({})).is_err());
+    }
+
+    #[test]
+    fn styles_from_an_asynchronous_picker_load_into_the_document_that_asked() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let services = Services {
+            inbox: Some(Inbox::default()),
+            open_async: Some(Box::new(move |request| seen.lock().unwrap().push(request))),
+            ..Default::default()
+        };
+        let mut app = DesignApp::new(Session::new(), services);
+        app.run("file.new", json!({"title": "A"})).unwrap();
+        app.run("app.loadCharacterStyles", json!({})).unwrap();
+        let request = asked.lock().unwrap().pop().expect("the picker was asked");
+        assert_eq!(request.purpose, "styles:character");
+        // Another document is in front when the file arrives.
+        app.run("file.new", json!({"title": "B"})).unwrap();
+        app.services.inbox.as_ref().unwrap().lock().unwrap().push(ImportedFile { request, name: "client.designcraft".into(), bytes: client_bytes() });
+        app.drain_inbox();
+        assert_eq!(app.session.active_index(), Some(0));
+        assert_eq!(names(&app), (vec![], vec!["Lead".to_string()]));
+        assert!(app.session.documents()[1].doc.styles.char_style("Lead").is_none());
     }
 }

@@ -1140,6 +1140,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "closeDocument" => crate::i18n::tr(&app.ui.language, "Unsaved Changes"),
         "menus" => crate::i18n::tr(&app.ui.language, "Menu Customization"),
         "importOptions" => crate::i18n::tr(&app.ui.language, "Import Options"),
+        "loadStyles" => crate::i18n::tr(&app.ui.language, "Load Styles"),
         "fittingOptions" => crate::i18n::tr(&app.ui.language, "Frame Fitting Options"),
         "qrCode" => crate::i18n::tr(&app.ui.language, "Generate QR Code"),
         "preferences" => crate::i18n::tr(&app.ui.language, "Preferences"),
@@ -1537,6 +1538,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                     });
                 }
             }
+            "loadStyles" => load_styles(app, ui, &mut d),
             "closeDocument" => {
                 let text = crate::i18n::tr(&app.ui.language, "“{}” has changes that are not saved. Save them before closing?").replace("{}", &d.s("title"));
                 crate::rtl::label(ui, text);
@@ -2092,6 +2094,16 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 Some(i) => app.run("file.close", json!({"index": i})),
                 None => Ok(Value::Null),
             }
+        }
+        "loadStyles" => {
+            let checked = |key: &str| -> Vec<&str> {
+                let rows = d.fields.get(key).and_then(Value::as_array).into_iter().flatten();
+                rows.filter(|row| row["on"] != false).filter_map(|row| row["name"].as_str()).collect()
+            };
+            app.run(
+                "style.load",
+                json!({"path": d.s("path"), "paragraph": checked("paragraph"), "character": checked("character"), "conflicts": d.s("conflicts")}),
+            )
         }
         "importOptions" => app.open_file(
             "file.place",
@@ -3684,6 +3696,59 @@ fn color_picker(ui: &mut egui::Ui, d: &mut Dialog) {
 }
 
 /// Find/Replace Font: the document's fonts (missing ones first, flagged) and a replacement.
+/// Load Styles: a checkbox for each style of the picked file, and what happens to a style this
+/// document defines differently under the same name.
+fn load_styles(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    let lang = app.ui.language.as_str();
+    let dim = crate::theme::Tokens::get(ui.ctx()).text_dim;
+    ui.label(egui::RichText::new(d.s("path")).size(10.5));
+    ui.horizontal(|ui| {
+        for (label, on) in [("Select All", true), ("Deselect All", false)] {
+            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(lang, label))).clicked() {
+                for key in ["paragraph", "character"] {
+                    for row in d.fields.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten().filter_map(Value::as_object_mut) {
+                        row.insert("on".into(), json!(on));
+                    }
+                }
+            }
+        }
+    });
+    let mut conflicts = 0;
+    egui::ScrollArea::vertical().id_salt("load_styles").max_height(240.0).show(ui, |ui| {
+        for (key, title) in [("paragraph", "Paragraph Styles"), ("character", "Character Styles")] {
+            let Some(rows) = d.fields.get_mut(key).and_then(Value::as_array_mut).filter(|rows| !rows.is_empty()) else { continue };
+            crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(lang, title)).font(semibold(12.0)));
+            for row in rows.iter_mut().filter_map(Value::as_object_mut) {
+                let Some(name) = row.get("name").and_then(Value::as_str).map(str::to_string) else { continue };
+                let (mut on, conflict) = (row.get("on") != Some(&json!(false)), row.get("conflict") == Some(&json!(true)));
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut on, crate::rtl::widget(ui, crate::i18n::style_name(lang, &name))).changed() {
+                        row.insert("on".into(), json!(on));
+                    }
+                    if conflict {
+                        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(lang, "Differs from this document")).size(10.5).color(dim));
+                    }
+                });
+                conflicts += usize::from(on && conflict);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(lang, "Style Name Conflicts")).font(semibold(12.0)));
+    if conflicts == 0 {
+        crate::rtl::label(ui, crate::i18n::tr(lang, "No conflicts"));
+        return;
+    }
+    let cur = d.s("conflicts");
+    ui.horizontal(|ui| {
+        for (v, l) in [("redefine", "Redefine Document Style"), ("useExisting", "Use Document Style Definition"), ("autoRename", "Auto Rename")] {
+            if ui.radio(cur == v, crate::rtl::widget(ui, crate::i18n::tr(lang, l))).clicked() {
+                d.fields.insert("conflicts".into(), json!(v));
+            }
+        }
+    });
+}
+
 fn find_font(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     // Listed once when the dialog opens (it scans every story).
     if !d.fields.contains_key("_fonts") {
