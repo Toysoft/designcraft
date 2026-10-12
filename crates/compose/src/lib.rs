@@ -15,6 +15,7 @@ pub mod breaker;
 mod cache;
 pub mod hyphen;
 mod notes;
+mod outline;
 mod overlay;
 mod ruby;
 pub mod shape;
@@ -39,6 +40,7 @@ use crate::breaker::{Break, Spacing};
 pub use crate::cache::Cache;
 use crate::notes::Notes;
 pub use crate::notes::{find_note, hit_note, note_caret};
+pub use crate::outline::FrameOutline;
 use crate::shape::{Glyph, StyleTable, SubstCtx};
 pub use crate::table::{PlacedCell, StrokeSeg, TableFrag, cell_caret, find_cell, hit_cell};
 
@@ -302,6 +304,9 @@ pub struct FrameSpec {
     /// area is the turned box.
     pub vertical: bool,
     pub exclusions: Vec<Exclusion>,
+    /// The frame's outline when it isn't its rectangle (area space): each line's slot is the part
+    /// of its band the outline covers, minus the inset.
+    pub outline: Option<Arc<FrameOutline>>,
     pub page_name: Option<String>,
     /// Absolute document page the frame is on (None on parent pages).
     pub page: Option<usize>,
@@ -421,15 +426,25 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
             }
             None => (item.text_area(), tf.options.clone()),
         };
+        // A non-rectangular frame keeps the top inset inward from its outline; its rectangular text
+        // area (all four insets) still bounds the lines.
+        let outline = match &tf.options.path {
+            Some(_) => None,
+            None => {
+                let bp = if item.corners.is_none() { item.path.to_bezpath() } else { designcraft_geom::corners::apply(&item.path, &item.corners) };
+                FrameOutline::new(&bp, tf.options.inset[0])
+            }
+        };
         // Vertical type: composed in the turned box; wraps and page rects turned with it.
         let vertical = doc.frame_vertical(item);
-        let (area, exclusions, grid, page_rect) = if vertical {
+        let (area, exclusions, grid, page_rect, outline) = if vertical {
             let v = designcraft_doc::vertical_text_xf(area).inverse();
             let ex = exclusions.into_iter().map(|e| Exclusion { rect: v.transform_rect_bbox(e.rect), ..e }).collect();
             let pr = page_rect.map(|(a, b)| (v.transform_rect_bbox(a), v.transform_rect_bbox(b)));
-            (Rect::new(0.0, 0.0, area.height(), area.width()), ex, None, pr)
+            let outline = outline.map(|o| o.transformed(v));
+            (Rect::new(0.0, 0.0, area.height(), area.width()), ex, None, pr, outline)
         } else {
-            (area, exclusions, grid, page_rect)
+            (area, exclusions, grid, page_rect, outline)
         };
         out.push(FrameSpec {
             id: fid,
@@ -437,6 +452,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
             opts,
             vertical,
             exclusions: if tf.options.path.is_some() { vec![] } else { exclusions },
+            outline: outline.map(Arc::new),
             page_name,
             page,
             grid,
@@ -887,8 +903,16 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             let col = if spanning { span_rect(&cols[cur.fi], Rect::new(col.x0, col.y0, col.x1, base.y1), pp.span_columns) } else { col };
             let col = cur.split_rect(col);
             // Estimate slots for the breaker with the paragraph's base leading.
-            let est_first = cur.next_baseline(f, col, base_leading, base_chars.size * 0.75, &pp);
-            let slots = estimate_slots(f, col, est_first, base_leading, base_chars.size, &glyphs[g0..], &pp, line_no);
+            // A shaped frame's slots change from line to line, so they are estimated with the
+            // band the lines are placed with (or a taller one, so no line outgrows its slot).
+            let (est_asc, est_band) = if f.outline.is_some() {
+                let (a, d, _) = line_metrics(&[], &glyphs, g0, base_leading, base_chars.size, db, &base_chars);
+                (a, (a.max(base_chars.size * 0.8), d.max(base_chars.size * 0.25)))
+            } else {
+                (base_chars.size * 0.75, (base_chars.size * 0.8, base_chars.size * 0.25))
+            };
+            let est_first = cur.next_baseline(f, col, base_leading, est_asc, &pp);
+            let slots = estimate_slots(f, col, est_first, base_leading, base_chars.size, est_band, &glyphs[g0..], &pp, line_no);
             let width = |j: usize| -> f64 {
                 let (x0, x1) = slots.get(j).copied().unwrap_or((col.x0, col.x1));
                 let ind = pp.left_indent + pp.right_indent + if line_no + j == 0 { pp.first_line_indent } else { 0.0 };
@@ -929,7 +953,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 }
                 // Wrap: push the line down until a slot exists.
                 let (mut x0, mut x1) = (col.x0, col.x1);
-                if !f.exclusions.is_empty() {
+                if !f.exclusions.is_empty() || f.outline.is_some() {
                     let mut tries = 0;
                     loop {
                         match free_slot(f, col, baseline - asc, baseline + desc, base_size) {
@@ -939,9 +963,10 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                                 break;
                             }
                             None => {
+                                let prev = baseline;
                                 baseline += 1.0;
                                 tries += 1;
-                                if baseline > col.y1 || tries > 4000 {
+                                if baseline > col.y1 || tries > 4000 || baseline == prev || !baseline.is_finite() {
                                     break;
                                 }
                             }
@@ -2071,9 +2096,13 @@ fn line_metrics(
     (asc, desc, lead)
 }
 
-/// Widest free horizontal interval of `col` in the band, or None if blocked.
+/// Widest free horizontal interval of `col` in the band (inside the frame's outline, outside
+/// wraps), or None if blocked.
 fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64) -> Option<(f64, f64)> {
-    let mut free = vec![(col.x0, col.x1)];
+    let mut free = match &f.outline {
+        Some(o) => o.intervals(col.x0, col.x1, y0, y1),
+        None => vec![(col.x0, col.x1)],
+    };
     for ex in &f.exclusions {
         let r = ex.rect;
         let overlaps_band = r.y0 < y1 && r.y1 > y0;
@@ -2103,9 +2132,19 @@ fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64) -> Option<(f
 }
 
 #[allow(clippy::too_many_arguments)]
-fn estimate_slots(f: &FrameSpec, col: Rect, first: f64, lead: f64, size: f64, glyphs: &[Glyph], pp: &ParaProps, line_no: usize) -> Vec<(f64, f64)> {
+fn estimate_slots(
+    f: &FrameSpec,
+    col: Rect,
+    first: f64,
+    lead: f64,
+    size: f64,
+    band: (f64, f64),
+    glyphs: &[Glyph],
+    pp: &ParaProps,
+    line_no: usize,
+) -> Vec<(f64, f64)> {
     let _ = (pp, line_no);
-    if f.exclusions.is_empty() {
+    if f.exclusions.is_empty() && f.outline.is_none() {
         return vec![];
     }
     // Rough upper bound on lines: total advance / column width × 2.
@@ -2116,12 +2155,14 @@ fn estimate_slots(f: &FrameSpec, col: Rect, first: f64, lead: f64, size: f64, gl
     for _ in 0..n {
         let mut tries = 0;
         let slot = loop {
-            if let Some(s) = free_slot(f, col, b - size * 0.8, b + size * 0.25, size) {
+            if let Some(s) = free_slot(f, col, b - band.0, b + band.1, size) {
                 break s;
             }
+            let prev = b;
             b += 1.0;
             tries += 1;
-            if b > col.y1 || tries > 4000 {
+            // `b == prev`: coordinates so large that a point no longer moves the band.
+            if b > col.y1 || tries > 4000 || b == prev || !b.is_finite() {
                 break (col.x0, col.x1);
             }
         };

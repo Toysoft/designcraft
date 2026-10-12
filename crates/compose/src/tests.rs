@@ -2788,3 +2788,176 @@ fn empty_paragraphs_get_no_bullet_or_number() {
         assert_eq!(list_labels(&cs, LABEL_CHARS), ["1.", "", "2.", ""], "list `{name}`");
     }
 }
+
+fn shaped_doc(path: designcraft_geom::PathData, rect: Rect, inset: f64) -> (Document, StoryId, ItemId) {
+    let (mut d, sid, fid) = doc_with(&[LOREM; 4].join(" "), rect, ParaAttrs::default());
+    let it = d.item_mut(fid).unwrap();
+    it.path = path;
+    it.text_frame_mut().unwrap().options.inset = [inset; 4];
+    (d, sid, fid)
+}
+
+/// The corners of a line's band (slot ends from its top to its bottom).
+fn line_corners(l: &Line) -> [(f64, f64); 4] {
+    let (t, b) = (l.baseline - l.ascent, l.baseline + l.descent);
+    [(l.x0, t), (l.x1, t), (l.x0, b), (l.x1, b)]
+}
+
+/// Is `p` inside the ellipse in `r` (allowing for the Bézier bulge)?
+fn in_ellipse(r: Rect, p: (f64, f64)) -> bool {
+    let (c, a, b) = (r.center(), r.width() / 2.0, r.height() / 2.0);
+    ((p.0 - c.x) / a).powi(2) + ((p.1 - c.y) / b).powi(2) <= 1.001
+}
+
+/// Distance from `p` inside the ellipse in `r` to its outline (sampled).
+fn ellipse_clearance(r: Rect, p: (f64, f64)) -> f64 {
+    let (c, a, b) = (r.center(), r.width() / 2.0, r.height() / 2.0);
+    let inside = ((p.0 - c.x) / a).powi(2) + ((p.1 - c.y) / b).powi(2) <= 1.0 + 1e-9;
+    let d = (0..7200)
+        .map(|k| {
+            let t = k as f64 / 7200.0 * std::f64::consts::TAU;
+            (c.x + a * t.cos() - p.0).hypot(c.y + b * t.sin() - p.1)
+        })
+        .fold(f64::INFINITY, f64::min);
+    if inside { d } else { -d }
+}
+
+#[test]
+fn oval_frame_sets_lines_inside_the_ellipse() {
+    let r = Rect::new(0.0, 0.0, 300.0, 200.0);
+    let (d, sid, _) = shaped_doc(designcraft_geom::shapes::ellipse(r), r, 0.0);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let lines = all_lines(&cs);
+    assert!(lines.len() >= 8, "{}", lines.len());
+    for l in &lines {
+        for p in line_corners(l) {
+            assert!(in_ellipse(r, p), "line corner {p:?} outside the oval");
+        }
+        assert!(l.end_x <= l.x1 + 0.5, "line overflows its slot: {} > {}", l.end_x, l.x1);
+    }
+    let w = |l: &Line| l.x1 - l.x0;
+    let widest = lines.iter().map(|l| w(l)).fold(0.0, f64::max);
+    assert!(w(lines[0]) < widest - 50.0, "first {} widest {widest}", w(lines[0]));
+    // Bands where the oval is narrower than 1.5 em hold no line.
+    assert!(lines.iter().all(|l| w(l) >= 18.0 - 1e-6));
+}
+
+#[test]
+fn oval_frame_keeps_lines_an_inset_inside_the_outline() {
+    let r = Rect::new(0.0, 0.0, 300.0, 240.0);
+    let (d, sid, _) = shaped_doc(designcraft_geom::shapes::ellipse(r), r, 10.0);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let lines = all_lines(&cs);
+    assert!(lines.len() >= 6, "{}", lines.len());
+    for l in &lines {
+        for p in line_corners(l) {
+            assert!(ellipse_clearance(r, p) >= 10.0 - 0.1, "line corner {p:?} closer than the inset: {}", ellipse_clearance(r, p));
+        }
+    }
+}
+
+#[test]
+fn triangle_frame_lines_widen_downward() {
+    use designcraft_geom::{Anchor, PathData, Point, SubPath};
+    let r = Rect::new(0.0, 0.0, 300.0, 300.0);
+    let tri = [Point::new(150.0, 0.0), Point::new(300.0, 300.0), Point::new(0.0, 300.0)];
+    let path = PathData::single(SubPath { anchors: tri.iter().map(|&p| Anchor::corner(p)).collect(), closed: true });
+    let (d, sid, _) = shaped_doc(path, r, 0.0);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let lines = all_lines(&cs);
+    assert!(lines.len() >= 8, "{}", lines.len());
+    for w in lines.windows(2) {
+        assert!(w[1].x1 - w[1].x0 > w[0].x1 - w[0].x0, "{} then {}", w[0].x1 - w[0].x0, w[1].x1 - w[1].x0);
+    }
+    // Every slot end lies inside the triangle: |x - 150| ≤ y / 2 over the whole band.
+    for l in &lines {
+        for (x, y) in line_corners(l) {
+            assert!((x - 150.0).abs() <= y / 2.0 + 1e-6, "({x}, {y}) outside the triangle");
+        }
+    }
+}
+
+#[test]
+fn rectangular_frame_paths_keep_the_rectangular_layout() {
+    use designcraft_geom::{Anchor, PathData, Point, SubPath};
+    let r = Rect::new(20.0, 30.0, 260.0, 400.0);
+    let (d, sid, _) = doc_with(&[LOREM; 4].join(" "), r, ParaAttrs::default());
+    let plain = compose_story(&d, sid, &ComposeOptions::default());
+    // The same rectangle drawn with an extra anchor on its top edge.
+    let pts = [(20.0, 30.0), (100.0, 30.0), (260.0, 30.0), (260.0, 400.0), (20.0, 400.0)];
+    let path = PathData::single(SubPath { anchors: pts.iter().map(|&(x, y)| Anchor::corner(Point::new(x, y))).collect(), closed: true });
+    let (d2, sid2, _) = shaped_doc(path, r, 0.0);
+    assert!(frame_specs(&d2, sid2)[0].outline.is_none());
+    assert!(frame_specs(&d, sid)[0].outline.is_none());
+    let redrawn = compose_story(&d2, sid2, &ComposeOptions::default());
+    let key = |cs: &ComposedStory| all_lines(cs).iter().map(|l| (l.range.clone(), l.baseline, l.x0, l.x1)).collect::<Vec<_>>();
+    assert_eq!(key(&plain), key(&redrawn));
+}
+
+#[test]
+fn resizing_an_oval_frame_reflows_its_lines() {
+    let r = Rect::new(0.0, 0.0, 240.0, 200.0);
+    let (mut d, sid, fid) = shaped_doc(designcraft_geom::shapes::ellipse(r), r, 0.0);
+    let cache = Cache::new();
+    let small = cache.get(&d, sid, None);
+    let big_r = Rect::new(0.0, 0.0, 400.0, 300.0);
+    d.item_mut(fid).unwrap().path = designcraft_geom::shapes::ellipse(big_r);
+    let big = cache.get(&d, sid, None);
+    let (ls, lb) = (all_lines(&small), all_lines(&big));
+    assert!(lb.len() > ls.len(), "{} vs {}", lb.len(), ls.len());
+    for l in &lb {
+        for p in line_corners(l) {
+            assert!(in_ellipse(big_r, p), "line corner {p:?} outside the resized oval");
+        }
+    }
+    assert!(lb.iter().map(|l| l.x1 - l.x0).fold(0.0, f64::max) > 300.0);
+}
+
+#[test]
+fn vertical_oval_frame_sets_columns_inside_the_turned_ellipse() {
+    let r = Rect::new(0.0, 0.0, 300.0, 200.0);
+    let (mut d, sid, _) = shaped_doc(designcraft_geom::shapes::ellipse(r), r, 0.0);
+    d.story_mut(sid).unwrap().vertical = true;
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let lines = all_lines(&cs);
+    assert!(!lines.is_empty());
+    // The turned box is 200 wide and 300 tall; the ellipse turns with it.
+    let turned = Rect::new(0.0, 0.0, 200.0, 300.0);
+    for l in &lines {
+        for p in line_corners(l) {
+            assert!(in_ellipse(turned, p), "line corner {p:?} outside the turned oval");
+        }
+    }
+}
+
+#[test]
+fn oval_frame_columns_each_follow_the_outline() {
+    let r = Rect::new(0.0, 0.0, 400.0, 300.0);
+    let (mut d, sid, fid) = shaped_doc(designcraft_geom::shapes::ellipse(r), r, 0.0);
+    d.item_mut(fid).unwrap().text_frame_mut().unwrap().options.columns = 2;
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let lines = all_lines(&cs);
+    assert!(lines.iter().any(|l| l.column == 1));
+    for l in &lines {
+        for p in line_corners(l) {
+            assert!(in_ellipse(r, p), "line corner {p:?} outside the oval");
+        }
+    }
+}
+
+#[test]
+fn degenerate_frame_outlines_compose_without_panicking() {
+    use designcraft_geom::{Anchor, PathData, Point, SubPath};
+    let tri = |pts: [(f64, f64); 3]| {
+        PathData::single(SubPath { anchors: pts.iter().map(|&(x, y)| Anchor::corner(Point::new(x, y))).collect(), closed: true })
+    };
+    let r = Rect::new(0.0, 0.0, 200.0, 200.0);
+    for path in [
+        tri([(0.0, 0.0), (100.0, 100.0), (200.0, 200.0)]),
+        tri([(0.0, 0.0), (f64::NAN, 100.0), (200.0, 200.0)]),
+        designcraft_geom::shapes::ellipse(Rect::new(-1e15, -1e15, 1e15, 1e15)),
+    ] {
+        let (d, sid, _) = shaped_doc(path, r, 1e300);
+        let _ = compose_story(&d, sid, &ComposeOptions::default());
+    }
+}
