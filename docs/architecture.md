@@ -1,6 +1,6 @@
 # DesignCraft architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first committed version, from the code on main and the local plan) · **Target:** Adobe InDesign 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (orderly native exit recovery) · **Target:** Adobe InDesign 2026
 
 How DesignCraft is built today. The design notes behind it are in `plan/architecture.md`
 (local, gitignored); this file describes what the code on `main` does. Agents: AGENTS.md has the
@@ -57,8 +57,11 @@ and the control channel all call `Session::execute(id, params)`. UI-only command
 panels, zoom, dialogs) are `UI_COMMANDS` in `crates/ui-egui/src/menus.rs`, reachable the same way.
 Tool gestures emit Begin/Preview/Commit commands so a drag is one undo step. Every journaled
 command is replayable as a script. Escaped panics during a command or an import/export become an
-error (`engine/src/guard.rs`), never a lost document; unsaved documents are written to a recovery
-folder every 30 s.
+error (`engine/src/guard.rs`), never a lost document; native recovery is written periodically
+into each running app's locked folder. Orderly native shutdown finalizes complete, current quit
+approvals and writes the remaining documents' latest recovery state, including clean-document
+cleanup after Undo. Unavailable or failed recovery is reported. Cancelable macOS Dock Quit
+remains open (#544).
 
 ## Composition and rendering
 
@@ -95,4 +98,5 @@ builds (on manifest changes), packaging lint and the release workflow; `xtask ci
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | Documented orderly native exit recovery and the remaining cancelable Dock Quit gap |
 | 2026-10-10 | major | Created from the code on main (92649ff) and `plan/architecture.md` |
