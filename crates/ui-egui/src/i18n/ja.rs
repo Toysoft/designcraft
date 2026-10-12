@@ -961,6 +961,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cap Height", "大文字の高さ"),
     ("Leading", "行送り"),
     ("x Height", "x の高さ"),
+    ("Em Box Height", "仮想ボディの高さ"),
     ("Fixed", "固定"),
     ("Never (continuous)", "振り直しなし (通し番号)"),
     ("Page", "ページ"),

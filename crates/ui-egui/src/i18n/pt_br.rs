@@ -298,6 +298,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Ascent", "Ascendente"),
     ("Cap Height", "Altura da caixa alta"),
     ("x Height", "Altura do x"),
+    ("Em Box Height", "Altura da caixa eme"),
     ("Fixed", "Fixo"),
     ("Never (continuous)", "Nunca (contínuo)"),
     ("Spread", "Página dupla"),
