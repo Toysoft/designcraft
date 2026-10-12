@@ -180,8 +180,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Color",
             [],
             None,
-            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection",
-            super::has_selection,
+            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, text?: bool, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection; `text`: on the selected text, or the text of the selected frames (Formatting Affects Text)",
+            |s| super::has_text(s).or_else(|_| super::has_selection(s)),
             apply_color
         ),
         cmd!(
@@ -951,8 +951,11 @@ fn apply_gradient(s: &mut Session, p: &Value) -> Result<Value> {
 fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
     let color = p.get("color").and_then(parse_color).ok_or_else(|| bad("object.color", "missing or bad color"))?;
     let stroke = str_param(p, "target") == Some("stroke");
-    let ids = super::targets(s, p)?;
-    s.edit(|d, _| {
+    let text = p.get("text").and_then(Value::as_bool).unwrap_or(false) || s.doc()?.selection.text.is_some();
+    let (ids, texts) = if text { (vec![], super::text::format_targets_pub(s)) } else { (super::targets(s, p)?, vec![]) };
+    // A caret: the colour is for the next typing (once the swatch exists).
+    let caret = matches!(texts.as_slice(), [t] if t.range.is_empty());
+    let r = s.edit(|d, _| {
         // Reuse a swatch holding exactly this colour, else add an unnamed one.
         let existing = d
             .swatches
@@ -984,8 +987,21 @@ fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
         }
+        if !caret {
+            let a = if stroke {
+                CharAttrs { stroke: Some(name.clone()), stroke_tint: Some(1.0), ..Default::default() }
+            } else {
+                CharAttrs { fill: Some(name.clone()), fill_tint: Some(1.0), ..Default::default() }
+            };
+            super::text::apply_char_attrs(d, &texts, &a, &[]);
+        }
         Ok(json!({"swatch": name}))
-    })
+    })?;
+    if caret && let Some(name) = r.get("swatch").cloned() {
+        let attrs = if stroke { json!({"stroke": name, "strokeTint": 1.0}) } else { json!({"fill": name, "fillTint": 1.0}) };
+        super::text::format_chars(s, &attrs)?;
+    }
+    Ok(r)
 }
 
 fn add_to_swatches(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1026,8 +1042,76 @@ fn add_to_swatches(s: &mut Session, p: &Value) -> Result<Value> {
                 rename_in(std::sync::Arc::make_mut(top), &name, &new);
             }
         }
+        for st in d.stories.values_mut() {
+            let mut copy = (**st).clone();
+            if rename_in_story(&mut copy, &name, &new) {
+                *st = std::sync::Arc::new(copy);
+            }
+        }
         Ok(json!({"name": new}))
     })
+}
+
+/// Point text colours (character fill, stroke, underline and strikethrough; paragraph shading,
+/// border and rules; table cells, borders and alternating fills) at a renamed swatch, in a story
+/// and the texts inside it (table cells, footnotes, endnotes). Returns whether anything changed.
+fn rename_in_story(st: &mut designcraft_doc::Story, from: &str, to: &str) -> bool {
+    fn fix(s: &mut String, from: &str, to: &str) -> bool {
+        let hit = s == from;
+        if hit {
+            *s = to.to_string();
+        }
+        hit
+    }
+    let mut n = 0;
+    let mut f = |s: &mut String| n += usize::from(fix(s, from, to));
+    for r in &mut st.chars {
+        let o = &mut r.format.over;
+        for c in [&mut o.fill, &mut o.stroke, &mut o.underline_color, &mut o.strikethrough_color].into_iter().flatten() {
+            f(c);
+        }
+    }
+    for pf in &mut st.paras {
+        let a = &mut pf.para;
+        for c in [&mut a.shading_color, &mut a.border_color].into_iter().flatten() {
+            f(c);
+        }
+        for r in [&mut a.rule_above, &mut a.rule_below].into_iter().flatten() {
+            f(&mut r.color);
+        }
+    }
+    let mut nested = false;
+    for t in st.tables.values_mut() {
+        let t = std::sync::Arc::make_mut(t);
+        let o = &mut t.options;
+        f(&mut o.border.color);
+        for b in o.borders.iter_mut().flatten() {
+            f(&mut b.color);
+        }
+        for a in [&mut o.alt_rows, &mut o.alt_cols].into_iter().flatten() {
+            f(&mut a.first_color);
+            f(&mut a.next_color);
+        }
+        for k in [&mut o.row_strokes, &mut o.column_strokes].into_iter().flatten() {
+            f(&mut k.first_stroke.color);
+            f(&mut k.next_stroke.color);
+        }
+        for c in &mut t.cells {
+            f(&mut c.fill);
+            for k in &mut c.strokes {
+                f(&mut k.color);
+            }
+            nested |= rename_in_story(&mut c.text, from, to);
+        }
+    }
+    for note in st.notes.iter_mut().chain(st.endnotes.iter_mut()) {
+        nested |= rename_in_story(&mut std::sync::Arc::make_mut(note).text, from, to);
+    }
+    let changed = n > 0 || nested;
+    if changed {
+        st.rev = st.rev.wrapping_add(1);
+    }
+    changed
 }
 
 /// Point fills and strokes of an item (and its children) at a renamed swatch.
@@ -1340,6 +1424,40 @@ mod color_tests {
         // A colour equal to an existing swatch applies that swatch.
         s.execute("object.color", &json!({"color": {"c": 10, "m": 20, "y": 30, "k": 0}})).unwrap();
         assert_eq!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch, "Sand");
+    }
+
+    #[test]
+    fn add_to_swatches_renames_the_colour_in_text_cells_and_notes() {
+        use std::sync::Arc;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 300], "content": "text", "text": "Hello world"})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 11})).unwrap();
+        s.execute("footnote.insert", &json!({"text": "note"})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 0})).unwrap();
+        s.execute("table.insert", &json!({"rows": 1, "cols": 1})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 1, "focus": 4})).unwrap();
+        let old = s.execute("object.color", &json!({"color": {"c": 10, "m": 20, "y": 30, "k": 0}})).unwrap()["swatch"].as_str().unwrap().to_string();
+        // The same unnamed colour on a cell, the cell's text and the footnote's text.
+        s.edit(|d, _| {
+            let st = d.story_mut(sid).unwrap();
+            let t = Arc::make_mut(st.tables.values_mut().next().unwrap());
+            t.cells[0].fill = old.clone();
+            t.cells[0].text.chars[0].format.over.fill = Some(old.clone());
+            Arc::make_mut(&mut st.notes[0]).text.chars[0].format.over.stroke = Some(old.clone());
+            Ok(())
+        })
+        .unwrap();
+        s.execute("swatch.addToSwatches", &json!({"swatch": old, "name": "Sand"})).unwrap();
+        let d = &s.doc().unwrap().doc;
+        let st = d.story(sid).unwrap();
+        assert_eq!(st.char_format_at(2).over.fill.as_deref(), Some("Sand"));
+        let cell = &st.tables.values().next().unwrap().cells[0];
+        assert_eq!(cell.fill, "Sand");
+        assert_eq!(cell.text.chars[0].format.over.fill.as_deref(), Some("Sand"));
+        assert_eq!(st.notes[0].text.chars[0].format.over.stroke.as_deref(), Some("Sand"));
+        d.check().unwrap();
     }
 }
 
