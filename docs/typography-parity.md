@@ -1,6 +1,6 @@
 # Typography and composition parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first version, from the full re-measure) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (anchored objects wrap text) · **Target:** Adobe InDesign 2026 (21.6)
 
 Typesetting is what InDesign is bought for. A feature can exist and still set text differently
 from InDesign: different line breaks, different page count, overset where InDesign fits. This
@@ -56,7 +56,7 @@ Fidelity: **unmeasured** unless stated.
 | Paragraph rules, borders, shading | ✓ | ✓ | ✓ | |
 | Balance ragged lines | ✓ | ✓ | ✓ | |
 | Optical margin alignment | ✓ | ✓ (hang table of our own) | ~ | hang amounts are ours, InDesign's unknown |
-| Text wrap | bounding box, shape, jump object/column, contour options | ✓ | ✓ | |
+| Text wrap | bounding box, shape, jump object/column, contour options, on page items and anchored objects | ✓ | ✓ | |
 | Anchored objects | inline, above line, custom | ✓ | ~ | anchored objects in table cells not drawn (#163) |
 | Footnotes, endnotes | ✓ | ✓ | ~ | footnotes don't split across columns yet |
 | Type on a path | ✓ | ✓ | ✓ | |

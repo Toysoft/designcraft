@@ -21,6 +21,7 @@ pub mod shape;
 pub mod table;
 pub mod vars;
 mod warichu;
+pub mod wrap;
 pub mod xref;
 
 use std::collections::HashMap;
@@ -289,6 +290,9 @@ impl ComposedStory {
 pub struct Exclusion {
     pub rect: Rect,
     pub mode: WrapMode,
+    /// An anchored object in the frame's own story: it wraps only lines that start after this
+    /// story byte (its anchor).
+    pub after: Option<usize>,
 }
 
 /// One frame of the thread, ready for composition.
@@ -370,7 +374,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
                 let b = other.bounds();
                 let r = Rect::new(b.x0 - o[1], b.y0 - o[0], b.x1 + o[3], b.y1 + o[2]);
                 let inner = inv.transform_rect_bbox(r);
-                exclusions.push(Exclusion { rect: inner, mode: other.wrap.mode });
+                exclusions.push(Exclusion { rect: inner, mode: other.wrap.mode, after: None });
             }
         }
         let (page_name, page, left_page) = match (loc.spread, spread) {
@@ -447,13 +451,12 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
     out
 }
 
-/// Compose a story of `doc` through its frames.
+/// Compose a story of `doc` through its frames, with the text wrap of page items and of anchored
+/// objects ([`wrap`]).
 pub fn compose_story(doc: &Document, sid: StoryId, opts: &ComposeOptions) -> ComposedStory {
-    let specs = frame_specs(doc, sid);
-    match doc.story(sid) {
-        Some(st) => compose(doc, st, &specs, opts),
-        None => ComposedStory { story: sid, ..Default::default() },
-    }
+    let others: Vec<ComposedStory> =
+        wrap::neighbours(doc, sid).into_iter().map(|o| wrap::compose_among(doc, o, &ComposeOptions::default(), &[])).collect();
+    wrap::compose_among(doc, sid, opts, &others.iter().collect::<Vec<_>>())
 }
 
 const DEFAULT_TAB: f64 = 36.0;
@@ -931,8 +934,9 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 let (mut x0, mut x1) = (col.x0, col.x1);
                 if !f.exclusions.is_empty() {
                     let mut tries = 0;
+                    let line_start = glyphs.get(s).map_or(prange.start, |g| g.byte);
                     loop {
-                        match free_slot(f, col, baseline - asc, baseline + desc, base_size) {
+                        match free_slot(f, col, baseline - asc, baseline + desc, base_size, line_start) {
                             Some((a, b)) => {
                                 x0 = a;
                                 x1 = b;
@@ -1099,6 +1103,21 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
                 {
                     begin_at(&mut cur, start);
                     col_first_line = line_no;
+                    g0 += b.next;
+                    moved = true;
+                    break;
+                }
+                // An own-story anchored object anchored in this line wraps the lines after it,
+                // which were broken without it: break them again.
+                if k + 1 < breaks.len()
+                    && f.exclusions.iter().any(|ex| {
+                        ex.after.is_some_and(|a| (range_start..range_end).contains(&a))
+                            && ex.rect.x0 < col.x1
+                            && ex.rect.x1 > col.x0
+                            && ex.rect.y1 > baseline
+                            && ex.rect.y0 < col.y1
+                    })
+                {
                     g0 += b.next;
                     moved = true;
                     break;
@@ -2071,10 +2090,11 @@ fn line_metrics(
     (asc, desc, lead)
 }
 
-/// Widest free horizontal interval of `col` in the band, or None if blocked.
-fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64) -> Option<(f64, f64)> {
+/// The widest free stretch of `col` between `y0` and `y1` for a line starting at story byte
+/// `line_start` (`None`: the line must move down).
+fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64, line_start: usize) -> Option<(f64, f64)> {
     let mut free = vec![(col.x0, col.x1)];
-    for ex in &f.exclusions {
+    for ex in f.exclusions.iter().filter(|e| e.after.is_none_or(|a| a < line_start)) {
         let r = ex.rect;
         let overlaps_band = r.y0 < y1 && r.y1 > y0;
         match ex.mode {
@@ -2113,10 +2133,13 @@ fn estimate_slots(f: &FrameSpec, col: Rect, first: f64, lead: f64, size: f64, gl
     let n = ((total / (col.width().max(10.0) * 0.5)).ceil() as usize + 2).min(2000);
     let mut v = Vec::with_capacity(n);
     let mut b = first;
+    // Own-story anchored objects whose anchor is in these lines wrap only the lines after it: the
+    // rest is broken again once that line is set.
+    let line_start = glyphs.first().map_or(0, |g| g.byte);
     for _ in 0..n {
         let mut tries = 0;
         let slot = loop {
-            if let Some(s) = free_slot(f, col, b - size * 0.8, b + size * 0.25, size) {
+            if let Some(s) = free_slot(f, col, b - size * 0.8, b + size * 0.25, size, line_start) {
                 break s;
             }
             b += 1.0;
