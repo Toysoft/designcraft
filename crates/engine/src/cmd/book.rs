@@ -108,15 +108,16 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "book.add", "Add Document", [], None, "{path, at?: index}", has_book, |s, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("book.add", "`path` required"))?.to_string();
             load(&path)?;
-            let b = s.book.as_mut().ok_or_else(no_book)?;
+            let mut b = s.book.as_ref().ok_or_else(no_book)?.clone();
             let at = p.get("at").and_then(Value::as_u64).map_or(b.documents.len(), |i| (i as usize).min(b.documents.len()));
             b.documents.insert(at, path);
-            save(b)?;
+            save(&b)?;
+            s.book = Some(b);
             ok()
         }),
         cmd!(noundo "book.remove", "Remove Document", [], None, "{index}", has_book, |s, p| {
             let i = p.get("index").and_then(Value::as_u64).ok_or_else(|| bad("book.remove", "`index` required"))? as usize;
-            let b = s.book.as_mut().ok_or_else(no_book)?;
+            let mut b = s.book.as_ref().ok_or_else(no_book)?.clone();
             if i >= b.documents.len() {
                 return Err(bad("book.remove", format!("no document {i}")));
             }
@@ -124,17 +125,19 @@ pub fn specs() -> Vec<CommandSpec> {
             if b.style_source >= b.documents.len() {
                 b.style_source = 0;
             }
-            save(b)?;
+            save(&b)?;
+            s.book = Some(b);
             ok()
         }),
         cmd!(noundo "book.styleSource", "Style Source", [], None, "{index}", has_book, |s, p| {
             let i = p.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let b = s.book.as_mut().ok_or_else(no_book)?;
+            let mut b = s.book.as_ref().ok_or_else(no_book)?.clone();
             if i >= b.documents.len() {
                 return Err(bad("book.styleSource", format!("no document {i}")));
             }
             b.style_source = i;
-            save(b)?;
+            save(&b)?;
+            s.book = Some(b);
             ok()
         }),
         cmd!(query "book.list", "Book", [], None, "{} → {path, styleSource, documents: [{path, pages, firstPage}]}", has_book, |s, _| {
