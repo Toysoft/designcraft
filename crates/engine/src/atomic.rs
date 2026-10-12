@@ -11,13 +11,17 @@
 //!   replacing rename fail with `PermissionDenied`; the rename is retried with a short backoff.
 //! - A failed rename (cross-device, unwritable folder) is returned as an error; there is no
 //!   fallback to writing in place.
+//! - Flushing the parent folder after replacement is best effort. A successful save confirms
+//!   that the new file is in place; it cannot guarantee survival of a subsequent power loss if
+//!   the file system rejects that folder flush.
 //!
 //! The web has no file system, so this module is not built for `wasm32`.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// How many times a replacing rename is tried before its error is returned.
 const RENAME_TRIES: u32 = if cfg!(windows) { 5 } else { 1 };
@@ -42,11 +46,7 @@ pub(crate) fn write_file(path: &str, bytes: &[u8]) -> crate::Result<()> {
 /// the error is returned.
 pub fn write_atomic_with(path: &Path, fill: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
     let target = resolve_links(path)?;
-    let name = target
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: not a file path", path.display())))?
-        .to_string_lossy()
-        .into_owned();
+    target.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: not a file path", path.display())))?;
     let dir = match target.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -55,15 +55,18 @@ pub fn write_atomic_with(path: &Path, fill: impl FnOnce(&mut File) -> io::Result
     if existing.is_some() {
         check_writable(&target)?;
     }
-    let (tmp, mut file) = create_temp(&dir, &name)?;
-    let written = fill(&mut file).and_then(|()| file.sync_all()).and_then(|()| existing.map_or(Ok(()), |m| keep_permissions(&file, &m)));
-    drop(file);
-    let placed = written.and_then(|()| retry_rename(RENAME_TRIES, || std::fs::rename(&tmp, &target)));
-    if let Err(e) = placed {
-        // Best effort: the temporary file is all there is to clean up.
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+    let mut tmp = create_temp(&dir, existing.as_ref())?;
+    if let Some(existing) = existing {
+        // Restore the exact mode before any document bytes are written, and flush it along with
+        // the content. The caller's umask may have restricted the initial temporary-file mode.
+        keep_permissions(tmp.as_file(), &existing)?;
     }
+    fill(tmp.as_file_mut())?;
+    tmp.as_file().sync_all()?;
+    // Closing the file before renaming also allows replacement on Windows. TempPath removes the
+    // staging file on every error; NamedTempFile does the same if the writer unwinds.
+    let tmp = tmp.into_temp_path();
+    retry_rename(RENAME_TRIES, || std::fs::rename(&tmp, &target))?;
     // The new bytes are in place. A failed folder flush can't be undone and must not report the
     // save as failed.
     let _ = sync_dir(&dir);
@@ -71,20 +74,22 @@ pub fn write_atomic_with(path: &Path, fill: impl FnOnce(&mut File) -> io::Result
 }
 
 /// Create a fresh temporary file beside the target (the same folder, so the rename stays on one
-/// volume). Names are unique per process and call; a leftover of the same name is skipped.
-fn create_temp(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut last = None;
-    for _ in 0..8 {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let tmp = dir.join(format!(".{name}.{}-{n}.tmp", std::process::id()));
-        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
-            Ok(f) => return Ok((tmp, f)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
-            Err(e) => return Err(e),
-        }
+/// volume). A short randomized name supports long destination names and skips existing entries.
+fn create_temp(dir: &Path, existing: Option<&std::fs::Metadata>) -> io::Result<tempfile::NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".designcraft-save-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Private replacements are private from creation. New files retain fs::write's normal
+        // 0666 mode restricted by the caller's umask.
+        let mode = existing.map_or(0o666, |metadata| metadata.permissions().mode());
+        builder.permissions(std::fs::Permissions::from_mode(mode));
     }
-    Err(last.unwrap_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists)))
+    #[cfg(not(unix))]
+    let _ = existing;
+    builder.tempfile_in(dir)
 }
 
 /// The file a chain of symbolic links ends at (`path` itself when it is not a link). A dangling
@@ -148,7 +153,8 @@ fn retry_rename(tries: u32, mut rename: impl FnMut() -> io::Result<()>) -> io::R
     }
 }
 
-/// Flush a folder's entries (Unix); Windows can't open a folder as a file, and needs no flush.
+/// Flush a folder's entries (Unix). Rust's portable file API cannot open a directory on Windows;
+/// this does not establish power-loss durability for its directory entries.
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
@@ -210,6 +216,56 @@ mod tests {
         std::fs::create_dir(d.join("folder")).unwrap();
         assert!(write_atomic(&d.join("folder"), b"x").is_err());
         assert_eq!(names(&d), ["doc.designcraft", "folder"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_long_destination_name_does_not_lengthen_the_temporary_name() {
+        let d = dir("long-name");
+        let name = format!("{}.designcraft", "a".repeat(235));
+        let path = d.join(&name);
+        std::fs::write(&path, b"old").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&d), [name]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_permissions_are_preserved_while_the_file_is_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = dir("private-staging");
+        let path = d.join("private.designcraft");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic_with(&path, |file| {
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            file.write_all(b"private document")?;
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"private document");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(names(&d), ["private.designcraft"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unwinding_writer_removes_its_partial_temporary_file() {
+        let d = dir("unwinding-writer");
+        let path = d.join("private.designcraft");
+        std::fs::write(&path, b"old").unwrap();
+        let result = std::panic::catch_unwind(|| {
+            write_atomic_with(&path, |file| {
+                file.write_all(b"partial private document")?;
+                panic!("synthetic writer panic");
+            })
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(names(&d), ["private.designcraft"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
