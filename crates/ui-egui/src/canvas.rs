@@ -1073,9 +1073,11 @@ fn draw_cell_selection(
     }
 }
 
-/// InDesign draws selected text inverted: a black highlight with the selected glyphs in the
-/// inverse of their colour (white for black text). The highlight and glyph outlines are
-/// rasterised with `vello_cpu` into a small screen-space texture over the selection.
+/// InDesign darkens the selection background and leaves the selected glyphs in their original
+/// colour: a semi-transparent black highlight over the frame, with the glyph outlines rasterised
+/// by `vello_cpu` into a small screen-space texture over the selection. Keeping the original glyph
+/// colour (rather than inverting it) ensures white text on a dark frame stays visible when
+/// selected, matching InDesign's "darken the background, leave the text" behaviour.
 fn draw_inverse_highlight(
     app: &DesignApp,
     painter: &egui::Painter,
@@ -1118,7 +1120,7 @@ fn draw_inverse_highlight(
         _ => {
             let view = xf.affine(ppp as f64, bbox.min);
             let mut rc = vello_cpu::RenderContext::new_with(w as u16, h as u16, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
-            rc.set_paint(peniko::Color::from_rgba8(0, 0, 0, 255));
+            rc.set_paint(peniko::Color::from_rgba8(0, 0, 0, 160));
             for (_, m, quads, _) in runs {
                 rc.set_transform(view * *m);
                 for q in quads {
@@ -1140,7 +1142,7 @@ fn draw_inverse_highlight(
                     let Some(style) = cs.styles.get(g.style as usize) else { continue };
                     let Some(c) = doc.resolve_color(&style.fill, style.fill_tint) else { continue };
                     let [r, gg, b, _] = c.to_rgba8(1.0);
-                    rc.set_paint(peniko::Color::from_rgba8(255 - r, 255 - gg, 255 - b, 255));
+                    rc.set_paint(peniko::Color::from_rgba8(r, gg, b, 255));
                     let outline = db.outline(&g.face, g.gid);
                     let skew =
                         if style.skew != 0.0 { Affine::new([1.0, 0.0, -style.skew.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
