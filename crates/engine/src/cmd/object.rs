@@ -2463,8 +2463,8 @@ mod fitting_tests {
         s.execute("object.fittingOptions", &json!({"ids": [f], "fitting": "fitProportionally", "align": 0})).unwrap();
         let c = content(&s);
         assert!((c.x0 - 100.0).abs() < 1e-6 && (c.y0 - 100.0).abs() < 1e-6 && (c.width() - 200.0).abs() < 1e-6, "{c:?}");
-        // Crop 10 pt on every side: the content spreads past the frame.
-        s.execute("object.fittingOptions", &json!({"ids": [f], "crop": 10, "align": 4})).unwrap();
+        // Crop 10 pt on every side and fit again: the content spreads past the frame.
+        s.execute("object.fittingOptions", &json!({"ids": [f], "fitting": "fitProportionally", "crop": 10, "align": 4})).unwrap();
         let c = content(&s);
         assert!((c.width() - 220.0).abs() < 1e-6, "{c:?}");
         // Auto-fit: resizing the frame refits the content.
