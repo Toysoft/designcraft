@@ -989,6 +989,15 @@ fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
         p.get("ids").is_none() && s.doc()?.selection.items.is_empty() && (s.doc()?.selection.text.is_some() || s.doc()?.selection.cells.is_some());
     if text {
         let targets = super::text::format_targets(s);
+        // A caret in existing text colours nothing (character formats have no typing colour there):
+        // refuse before adding a swatch or an undo step.
+        let colours_something = {
+            let d = &s.doc()?.doc;
+            targets.iter().any(|t| !t.range.is_empty() || d.story(t.story).is_some_and(|st| t.cell.is_none() && st.is_empty()))
+        };
+        if !colours_something {
+            return Err(bad("object.color", "select the text to colour"));
+        }
         return s.edit(|d, _| {
             let name = unnamed_swatch(d, color);
             for t in &targets {
@@ -1563,6 +1572,11 @@ mod text_color_tests {
         s.execute("edit.redo", &json!({})).unwrap();
         s.execute("text.select", &json!({"story": sid.0, "anchor": 5, "focus": 12})).unwrap();
         assert_eq!(s.execute("object.color", &json!({"color": "#456DAF", "target": "fill"})).unwrap()["swatch"], json!(name));
+        // A caret in existing text: refused, with no swatch and no undo step.
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 3})).unwrap();
+        let (swatches, undo) = (s.doc().unwrap().doc.swatches.len(), s.doc().unwrap().history.undo.len());
+        assert!(s.execute("object.color", &json!({"color": "#00ff00"})).is_err());
+        assert_eq!((s.doc().unwrap().doc.swatches.len(), s.doc().unwrap().history.undo.len()), (swatches, undo));
         // A frame selection still colours the frame.
         s.execute("selection.set", &json!({"ids": [f["id"]]})).unwrap();
         s.execute("object.color", &json!({"color": "#ff0000"})).unwrap();
