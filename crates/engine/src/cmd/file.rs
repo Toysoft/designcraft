@@ -646,6 +646,9 @@ fn file_revert(s: &mut Session, _: &Value) -> Result<Value> {
         };
         // As opened again: the fonts beside it now (unchanged files are shared, not read again).
         let (fonts, _, _) = load_document_fonts(&mut d, &path);
+        if path.to_ascii_lowercase().ends_with(".idml") {
+            crate::autosize::apply(&mut d, None);
+        }
         let uid = s.doc()?.uid;
         let recovery_dir = s.recovery_dir.clone();
         let index = s.active_index().ok_or(EngineError::NoDocument)?;

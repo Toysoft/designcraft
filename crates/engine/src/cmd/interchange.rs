@@ -157,6 +157,8 @@ pub(crate) fn open_idml(s: &mut Session, p: &Value) -> Result<Value> {
         None => (None, 0, Vec::new()),
     };
     warnings.extend(font_warnings);
+    // Auto-size frames fit their text as set here (with the document's fonts loaded).
+    crate::autosize::apply(&mut d, None);
     // Never save over the .idml with the native format: the document starts unsaved.
     let mut st = DocState::new(d, None);
     st.fonts = fonts;

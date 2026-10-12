@@ -2551,6 +2551,12 @@ fn text_frame_options(e: &El) -> TextFrameOptions {
     if let Some(v) = e.get("AutoSizingReferencePoint") {
         o.auto_size_ref = names::REF_POINTS.iter().position(|p| *p == v).unwrap_or(1) as u8;
     }
+    let size = |k: &str| e.num(k).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 10_000.0));
+    o.auto_size_use_min_height = e.get("UseMinimumHeightForAutoSizing") == Some("true");
+    o.auto_size_min_height = size("MinimumHeightForAutoSizing").unwrap_or(0.0);
+    o.auto_size_use_min_width = e.get("UseMinimumWidthForAutoSizing") == Some("true");
+    o.auto_size_min_width = size("MinimumWidthForAutoSizing").unwrap_or(0.0);
+    o.auto_size_no_line_breaks = e.get("UseNoLineBreaksForAutoSizing") == Some("true");
     // Column rules (the colour is a swatch reference: see `Importer::frame_options`).
     o.column_rule = e.get("ColumnRuleOverride") == Some("true");
     let finite = |k: &str| e.num(k).filter(|v| v.is_finite());

@@ -2485,7 +2485,12 @@ fn text_frame_pref(o: &TextFrameOptions, rule_color: &str) -> El {
         .attr("VerticalThreshold", num(o.vj_paragraph_spacing_limit))
         .attr("IgnoreWrap", bool_s(o.ignore_wrap))
         .attr("AutoSizingType", names::auto_size_out(o.auto_size))
-        .attr("AutoSizingReferencePoint", names::REF_POINTS[(o.auto_size_ref as usize).min(8)]);
+        .attr("AutoSizingReferencePoint", names::REF_POINTS[(o.auto_size_ref as usize).min(8)])
+        .attr("UseMinimumHeightForAutoSizing", bool_s(o.auto_size_use_min_height))
+        .attr("MinimumHeightForAutoSizing", num(o.auto_size_min_height))
+        .attr("UseMinimumWidthForAutoSizing", bool_s(o.auto_size_use_min_width))
+        .attr("MinimumWidthForAutoSizing", num(o.auto_size_min_width))
+        .attr("UseNoLineBreaksForAutoSizing", bool_s(o.auto_size_no_line_breaks));
     let el = if o.column_width > 0.0 { el.attr("TextColumnFixedWidth", num(o.column_width)) } else { el };
     let d = TextFrameOptions::default();
     let rule_set = o.column_rule

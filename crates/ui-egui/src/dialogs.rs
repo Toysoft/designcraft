@@ -433,6 +433,11 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
         "columnRule": o.column_rule, "columnRuleWeight": format_measure(o.column_rule_weight, Unit::Points), "columnRuleColor": o.column_rule_color,
         "columnRuleTint": percent(o.column_rule_tint), "columnRuleTopInset": fm(o.column_rule_top_inset),
         "columnRuleBottomInset": fm(o.column_rule_bottom_inset), "columnRuleOffset": fm(o.column_rule_offset),
+        "autoSize": serde_json::to_value(o.auto_size).unwrap_or(Value::Null),
+        "autoSizeReference": designcraft_engine::autosize::REFERENCES.get(usize::from(o.auto_size_ref)).copied().unwrap_or("topCenter"),
+        "useMinimumHeight": o.auto_size_use_min_height, "minimumHeight": fm(o.auto_size_min_height),
+        "useMinimumWidth": o.auto_size_use_min_width, "minimumWidth": fm(o.auto_size_min_width),
+        "noLineBreaks": o.auto_size_no_line_breaks,
     });
     if let Value::Object(m) = &shown {
         for (k, v) in m {
@@ -515,6 +520,57 @@ fn text_frame_options_dialog(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog)
             ui.end_row();
         }
     });
+    ui.add_space(6.0);
+    crate::rtl::label(ui, egui::RichText::new(tr("Auto-Size")).font(semibold(12.0)));
+    egui::Grid::new("tfo_autosize").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        crate::rtl::label(ui, tr("Auto-Sizing"));
+        translated_combo(
+            &lang,
+            ui,
+            d,
+            "autoSize",
+            &[
+                ("off", "Off"),
+                ("heightOnly", "Height Only"),
+                ("widthOnly", "Width Only"),
+                ("heightAndWidth", "Height and Width"),
+                ("heightAndWidthProportionally", "Height and Width (Keep Proportions)"),
+            ],
+        );
+        ui.end_row();
+        crate::rtl::label(ui, tr("Reference Point"));
+        reference_point(ui, d, "autoSizeReference");
+        ui.end_row();
+        check(ui, d, "useMinimumHeight", tr("Minimum Height"));
+        text_field(ui, d, "minimumHeight", 70.0);
+        ui.end_row();
+        check(ui, d, "useMinimumWidth", tr("Minimum Width"));
+        text_field(ui, d, "minimumWidth", 70.0);
+        ui.end_row();
+    });
+    check(ui, d, "noLineBreaks", tr("No Line Breaks"));
+}
+
+/// A 3×3 reference point picker; `d[key]` holds one of `AUTO_SIZE_REFERENCES`.
+fn reference_point(ui: &mut egui::Ui, d: &mut Dialog, key: &str) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let cur = d.s(key);
+    let (r, _) = ui.allocate_exact_size(egui::vec2(46.0, 46.0), egui::Sense::hover());
+    ui.painter().rect_stroke(r.shrink(5.0), 0.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    for (i, name) in designcraft_engine::autosize::REFERENCES.iter().enumerate() {
+        let c = r.min + egui::vec2(5.0 + 18.0 * (i % 3) as f32, 5.0 + 18.0 * (i / 3) as f32);
+        let dot = egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0));
+        let resp = ui.interact(dot.expand(2.0), ui.id().with((key, i)), egui::Sense::click());
+        if resp.clicked() {
+            d.fields.insert(key.into(), json!(name));
+        }
+        if cur == *name {
+            ui.painter().rect_filled(dot, 0.0, t.accent);
+        } else {
+            ui.painter().rect_filled(dot, 0.0, t.panel);
+            ui.painter().rect_stroke(dot, 0.0, egui::Stroke::new(1.0, if resp.hovered() { t.accent } else { t.icon }), egui::StrokeKind::Inside);
+        }
+    }
 }
 
 /// Whether the user changed `key` from what the dialog showed.
@@ -573,6 +629,21 @@ fn confirm_text_frame_options(app: &mut DesignApp, d: &mut Dialog) -> Result<Val
     ] {
         if edited(d, key) {
             p.insert(key.into(), json!(d.m(key).ok_or_else(|| bad(what))?));
+        }
+    }
+    for key in ["autoSize", "autoSizeReference"] {
+        if edited(d, key) {
+            p.insert(key.into(), json!(d.s(key)));
+        }
+    }
+    for key in ["useMinimumHeight", "useMinimumWidth", "noLineBreaks"] {
+        if edited(d, key) {
+            p.insert(key.into(), json!(d.b(key)));
+        }
+    }
+    for (key, what) in [("minimumHeight", "the minimum height is not a measure"), ("minimumWidth", "the minimum width is not a measure")] {
+        if edited(d, key) {
+            p.insert(key.into(), json!(d.m(key).filter(|v| *v >= 0.0).ok_or_else(|| bad(what))?));
         }
     }
     if p.is_empty() {

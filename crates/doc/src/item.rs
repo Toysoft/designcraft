@@ -321,8 +321,21 @@ pub struct TextFrameOptions {
     pub first_baseline_min: f64,
     pub ignore_wrap: bool,
     pub auto_size: AutoSize,
-    /// Reference point (0..9) that stays fixed when auto-sizing.
+    /// Reference point (0..9, row-major from top-left) that stays fixed when auto-sizing.
     pub auto_size_ref: u8,
+    /// Auto-size never makes the frame shorter than `auto_size_min_height` while this is on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_size_use_min_height: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub auto_size_min_height: f64,
+    /// Auto-size never makes the frame narrower than `auto_size_min_width` while this is on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_size_use_min_width: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub auto_size_min_width: f64,
+    /// Width-growing auto-size sets each paragraph on one line (the frame widens to the longest).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_size_no_line_breaks: bool,
     pub column_rule: bool,
     pub column_rule_weight: f64,
     pub column_rule_color: String,
@@ -379,6 +392,11 @@ impl Default for TextFrameOptions {
             ignore_wrap: false,
             auto_size: AutoSize::Off,
             auto_size_ref: 1,
+            auto_size_use_min_height: false,
+            auto_size_min_height: 0.0,
+            auto_size_use_min_width: false,
+            auto_size_min_width: 0.0,
+            auto_size_no_line_breaks: false,
             column_rule: false,
             column_rule_weight: 1.0,
             column_rule_color: designcraft_color::swatch::BLACK.into(),

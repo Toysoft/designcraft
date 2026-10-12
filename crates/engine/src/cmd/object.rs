@@ -514,7 +514,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?: off|heightOnly|widthOnly|heightAndWidth|heightAndWidthProportionally, autoSizeReference?: topLeft|topCenter|topRight|leftCenter|center|rightCenter|bottomLeft|bottomCenter|bottomRight (the point that stays put), useMinimumHeight?: bool, minimumHeight? (pt), useMinimumWidth?: bool, minimumWidth? (pt), noLineBreaks?: bool, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -1478,6 +1478,17 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
     let rule_offset = ranged("columnRuleOffset", -1440.0, 1440.0, "a number of points")?;
     let rule_top = ranged("columnRuleTopInset", -1440.0, 1440.0, "a number of points")?;
     let rule_bottom = ranged("columnRuleBottomInset", -1440.0, 1440.0, "a number of points")?;
+    let min_height = ranged("minimumHeight", 0.0, crate::autosize::MAX_SIDE, "a number of points")?;
+    let min_width = ranged("minimumWidth", 0.0, crate::autosize::MAX_SIDE, "a number of points")?;
+    let reference = match p.get("autoSizeReference") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(|n| crate::autosize::REFERENCES.iter().position(|r| *r == n))
+                .ok_or_else(|| bad(ID, format!("autoSizeReference must be one of {}, not {v}", crate::autosize::REFERENCES.join("|"))))?
+                as u8,
+        ),
+    };
     let rule_color = match p.get("columnRuleColor") {
         None | Some(Value::Null) => None,
         Some(Value::String(c)) if st.doc.swatch(c).is_some() => Some(c.clone()),
@@ -1516,6 +1527,24 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
                         _ => serde_json::from_value(v).map(|x| o.columns_kind = x),
                     };
                 }
+            }
+            if let Some(v) = reference {
+                o.auto_size_ref = v;
+            }
+            if let Some(v) = p.get("useMinimumHeight").and_then(Value::as_bool) {
+                o.auto_size_use_min_height = v;
+            }
+            if let Some(v) = min_height {
+                o.auto_size_min_height = v;
+            }
+            if let Some(v) = p.get("useMinimumWidth").and_then(Value::as_bool) {
+                o.auto_size_use_min_width = v;
+            }
+            if let Some(v) = min_width {
+                o.auto_size_min_width = v;
+            }
+            if let Some(v) = p.get("noLineBreaks").and_then(Value::as_bool) {
+                o.auto_size_no_line_breaks = v;
             }
             if let Some(v) = p.get("ignoreWrap").and_then(Value::as_bool) {
                 o.ignore_wrap = v;
