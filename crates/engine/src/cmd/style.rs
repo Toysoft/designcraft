@@ -180,8 +180,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Color",
             [],
             None,
-            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection",
-            super::has_selection,
+            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255), target?: fill|stroke, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection: the selected objects, or, with text or table cells selected (and no ids), their text",
+            has_objects_or_text,
             apply_color
         ),
         cmd!(
@@ -952,31 +952,72 @@ fn apply_gradient(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 
+/// The swatch holding exactly `color` (process), else a new unnamed one.
+fn unnamed_swatch(d: &mut designcraft_doc::Document, color: designcraft_color::Color) -> String {
+    let existing = d
+        .swatches
+        .iter()
+        .find(|w| matches!(&w.value, SwatchValue::Color { color: c, color_type: designcraft_color::ColorType::Process } if *c == color))
+        .map(|w| w.name.clone());
+    if let Some(n) = existing {
+        return n;
+    }
+    let name = Styles::unique_name(|n| d.swatch(n).is_some(), &value_name(color));
+    d.swatches.push(Swatch {
+        name: name.clone(),
+        value: SwatchValue::Color { color, color_type: designcraft_color::ColorType::Process },
+        locked: false,
+        named: false,
+        hidden: true,
+    });
+    name
+}
+
+/// Objects, text or table cells selected.
+fn has_objects_or_text(s: &Session) -> std::result::Result<(), String> {
+    super::has_selection(s).or_else(|e| match s.active() {
+        Some(d) if d.selection.text.is_some() || d.selection.cells.is_some() => Ok(()),
+        _ => Err(e),
+    })
+}
+
 fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
     let color = p.get("color").and_then(parse_color).ok_or_else(|| bad("object.color", "missing or bad color"))?;
     let stroke = str_param(p, "target") == Some("stroke");
+    // Text or table cells selected (InDesign's colour picker on text): the text takes the colour.
+    let text =
+        p.get("ids").is_none() && s.doc()?.selection.items.is_empty() && (s.doc()?.selection.text.is_some() || s.doc()?.selection.cells.is_some());
+    if text {
+        let targets = super::text::format_targets(s);
+        return s.edit(|d, _| {
+            let name = unnamed_swatch(d, color);
+            for t in &targets {
+                let Some(st) = d.text_story_mut(t.story, t.cell) else { continue };
+                let set = |f: &mut designcraft_doc::CharFormat| {
+                    if stroke {
+                        (f.over.stroke, f.over.stroke_tint) = (Some(name.clone()), Some(1.0));
+                    } else {
+                        (f.over.fill, f.over.fill_tint) = (Some(name.clone()), Some(1.0));
+                    }
+                };
+                if t.range.is_empty() {
+                    // A caret: the colour of what is typed next.
+                    if st.is_empty()
+                        && let Some(run) = st.chars.first_mut()
+                    {
+                        set(&mut run.format);
+                        st.rev += 1;
+                    }
+                    continue;
+                }
+                st.format_chars(t.range.clone(), set);
+            }
+            Ok(json!({ "swatch": name }))
+        });
+    }
     let ids = super::targets(s, p)?;
     s.edit(|d, _| {
-        // Reuse a swatch holding exactly this colour, else add an unnamed one.
-        let existing = d
-            .swatches
-            .iter()
-            .find(|w| matches!(&w.value, SwatchValue::Color { color: c, color_type: designcraft_color::ColorType::Process } if *c == color))
-            .map(|w| w.name.clone());
-        let name = match existing {
-            Some(n) => n,
-            None => {
-                let name = Styles::unique_name(|n| d.swatch(n).is_some(), &value_name(color));
-                d.swatches.push(Swatch {
-                    name: name.clone(),
-                    value: SwatchValue::Color { color, color_type: designcraft_color::ColorType::Process },
-                    locked: false,
-                    named: false,
-                    hidden: true,
-                });
-                name
-            }
-        };
+        let name = unnamed_swatch(d, color);
         for id in &ids {
             if let Some(it) = d.item_mut(*id) {
                 if stroke {
@@ -1491,5 +1532,40 @@ mod cjk_tests {
         let restored = s.cache.get(&s.doc().unwrap().doc, sid, None);
         assert_eq!(old.frames[0].lines[0].end_x, restored.frames[0].lines[0].end_x);
         assert!(s.execute("style.compositeFont.set", &definition(-1.0)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod text_color_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    #[test]
+    fn an_unnamed_colour_on_selected_text_colours_the_text() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let f = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Blue caption"})).unwrap();
+        let sid = designcraft_doc::StoryId(f["story"].as_u64().unwrap());
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 0, "focus": 4})).unwrap();
+        let r = s.execute("object.color", &json!({"color": "#456DAF"})).unwrap();
+        let name = r["swatch"].as_str().unwrap().to_string();
+        let doc = &s.doc().unwrap().doc;
+        let st = doc.story(sid).unwrap();
+        assert_eq!(st.format_after(0).over.fill.as_deref(), Some(name.as_str()), "the selected text");
+        assert_ne!(st.format_after(6).over.fill.as_deref(), Some(name.as_str()), "only the selection");
+        let sw = doc.swatch(&name).unwrap();
+        assert!(!sw.named && sw.hidden, "an unnamed colour, not in the Swatches panel");
+        assert_eq!(doc.item(designcraft_doc::ItemId(f["id"].as_u64().unwrap())).unwrap().fill.swatch, "[None]", "the frame isn't filled");
+        // One undo step; the same colour reuses the swatch.
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_ne!(s.doc().unwrap().doc.story(sid).unwrap().format_after(0).over.fill.as_deref(), Some(name.as_str()));
+        s.execute("edit.redo", &json!({})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 5, "focus": 12})).unwrap();
+        assert_eq!(s.execute("object.color", &json!({"color": "#456DAF", "target": "fill"})).unwrap()["swatch"], json!(name));
+        // A frame selection still colours the frame.
+        s.execute("selection.set", &json!({"ids": [f["id"]]})).unwrap();
+        s.execute("object.color", &json!({"color": "#ff0000"})).unwrap();
+        assert_ne!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(f["id"].as_u64().unwrap())).unwrap().fill.swatch, "[None]");
     }
 }
