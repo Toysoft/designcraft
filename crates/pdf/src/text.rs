@@ -295,6 +295,7 @@ impl Exporter<'_> {
         if fill.is_none() && stroke.is_none() {
             return;
         }
+        let behind = st.stroke_alignment == designcraft_doc::StrokeAlign::Outside;
         let face = g0.face;
         let size = g0.sy * face.upem;
         let hs = g0.sx / g0.sy;
@@ -302,12 +303,12 @@ impl Exporter<'_> {
         let origin = Affine::translate((g0.x, baseline + g0.y)) * skew * Affine::scale_non_uniform(hs, 1.0);
         // A missing glyph is drawn as its box: PDF/A and PDF/UA forbid showing .notdef as text.
         if g0.gid == 0 {
-            self.outline_run(s, glyphs, origin, size, fill, stroke, st.stroke_weight);
+            self.outline_run(s, glyphs, origin, size, fill, stroke, st.stroke_weight, behind);
             return;
         }
         let Some(font) = self.font(&face) else {
             self.warn(format!("font `{} {}` could not be embedded; its text was drawn as outlines", face.family, face.style));
-            self.outline_run(s, glyphs, origin, size, fill, stroke, st.stroke_weight);
+            self.outline_run(s, glyphs, origin, size, fill, stroke, st.stroke_weight, behind);
             return;
         };
         let (text, ranges) = self.run_text(glyphs, story);
@@ -322,8 +323,14 @@ impl Exporter<'_> {
             })
             .collect();
         s.push_transform(&tf(origin));
+        if let Some(c) = stroke.clone().filter(|_| behind) {
+            // Outside alignment: a double-width stroke under the fill, as on screen.
+            s.set_fill(None);
+            s.set_stroke(Some(Stroke { paint: c.into(), width: (st.stroke_weight * 2.0) as f32, ..Default::default() }));
+            s.draw_glyphs(Point::from_xy(0.0, 0.0), &kg, font.clone(), &text, size as f32, false);
+        }
         s.set_fill(fill.map(|c| solid_fill(c, 1.0)));
-        s.set_stroke(stroke.map(|c| Stroke { paint: c.into(), width: st.stroke_weight as f32, ..Default::default() }));
+        s.set_stroke(stroke.filter(|_| !behind).map(|c| Stroke { paint: c.into(), width: st.stroke_weight as f32, ..Default::default() }));
         s.draw_glyphs(Point::from_xy(0.0, 0.0), &kg, font, &text, size as f32, false);
         s.set_fill(None);
         s.set_stroke(None);
@@ -341,6 +348,7 @@ impl Exporter<'_> {
         fill: Option<krilla::color::Color>,
         stroke: Option<krilla::color::Color>,
         stroke_weight: f64,
+        behind: bool,
     ) {
         let db = FontDb::global();
         let g0 = &glyphs[0];
@@ -354,8 +362,13 @@ impl Exporter<'_> {
         }
         let Some(p) = to_path(&bp) else { return };
         s.push_transform(&tf(origin));
+        if let Some(c) = stroke.clone().filter(|_| behind) {
+            s.set_fill(None);
+            s.set_stroke(Some(Stroke { paint: c.into(), width: (stroke_weight * 2.0) as f32, ..Default::default() }));
+            s.draw_path(&p);
+        }
         s.set_fill(fill.map(|c| solid_fill(c, 1.0)));
-        s.set_stroke(stroke.map(|c| Stroke { paint: c.into(), width: stroke_weight as f32, ..Default::default() }));
+        s.set_stroke(stroke.filter(|_| !behind).map(|c| Stroke { paint: c.into(), width: stroke_weight as f32, ..Default::default() }));
         s.draw_path(&p);
         s.set_fill(None);
         s.set_stroke(None);

@@ -735,6 +735,8 @@ attr_set! {
         stroke: String = "[None]".into(),
         stroke_tint: f32 = 1.0,
         stroke_weight: f64 = 1.0,
+        /// Center straddles the outline; Outside puts the whole weight outside it, behind the fill.
+        stroke_alignment: crate::StrokeAlign = crate::StrokeAlign::Center,
         capitalization: Capitalization = Capitalization::Normal,
         position: Position = Position::Normal,
         underline: bool = false,

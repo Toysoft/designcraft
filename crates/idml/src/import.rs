@@ -1172,6 +1172,7 @@ impl<'r> Importer<'r> {
         }
         a.stroke_tint = tint(e.num("StrokeTint"));
         a.stroke_weight = e.num("StrokeWeight");
+        a.stroke_alignment = e.prop("StrokeAlignment").map(|v| names::stroke_align_in(v.trim()));
         a.capitalization = e.prop("Capitalization").and_then(|v| names::caps_in(v.trim()));
         a.position = e.prop("Position").and_then(|v| names::position_in(v.trim()));
         a.underline = e.boolean("Underline");

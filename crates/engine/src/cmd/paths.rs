@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use designcraft_doc::{Content, Document, Fill, Item, ItemId, Selection, Shape, SpreadRef, Stroke};
+use designcraft_doc::{Content, Document, Fill, Item, ItemId, Selection, Shape, SpreadRef, Stroke, StrokeAlign};
 use designcraft_geom::{Affine, BezPath, PathData, SubPath};
 use serde_json::{Value, json};
 
@@ -246,7 +246,7 @@ fn create_outlines(s: &mut Session, p: &Value) -> Result<Value> {
             let cs = designcraft_compose::compose_story(d, tf.story, &Default::default());
             let Some(ft) = cs.frame(*id) else { continue };
             // One path per text look (fill, stroke).
-            let mut runs: Vec<((String, f32, String, f32, f64), BezPath)> = Vec::new();
+            let mut runs: Vec<((String, f32, String, f32, f64, StrokeAlign), BezPath)> = Vec::new();
             for l in &ft.lines {
                 for g in l.glyphs.iter().filter(|g| g.visible) {
                     let st = &cs.styles[g.style as usize];
@@ -256,7 +256,7 @@ fn create_outlines(s: &mut Session, p: &Value) -> Result<Value> {
                     }
                     let skew = if st.skew != 0.0 { Affine::new([1.0, 0.0, -st.skew.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
                     let a = Affine::translate((g.x, l.baseline + g.y)) * skew * Affine::scale_non_uniform(g.sx, g.sy);
-                    let key = (st.fill.clone(), st.fill_tint, st.stroke.clone(), st.stroke_tint, st.stroke_weight);
+                    let key = (st.fill.clone(), st.fill_tint, st.stroke.clone(), st.stroke_tint, st.stroke_weight, st.stroke_alignment);
                     let k = match runs.iter().position(|r| r.0 == key) {
                         Some(k) => k,
                         None => {
@@ -274,14 +274,14 @@ fn create_outlines(s: &mut Session, p: &Value) -> Result<Value> {
             let (sr, _) = spread_xf(d, *id).ok_or(designcraft_doc::DocError::NoItem(*id))?;
             let at = d.spread(sr).and_then(|sp| sp.items.iter().position(|i| i.id == *id));
             let text_xf = d.text_xf(&it);
-            let make = |d: &mut Document, ((fill, ft, stroke, stt, sw), bp): ((String, f32, String, f32, f64), BezPath)| {
+            let make = |d: &mut Document, ((fill, ft, stroke, stt, sw, align), bp): ((String, f32, String, f32, f64, StrokeAlign), BezPath)| {
                 let mut o = Item::new(ItemId(d.alloc()), it.layer, Shape::Path, PathData::from_bezpath(&bp));
                 o.xf = text_xf;
                 o.fill = Fill { swatch: fill, tint: ft, ..Fill::none() };
                 o.stroke = if stroke == designcraft_color::swatch::NONE {
                     Stroke::none()
                 } else {
-                    Stroke { swatch: stroke, tint: stt, weight: sw, ..Stroke::default() }
+                    Stroke { swatch: stroke, tint: stt, weight: sw, align, ..Stroke::default() }
                 };
                 o
             };
@@ -452,6 +452,21 @@ mod tests {
         let b = it.bounds();
         assert!(b.x0 >= 72.0 && b.y0 >= 72.0 && b.x1 < 400.0, "{b:?}");
         assert!(d.stories.is_empty() || !d.stories.values().any(|st| st.frames.contains(&ItemId(id))));
+    }
+
+    #[test]
+    fn create_outlines_keeps_a_text_stroke_behind_the_fill() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Outline"})).unwrap();
+        let id = r["id"].as_u64().unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 7})).unwrap();
+        s.execute("type.char", &json!({"stroke": "[Black]", "strokeWeight": 2, "strokeAlignment": "outside"})).unwrap();
+        s.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        let r = s.execute("type.createOutlines", &json!({})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        let it = d.item(ItemId(r["ids"][0].as_u64().unwrap())).unwrap();
+        assert_eq!((it.stroke.weight, it.stroke.align), (2.0, StrokeAlign::Outside));
     }
 
     #[test]

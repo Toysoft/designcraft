@@ -50,6 +50,7 @@ pub struct RunStyle {
     pub stroke: String,
     pub stroke_tint: f32,
     pub stroke_weight: f64,
+    pub stroke_alignment: designcraft_doc::StrokeAlign,
     pub underline: bool,
     pub strikethrough: bool,
     /// The underline and strikethrough bars (Underline / Strikethrough Options resolved).

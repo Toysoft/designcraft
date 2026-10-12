@@ -358,6 +358,12 @@ impl Renderer {
                 let lg = &fg.lines[i];
                 self.stats.glyphs += lg.glyphs;
                 for (si, bp) in &lg.runs {
+                    let stroke = text_stroke(doc, &cs.styles[*si as usize]);
+                    if let Some((c, s, true)) = &stroke {
+                        ctx.set_paint(*c);
+                        ctx.set_stroke(s.clone());
+                        ctx.stroke_path(bp);
+                    }
                     if let Some(c) = fill_of(*si) {
                         let st = &cs.styles[*si as usize];
                         let op = crate::overprints(f, &st.fill, st.fill_tint, false);
@@ -376,12 +382,9 @@ impl Renderer {
                             ctx.pop_layer();
                         }
                     }
-                    let st = &cs.styles[*si as usize];
-                    if st.stroke != designcraft_color::swatch::NONE
-                        && let Some(c) = doc.resolve_color(&st.stroke, st.stroke_tint)
-                    {
-                        ctx.set_paint(color_of(&c, 1.0));
-                        ctx.set_stroke(kurbo::Stroke::new(st.stroke_weight));
+                    if let Some((c, s, false)) = &stroke {
+                        ctx.set_paint(*c);
+                        ctx.set_stroke(s.clone());
                         ctx.stroke_path(bp);
                     }
                 }
@@ -455,6 +458,18 @@ impl Renderer {
     }
 }
 
+/// A run's text stroke and whether it is painted behind the fill. An outside stroke is a
+/// double-width stroke under the fill, which covers its inner half (the PDF draws it the same way).
+fn text_stroke(doc: &designcraft_doc::Document, st: &designcraft_compose::RunStyle) -> Option<(peniko::Color, kurbo::Stroke, bool)> {
+    if st.stroke == designcraft_color::swatch::NONE {
+        return None;
+    }
+    let c = doc.resolve_color(&st.stroke, st.stroke_tint)?;
+    let behind = st.stroke_alignment == designcraft_doc::StrokeAlign::Outside;
+    let weight = if behind { st.stroke_weight * 2.0 } else { st.stroke_weight };
+    Some((color_of(&c, 1.0), kurbo::Stroke::new(weight), behind))
+}
+
 /// Kurbo stroke for a table edge.
 fn cell_stroke(s: &designcraft_doc::CellStroke) -> kurbo::Stroke {
     let st = kurbo::Stroke::new(s.weight).with_caps(kurbo::Cap::Square);
@@ -484,15 +499,19 @@ impl Renderer {
         ctx.set_transform(f.view * xf);
         for (si, bp) in designcraft_compose::path_glyphs(cs, ft, path, pt) {
             let st = &cs.styles[si as usize];
+            let stroke = text_stroke(doc, st);
+            if let Some((c, s, true)) = &stroke {
+                ctx.set_paint(*c);
+                ctx.set_stroke(s.clone());
+                ctx.stroke_path(&bp);
+            }
             if let Some(c) = doc.resolve_color(&st.fill, st.fill_tint) {
                 ctx.set_paint(color_of(&c, 1.0));
                 ctx.fill_path(&bp);
             }
-            if st.stroke != designcraft_color::swatch::NONE
-                && let Some(c) = doc.resolve_color(&st.stroke, st.stroke_tint)
-            {
-                ctx.set_paint(color_of(&c, 1.0));
-                ctx.set_stroke(kurbo::Stroke::new(st.stroke_weight));
+            if let Some((c, s, false)) = &stroke {
+                ctx.set_paint(*c);
+                ctx.set_stroke(s.clone());
                 ctx.stroke_path(&bp);
             }
             self.stats.glyphs += 1;
