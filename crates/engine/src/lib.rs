@@ -258,6 +258,9 @@ pub struct Session {
     pub(crate) tool: Box<dyn designcraft_tools::Tool>,
     pub journal: Vec<(String, Value)>,
     pub clipboard: Option<Arc<Document>>,
+    /// The x the clipboard's objects are measured from on their spread: its spine, or the left edge of
+    /// single-sided pages. Paste keeps their distance from it.
+    pub clipboard_origin: f64,
     /// Crash-recovery folder (the app sets it; saving or closing a document removes its entry).
     pub recovery_dir: Option<std::path::PathBuf>,
     /// Copied text with its formatting (a frameless story slice) and its plain text.
@@ -298,6 +301,7 @@ impl Session {
             tool: designcraft_tools::create("selection"),
             journal: vec![],
             clipboard: None,
+            clipboard_origin: 0.0,
             recovery_dir: None,
             text_clipboard: None,
             ui_requests: vec![],
