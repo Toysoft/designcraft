@@ -489,6 +489,8 @@ pub struct DesignApp {
     pub power_zoom: Option<(f64, designcraft_geom::Point)>,
     /// The persisted colour settings have been applied this session.
     pub color_applied: bool,
+    /// The installed-font catalog generation the open documents were composed with (#547).
+    font_generation: u64,
     pub perf: Perf,
     pub synthetic: Vec<egui::Event>,
     /// Story open in the Story Editor.
@@ -531,6 +533,7 @@ impl DesignApp {
             other_pane: None,
             power_zoom: None,
             color_applied: false,
+            font_generation: 0,
             perf: Perf::default(),
             synthetic: vec![],
             story_editor: None,
@@ -740,7 +743,27 @@ impl DesignApp {
     }
 
     /// Per-frame logic before layout.
+    /// Fonts installed (or removed) while DesignCraft runs, as InDesign sees them (#547): the
+    /// window regaining focus (fonts are installed from another app) rescans the font folders in
+    /// the background, and once the scan finds the fonts changed, text is composed again (a
+    /// missing font may now be there) and the font menus list them.
+    fn follow_installed_fonts(&mut self, ctx: &egui::Context, db: &'static designcraft_fonts::FontDb) {
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            db.rescan_in_background();
+        }
+        if db.is_rescanning() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let generation = db.catalog_generation();
+        if generation != self.font_generation {
+            self.font_generation = generation;
+            self.session.cache.clear();
+            ctx.request_repaint();
+        }
+    }
+
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.follow_installed_fonts(ctx, designcraft_fonts::FontDb::global());
         if !self.color_applied {
             self.color_applied = true;
             if let Some(cs) = self.ui.color_settings.clone() {
@@ -1085,6 +1108,53 @@ pub fn drop_key_name_text(raw: &mut egui::RawInput, text_field_focused: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A font installed while DesignCraft runs (#547): the window regaining focus rescans the font
+    /// folders, and once the scan finds the change the documents are composed again. Without a
+    /// change nothing is composed again.
+    #[test]
+    fn regaining_focus_finds_fonts_installed_meanwhile() {
+        let dir = std::env::temp_dir().join(format!("dc-ui-fonts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db: &'static designcraft_fonts::FontDb = Box::leak(Box::new(designcraft_fonts::FontDb::with_font_dirs(vec![dir.clone()])));
+        db.load_system_fonts();
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let r = app.run("frame.create", json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Hello"})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        let ctx = egui::Context::default();
+        let frame = |app: &mut DesignApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.follow_installed_fonts(ui.ctx(), db));
+            out.textures_delta.clear();
+        };
+        let wait = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while db.is_rescanning() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let composed = |app: &DesignApp| app.session.cache.get(&app.session.active().unwrap().doc, sid, None);
+        frame(&mut app, vec![]);
+        let before = composed(&app);
+        // Focus comes back with nothing installed: the layout is kept.
+        frame(&mut app, vec![egui::Event::WindowFocused(true)]);
+        wait();
+        frame(&mut app, vec![]);
+        assert!(std::sync::Arc::ptr_eq(&before, &composed(&app)), "no font change: nothing composed again");
+        // A font is installed from another app; DesignCraft regains focus.
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/SourceSerif4-Regular.ttf");
+        std::fs::copy(font, dir.join("Installed.ttf")).unwrap();
+        frame(&mut app, vec![egui::Event::WindowFocused(false)]);
+        assert!(!db.is_rescanning(), "losing focus doesn't rescan");
+        frame(&mut app, vec![egui::Event::WindowFocused(true)]);
+        wait();
+        assert!(db.families().iter().any(|f| f == "Source Serif 4"), "{:?}", db.families());
+        frame(&mut app, vec![]);
+        assert!(!std::sync::Arc::ptr_eq(&before, &composed(&app)), "the fonts changed: composed again");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// An app with one document that has an unsaved edit.
     fn app_with_unsaved_document() -> DesignApp {

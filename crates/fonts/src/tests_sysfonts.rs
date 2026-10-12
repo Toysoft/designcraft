@@ -243,3 +243,65 @@ fn a_rescan_does_not_cache_an_older_in_flight_glyph_miss() {
     assert_eq!(db.fallback_for(c, 0, None).unwrap().family, family);
     std::fs::remove_dir_all(db.font_dirs.first().unwrap()).unwrap();
 }
+
+/// The catalog generation moves on when a rescan finds fonts installed or removed, and only then
+/// (the app composes again when it changes, #547).
+#[test]
+fn a_rescan_changes_the_generation_only_when_the_fonts_change() {
+    use crate::testing::font_with;
+    let dir = font_dir("generation");
+    let db = FontDb::with_font_dirs(vec![dir.clone()]);
+    db.load_system_fonts();
+    let first = db.catalog_generation();
+    assert!(first > 0, "the first scan counts as a change");
+    db.load_system_fonts();
+    assert_eq!(db.catalog_generation(), first, "nothing installed: no change");
+    let family = "Installed While Running";
+    std::fs::write(dir.join("Later.ttf"), font_with(family, &['a']).unwrap()).unwrap();
+    db.load_system_fonts();
+    let installed = db.catalog_generation();
+    assert!(installed > first && has(&db.families(), family));
+    std::fs::remove_file(dir.join("Later.ttf")).unwrap();
+    db.load_system_fonts();
+    assert!(db.catalog_generation() > installed, "a removed font is a change too");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A rescan reuses what it knows of unchanged files and reads a file that changed again.
+#[test]
+fn a_rescan_reads_a_replaced_font_file_again() {
+    use crate::testing::font_with;
+    let dir = font_dir("replaced");
+    let db = FontDb::with_font_dirs(vec![dir.clone()]);
+    std::fs::write(dir.join("Swap.ttf"), font_with("Before Swap", &['a']).unwrap()).unwrap();
+    assert_eq!(db.load_system_fonts(), 3);
+    assert!(has(&db.families(), "Before Swap") && has(&db.families(), FAMILY));
+    // Same file name, another font (and length).
+    std::fs::write(dir.join("Swap.ttf"), font_with("After The Swap", &['a', 'b']).unwrap()).unwrap();
+    assert_eq!(db.load_system_fonts(), 3);
+    let families = db.families();
+    assert!(has(&families, "After The Swap") && !has(&families, "Before Swap") && has(&families, FAMILY), "{families:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// What the app runs when its window regains focus: a background rescan that finds a font
+/// installed while it was running (#547).
+#[test]
+fn a_background_rescan_finds_a_font_installed_while_running() {
+    use crate::testing::font_with;
+    let dir = font_dir("focus");
+    let db: &'static FontDb = Box::leak(Box::new(FontDb::with_font_dirs(vec![dir.clone()])));
+    db.load_system_fonts();
+    let before = db.catalog_generation();
+    let family = "Installed From Font Book";
+    std::fs::write(dir.join("New.ttf"), font_with(family, &['a']).unwrap()).unwrap();
+    db.rescan_in_background();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while db.is_rescanning() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!db.is_rescanning(), "the rescan finishes");
+    assert!(db.catalog_generation() > before);
+    assert!(has(&db.families(), family));
+    std::fs::remove_dir_all(dir).unwrap();
+}
