@@ -180,7 +180,9 @@ pub fn specs() -> Vec<CommandSpec> {
                     Some(v) => v,
                     None => !format_targets(s).first().is_some_and(|t| {
                         s.doc().ok().and_then(|d| d.doc.text_story(t.story, t.cell)).is_some_and(|st| {
-                            st.char_format_at(if t.range.is_empty() { t.range.start } else { t.range.start + 1 }).over.tate_chu_yoko == Some(true)
+                            let format =
+                                if t.range.is_empty() { st.typing_format(t.range.start) } else { st.char_format_at(t.range.start + 1).clone() };
+                            format.over.tate_chu_yoko == Some(true)
                         })
                     }),
                 };
@@ -208,7 +210,9 @@ pub fn specs() -> Vec<CommandSpec> {
                     Some(v) => v,
                     None => !format_targets(s).first().is_some_and(|t| {
                         s.doc().ok().and_then(|d| d.doc.text_story(t.story, t.cell)).is_some_and(|st| {
-                            st.char_format_at(if t.range.is_empty() { t.range.start } else { t.range.start + 1 }).over.kenten == Some(true)
+                            let format =
+                                if t.range.is_empty() { st.typing_format(t.range.start) } else { st.char_format_at(t.range.start + 1).clone() };
+                            format.over.kenten == Some(true)
                         })
                     }),
                 };
@@ -444,7 +448,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         if tracking && t.cell.is_none() {
             // Track Changes: the replaced text is marked deleted, the typing inserted after it.
             let at = super::changes::mark_deleted(st, r.clone());
-            let mut fmt = st.char_format_at(at).clone();
+            let mut fmt = if r.is_empty() { st.typing_format(at) } else { st.char_format_at(at).clone() };
             fmt.over.change = Some(designcraft_doc::ChangeMark::Inserted);
             st.insert_with(at, &text, fmt);
             let pos = at + text.len() - trail;
@@ -479,7 +483,7 @@ fn smart_quotes(s: &Session, text: &str) -> String {
             let pos = t.range().start.min(story.len());
             let pi = story.para_at(pos).min(story.paras.len().saturating_sub(1));
             let base = st.doc.styles.resolve_para(story.paras.get(pi)?).1;
-            Some(st.doc.styles.resolve_char(&base, story.char_format_at(pos)).language)
+            Some(st.doc.styles.resolve_char(&base, &story.typing_format(pos)).language)
         })
         .unwrap_or_default();
     let [dq_open, dq_close, sq_open, sq_close] = quote_marks(&language);
@@ -855,10 +859,10 @@ fn warichu_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v,
         None if has_opts => true,
         None => !format_targets(s).first().is_some_and(|t| {
-            s.doc()
-                .ok()
-                .and_then(|d| d.doc.text_story(t.story, t.cell))
-                .is_some_and(|st| st.char_format_at(if t.range.is_empty() { t.range.start } else { t.range.start + 1 }).over.warichu == Some(true))
+            s.doc().ok().and_then(|d| d.doc.text_story(t.story, t.cell)).is_some_and(|st| {
+                let format = if t.range.is_empty() { st.typing_format(t.range.start) } else { st.char_format_at(t.range.start + 1).clone() };
+                format.over.warichu == Some(true)
+            })
         }),
     };
     let mut body = serde_json::Map::new();
@@ -918,8 +922,18 @@ pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
                 if st.is_empty() {
                     st.chars[0].format.over.merge(&a);
                     st.rev += 1;
-                } else {
-                    let _ = pos;
+                } else if t.cell.is_none() && pos == st.len() && st.text.ends_with('\n') && (!a.is_empty() || !cleared.is_empty()) {
+                    let mut over = st.char_format_at(pos).over.clone();
+                    over.change = None;
+                    let Some(pf) = st.paras.last_mut() else { continue };
+                    if pf.eof_inherited_chars.is_none() {
+                        pf.eof_inherited_chars = Some(std::mem::replace(&mut pf.chars, over));
+                    }
+                    pf.chars.merge(&a);
+                    for key in &cleared {
+                        let _ = pf.chars.set_json(key, &Value::Null);
+                    }
+                    st.rev = st.rev.wrapping_add(1);
                 }
                 continue;
             }
@@ -991,7 +1005,12 @@ fn break_link(s: &mut Session, p: &Value) -> Result<Value> {
                     let (pp, pc) = styles.resolve_para(pf);
                     pf.style = designcraft_doc::styles::NO_PARA_STYLE.into();
                     pf.para = ParaProps::default().delta(&pp);
-                    pf.chars = CharProps::default().delta(&pc);
+                    let baseline = CharProps::default().delta(&pc);
+                    if let Some(inherited) = pf.eof_inherited_chars.as_mut() {
+                        *inherited = baseline;
+                    } else {
+                        pf.chars = baseline;
+                    }
                 });
             } else {
                 let ranges = st.para_ranges();
@@ -1056,8 +1075,8 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let pi = story.para_at(r.start);
     let pf = &story.paras[pi];
     let (pp, base) = st.doc.styles.resolve_para(pf);
-    let cf = if r.is_empty() { story.char_format_at(r.start) } else { story.format_after(r.start) };
-    let cp = st.doc.styles.resolve_char(&base, cf);
+    let cf = if r.is_empty() { story.typing_format(r.start) } else { story.format_after(r.start).clone() };
+    let cp = st.doc.styles.resolve_char(&base, &cf);
     // The selected text (its start, on one line), for previews such as the font menu's.
     let selected = selected_text_preview(story.text.get(r.start..r.end).unwrap_or_default().chars());
     Ok(json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
@@ -2048,3 +2067,7 @@ mod multi_click_tests {
         assert_eq!(para_bounds(s, s.len()), (s.len(), s.len()));
     }
 }
+
+#[cfg(test)]
+#[path = "text/tests_eof.rs"]
+mod tests_eof;

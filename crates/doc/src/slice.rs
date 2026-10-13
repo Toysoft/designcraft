@@ -45,6 +45,7 @@ impl Story {
                 out.tables.insert(id, t.clone());
             }
         }
+        out.clear_consumed_eof_formats();
         out.fix_tables();
         out
     }
@@ -74,6 +75,7 @@ impl Story {
                 *p = crate::story::ParaFormat { table: None, ..pf.clone() };
             }
         }
+        self.clear_consumed_eof_formats();
         // Payloads of footnotes, cross-references and index markers, in order.
         let first = |m: char| self.text[..pos].matches(m).count();
         let (nf, nx, ni, na) = (first(FOOTNOTE_REF), first(XREF_MARK), first(INDEX_MARK), first(ANCHOR_MARK));

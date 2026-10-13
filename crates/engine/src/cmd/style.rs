@@ -406,6 +406,9 @@ fn apply_para(s: &mut Session, p: &Value) -> Result<Value> {
                     if clear {
                         f.para = ParaAttrs::default();
                         f.chars = CharAttrs::default();
+                        if let Some(inherited) = f.eof_inherited_chars.as_mut() {
+                            *inherited = CharAttrs::default();
+                        }
                     }
                 });
                 if clear {
@@ -641,7 +644,7 @@ fn create_char(s: &mut Session, p: &Value) -> Result<Value> {
         let story = st.doc.text_story(target.story, target.cell).ok_or(designcraft_doc::DocError::NoStory(target.story))?;
         // Match paragraph fromSelection's first-character/caret policy, but keep paragraph
         // attributes inherited instead of freezing the fully resolved character properties.
-        let format = if target.range.is_empty() { story.char_format_at(target.range.start) } else { story.format_after(target.range.start) };
+        let format = if target.range.is_empty() { story.typing_format(target.range.start) } else { story.format_after(target.range.start).clone() };
         let mut captured = st.doc.styles.char_style_attrs(&format.style);
         captured.merge(&format.over);
         // Replay the explicit fields so null clears a captured value rather than looking absent.
