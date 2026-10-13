@@ -151,7 +151,12 @@ pub fn pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
         let be = |i: usize| u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
         return Some((be(18), be(14)));
     }
-    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+        .or_else(|| tiff_decoder(bytes)?.dimensions().ok())
 }
 
 /// Straight (non-premultiplied) RGBA8 of a raster.
@@ -159,7 +164,26 @@ pub fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     if is_psd(bytes) {
         return psd::decode(bytes);
     }
-    Some(decode_to_rgba8(&image::load_from_memory(bytes).ok()?))
+    match image::load_from_memory(bytes) {
+        Ok(img) => Some(decode_to_rgba8(&img)),
+        // `image` reads four-ink TIFFs but not five-sample CMYK with alpha, which InDesign stores
+        // as the preview of transparent Photoshop files.
+        Err(_) => cmyk_tiff_rgba(bytes),
+    }
+}
+
+/// A CMYK TIFF as RGBA, converted as `image` converts the CMYK TIFFs it reads.
+fn cmyk_tiff_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let r = decode_cmyk_tiff(bytes)?;
+    let pixels = r.cmyk.len() / 4;
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels.checked_mul(4)?).ok()?;
+    for (i, &[c, m, y, k]) in r.cmyk.as_chunks::<4>().0.iter().enumerate() {
+        let kf = 1.0 - f32::from(k) / 255.0;
+        let ink = |v: u8| ((255.0 - f32::from(v)) * kf) as u8;
+        out.extend([ink(c), ink(m), ink(y), r.alpha.as_ref().and_then(|a| a.get(i).copied()).unwrap_or(255)]);
+    }
+    image::RgbaImage::from_raw(r.width, r.height, out)
 }
 
 /// Fresh raster decodes are sRGB in the pinned image decoder. Expanding an L8 value to
@@ -384,6 +408,19 @@ mod tests {
         }
         img.write_data(px).unwrap();
         b
+    }
+
+    /// InDesign's preview of a transparent Photoshop file is a five-sample CMYK TIFF with alpha,
+    /// which `image` can't read: it still decodes, transparency kept.
+    #[test]
+    fn cmyk_tiff_with_alpha_decodes_to_rgba() {
+        use tiff::encoder::colortype::CMYKA8;
+        // Solid black opaque, then no ink fully transparent.
+        let b = tiff_of::<CMYKA8>(2, 1, &[0, 0, 0, 255, 255, 0, 0, 0, 0, 0], true);
+        assert_eq!(pixel_size(&b), Some((2, 1)));
+        let img = decode_rgba(&b).expect("decodes");
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [255, 255, 255, 0]);
     }
 
     /// CMYK TIFFs read back as their ink values; RGB ones aren't CMYK.
