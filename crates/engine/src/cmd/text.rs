@@ -269,7 +269,16 @@ pub fn specs() -> Vec<CommandSpec> {
             break_link
         ),
         cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection, and its start as `selectedText` (one line, up to 60 characters)", has_doc, selection_attrs),
-        cmd!(query "type.openTypeFeatures", "OpenType Features", [], None, "{} → the OpenType features and stylistic sets that the fonts of the selected text (or of the selected text frames) offer, merged over those fonts", has_doc, open_type_features),
+        cmd!(query "type.openTypeFeatures", "OpenType Features", [], None, "{} → the OpenType features and stylistic sets the selected text's fonts offer, each with its applied and available state (none, some or all of the selection)", has_doc, open_type_features),
+        cmd!(
+            "type.feature",
+            "Set OpenType Features",
+            [],
+            None,
+            "{features: {tag: true|false, …}} — turns OpenType features on or off across the selected text, keeping each run's other features",
+            has_doc,
+            set_features
+        ),
         cmd!(
             "text.fitFrame",
             "Fit Frame to Text",
@@ -1220,46 +1229,123 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
         "paraOverrides": pf.para.count(), "charOverrides": cf.over.count(), "selectedText": selected.trim()}))
 }
 
-/// The OpenType features the fonts in the selection offer, merged: a feature any of them has is
-/// listed. The fonts are those of the runs the selection (or a caret, or the selected frames' text)
-/// covers; with none, the document's base font.
+/// One stretch of the selection: its length in bytes, the font it is set in and its features.
+struct FeatureSegment {
+    len: usize,
+    font: (String, String),
+    applied: Vec<String>,
+}
+
+/// The OpenType features of the fonts in the selection, with how much of the selection each one is
+/// applied to and how much of it the fonts offer. A caret counts as one byte. `state` is `none`,
+/// `some` or `all`.
 fn open_type_features(s: &mut Session, _p: &Value) -> Result<Value> {
     let st = s.doc()?;
-    let mut faces: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    let mut segments: Vec<FeatureSegment> = Vec::new();
     for Target { story: sid, cell, range: r } in format_targets(s) {
         let Some(story) = st.doc.text_story(sid, cell) else { continue };
-        let mut covered: Vec<(usize, designcraft_doc::story::CharFormat)> = Vec::new();
-        if r.is_empty() {
-            covered.push((r.start, story.format_after(r.start).clone()));
+        let covered: Vec<(usize, usize, designcraft_doc::story::CharFormat)> = if r.is_empty() {
+            vec![(r.start, 1, story.format_after(r.start).clone())]
         } else {
-            covered.extend(story.runs().filter(|(run, _)| run.start < r.end && run.end > r.start).map(|(run, f)| (run.start, f.clone())));
-        }
-        for (pos, cf) in covered {
+            story
+                .runs()
+                .filter(|(run, _)| run.start < r.end && run.end > r.start)
+                .map(|(run, f)| (run.start, run.end.min(r.end).saturating_sub(run.start.max(r.start)), f.clone()))
+                .collect()
+        };
+        for (pos, len, cf) in covered {
             let Some(para) = story.paras.get(story.para_at(pos)) else { continue };
             let (_, base) = st.doc.styles.resolve_para(para);
             let cp = st.doc.styles.resolve_char(&base, &cf);
-            faces.insert((cp.font_family, cp.font_style));
+            segments.push(FeatureSegment { len, font: (cp.font_family, cp.font_style), applied: cp.otf_features });
         }
     }
-    if faces.is_empty() {
+    if segments.is_empty() {
         let (_, base) = st.doc.styles.resolve_para_style(designcraft_doc::story::BASIC_PARAGRAPH);
         let cp = st.doc.styles.resolve_char(&base, &designcraft_doc::story::CharFormat::default());
-        faces.insert((cp.font_family, cp.font_style));
+        segments.push(FeatureSegment { len: 1, font: (cp.font_family, cp.font_style), applied: cp.otf_features });
     }
     let db = designcraft_fonts::FontDb::global();
-    let mut tags = std::collections::BTreeSet::new();
-    let mut sets: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
-    let mut used = Vec::new();
-    for (family, style) in &faces {
-        let features = designcraft_fonts::font_features(&db.face(family, style));
-        tags.extend(features.tags);
-        for (set, name) in features.stylistic_sets {
-            sets.entry(set).or_insert(name);
-        }
-        used.push(json!({"family": family, "style": style}));
+    let mut fonts: std::collections::BTreeMap<(String, String), designcraft_fonts::FontFeatures> = std::collections::BTreeMap::new();
+    for seg in &segments {
+        fonts.entry(seg.font.clone()).or_insert_with(|| designcraft_fonts::font_features(&db.face(&seg.font.0, &seg.font.1)));
     }
-    let sets: Vec<Value> = sets.into_iter().map(|(set, name)| json!({"set": set, "name": name})).collect();
-    Ok(json!({"fonts": used, "features": tags, "stylisticSets": sets}))
+    let total: usize = segments.iter().map(|seg| seg.len).sum::<usize>().max(1);
+    let state = |covered: usize| match covered {
+        0 => "none",
+        n if n >= total => "all",
+        _ => "some",
+    };
+    // Bytes the feature is applied to, and bytes whose font offers it.
+    let measure = |tag: &str| {
+        let (mut applied, mut available) = (0, 0);
+        for seg in &segments {
+            if designcraft_doc::otf::is_on(&seg.applied, tag) {
+                applied += seg.len;
+            }
+            if fonts.get(&seg.font).is_some_and(|f| f.tags.contains(tag)) {
+                available += seg.len;
+            }
+        }
+        (state(applied), state(available))
+    };
+    let tags: std::collections::BTreeSet<String> = fonts.values().flat_map(|f| f.tags.iter().cloned()).collect();
+    let mut features = Vec::new();
+    for tag in tags.iter().filter(|t| !(t.len() == 4 && t.starts_with("ss") && t[2..].parse::<u32>().is_ok())) {
+        let (applied, available) = measure(tag);
+        features.push(json!({"tag": tag, "applied": applied, "available": available}));
+    }
+    // A stylistic set's name is shared when every font that offers it gives it the same name.
+    let mut sets = Vec::new();
+    for set in 1..=20u32 {
+        let tag = format!("ss{set:02}");
+        if !tags.contains(&tag) {
+            continue;
+        }
+        let names: std::collections::BTreeSet<&String> = fonts.values().filter_map(|f| f.stylistic_sets.get(&set)).collect();
+        let name = if names.len() == 1 { names.first().map(|n| n.to_string()) } else { None };
+        let (applied, available) = measure(&tag);
+        sets.push(json!({"set": set, "tag": tag, "name": name, "applied": applied, "available": available}));
+    }
+    let used: Vec<Value> = fonts.keys().map(|(family, style)| json!({"family": family, "style": style})).collect();
+    Ok(json!({"fonts": used, "features": features, "stylisticSets": sets}))
+}
+
+/// Turns OpenType features on or off across the selected text: `features` maps tags to whether they
+/// are on. Each run keeps its other features, whichever font it is set in, and the change is one
+/// undo step.
+fn set_features(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "type.feature";
+    let changes: Vec<(String, bool)> = p
+        .get("features")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad(ID, "missing features: a map of tags to true or false"))?
+        .iter()
+        .map(|(tag, on)| Ok((tag.clone(), on.as_bool().ok_or_else(|| bad(ID, format!("`{tag}` needs true or false")))?)))
+        .collect::<Result<_>>()?;
+    let targets: Vec<Target> = format_targets(s).into_iter().filter(|t| !t.range.is_empty()).collect();
+    if targets.is_empty() {
+        return Err(bad(ID, "select text"));
+    }
+    let styles = s.doc()?.doc.styles.clone();
+    s.edit(|d, _| {
+        for t in &targets {
+            let Some(st) = d.text_story_mut(t.story, t.cell) else { continue };
+            let runs: Vec<(std::ops::Range<usize>, designcraft_doc::story::CharFormat)> =
+                st.runs().filter(|(run, _)| run.start < t.range.end && run.end > t.range.start).map(|(run, f)| (run.clone(), f.clone())).collect();
+            for (run, format) in runs {
+                let Some(para) = st.paras.get(st.para_at(run.start)).cloned() else { continue };
+                let (_, base) = styles.resolve_para(&para);
+                let mut list = styles.resolve_char(&base, &format).otf_features;
+                for (tag, on) in &changes {
+                    designcraft_doc::otf::set(&mut list, tag, *on);
+                }
+                let range = run.start.max(t.range.start)..run.end.min(t.range.end);
+                st.format_chars(range, |f| f.over.otf_features = Some(list.clone()));
+            }
+        }
+        ok()
+    })
 }
 
 /// Our own filler text (not Adobe's).
@@ -2406,15 +2492,39 @@ mod open_type_features_tests {
 
     use crate::Session;
 
+    fn feature<'a>(v: &'a Value, tag: &str) -> &'a Value {
+        v["features"].as_array().unwrap().iter().find(|f| f["tag"] == tag).unwrap_or(&Value::Null)
+    }
+
     #[test]
-    fn the_selected_fonts_features_are_listed() {
+    fn the_selected_fonts_features_are_listed_with_their_state() {
         let mut s = Session::new();
         s.execute("file.new", &json!({})).unwrap();
         let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Hello fi"})).unwrap();
         s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 8})).unwrap();
         let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
         assert_eq!(v["fonts"][0]["family"], "Source Serif 4", "{v}");
-        let features: Vec<&str> = v["features"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-        assert!(features.contains(&"liga") && features.contains(&"kern"), "{features:?}");
+        assert_eq!(feature(&v, "liga")["applied"], "all", "liga is on by default: {v}");
+        assert_eq!(feature(&v, "kern")["available"], "all", "{v}");
+    }
+
+    #[test]
+    fn a_feature_on_part_of_the_selection_is_some_and_on_all_of_it_is_all() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Hello world"})).unwrap();
+        let story = r["story"].clone();
+        s.execute("text.select", &json!({"story": story, "anchor": 0, "focus": 5})).unwrap();
+        s.execute("type.feature", &json!({"features": {"lnum": true}})).unwrap();
+        s.execute("text.select", &json!({"story": story, "anchor": 0, "focus": 11})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "lnum")["applied"], "some", "{v}");
+        s.execute("text.select", &json!({"story": story, "anchor": 0, "focus": 5})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "lnum")["applied"], "all", "{v}");
+        s.execute("type.feature", &json!({"features": {"lnum": false}})).unwrap();
+        s.execute("text.select", &json!({"story": story, "anchor": 0, "focus": 11})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "lnum")["applied"], "none", "{v}");
     }
 }

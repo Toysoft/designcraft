@@ -1,18 +1,36 @@
 //! The Typography panel: the OpenType features the fonts of the selected text offer, grouped as
-//! Affinity's are. A feature is listed only when a font in the selection has it (the features of
-//! several fonts are merged); changes apply to the selection through `type.char`.
+//! Affinity's are. Every feature is a checkbox that shows how much of the selection it is applied to
+//! (checked: all of it; a dash: some of it; empty: none). A feature only some of the selection's fonts
+//! offer is italic. Changes apply to the selection through `type.feature`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
-use designcraft_doc::otf;
 use serde_json::{Value, json};
 
 use crate::DesignApp;
 
+/// A feature's state over the selection: applied to none of it, some of it, or all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Covered {
+    None,
+    Some,
+    All,
+}
+
+impl Covered {
+    fn parse(s: &str) -> Self {
+        match s {
+            "all" => Covered::All,
+            "some" => Covered::Some,
+            _ => Covered::None,
+        }
+    }
+}
+
 /// A switch: its OpenType tag and menu label.
 type Switch = (&'static str, &'static str);
 
-/// One choice of a radio group: its label and the tags it turns on (none for the default).
+/// A group of mutually exclusive choices: each one's label and the tags it turns on.
 type Choice = (&'static str, &'static [&'static str]);
 
 const LIGATURES: &[Switch] =
@@ -28,12 +46,11 @@ const ALTERNATES: &[Switch] = &[
     ("zero", "Slashed Zero"),
 ];
 
-const FIGURE_STYLE: &[Choice] = &[("Default", &[]), ("Lining", &["lnum"]), ("Oldstyle", &["onum"])];
+const FIGURE_STYLE: &[Choice] = &[("Lining", &["lnum"]), ("Oldstyle", &["onum"])];
 
-const FIGURE_WIDTH: &[Choice] = &[("Default", &[]), ("Tabular", &["tnum"]), ("Proportional", &["pnum"])];
+const FIGURE_WIDTH: &[Choice] = &[("Tabular", &["tnum"]), ("Proportional", &["pnum"])];
 
 const FIGURE_POSITION: &[Choice] = &[
-    ("Normal", &[]),
     ("Numerator", &["numr"]),
     ("Denominator", &["dnom"]),
     ("Superscript", &["sups"]),
@@ -43,131 +60,166 @@ const FIGURE_POSITION: &[Choice] = &[
 
 const FRACTION_AND_ORDINAL: &[Switch] = &[("frac", "Fractions"), ("ordn", "Ordinal")];
 
-const CAPITALS: &[Choice] = &[("Normal", &[]), ("Caps to Small Caps", &["c2sc"]), ("Small Caps", &["smcp"]), ("All Small Caps", &["c2sc", "smcp"])];
+const CAPITALS: &[Choice] = &[("Caps to Small Caps", &["c2sc"]), ("Small Caps", &["smcp"]), ("All Small Caps", &["c2sc", "smcp"])];
 
-/// The features the selected fonts offer: their tags, and the stylistic sets (number, name).
+/// A feature the selection's fonts offer, and its state over the selection.
+#[derive(Clone, Copy)]
+struct Feature {
+    applied: Covered,
+    available: Covered,
+}
+
+/// What the selection's fonts offer: each feature's state, and each stylistic set's name and state.
+#[derive(Default)]
 struct Offered {
-    tags: BTreeSet<String>,
-    sets: Vec<(u32, String)>,
+    features: BTreeMap<String, Feature>,
+    sets: Vec<Set>,
+}
+
+struct Set {
+    number: u32,
+    tag: String,
+    name: Option<String>,
+    feature: Feature,
 }
 
 impl Offered {
-    fn has(&self, tag: &str) -> bool {
-        self.tags.contains(tag)
+    fn get(&self, tag: &str) -> Option<Feature> {
+        self.features.get(tag).copied()
     }
 
-    /// A choice is offered when every tag it turns on is (the default always is).
-    fn offers(&self, tags: &[&str]) -> bool {
-        tags.iter().all(|t| self.has(t))
+    /// A choice's state: all of its tags applied is all, none is none, otherwise some. Its
+    /// availability is the least of its tags'. None when no tag is offered.
+    fn choice(&self, tags: &[&str]) -> Option<Feature> {
+        let found: Vec<Feature> = tags.iter().filter_map(|t| self.get(t)).collect();
+        if found.is_empty() {
+            return None;
+        }
+        let applied = if found.iter().all(|f| f.applied == Covered::All) {
+            Covered::All
+        } else if found.iter().all(|f| f.applied == Covered::None) {
+            Covered::None
+        } else {
+            Covered::Some
+        };
+        let available = found.iter().map(|f| f.available).min().unwrap_or(Covered::None);
+        Some(Feature { applied, available })
     }
 }
 
 pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
-    let Some(attrs) = super::text_attrs(app) else {
+    if super::text_attrs(app).is_none() {
         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Select text or a text frame."));
         return;
-    };
-    let applied: Vec<String> =
-        attrs["chars"]["otfFeatures"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    }
     let offered = offered(app);
-    if offered.tags.is_empty() && offered.sets.is_empty() {
+    if offered.features.is_empty() && offered.sets.is_empty() {
         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "The selected fonts have no OpenType features."));
         return;
     }
     let lang = app.ui.language.clone();
-    let mut list = applied.clone();
-    let mut changed = false;
+    // Changes this frame: each feature tag to the state it is set to.
+    let mut changes: BTreeMap<String, bool> = BTreeMap::new();
     crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "Typography")).strong());
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let mut section = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui, &mut Vec<String>) -> bool| {
-            egui::CollapsingHeader::new(crate::i18n::tr(&lang, title)).id_salt(title).default_open(true).show(ui, |ui| {
-                changed |= body(ui, &mut list);
-            });
-        };
-        section(ui, "Ligatures", &mut |ui, list| switches(ui, &lang, list, &offered, LIGATURES));
-        section(ui, "Alternates", &mut |ui, list| switches(ui, &lang, list, &offered, ALTERNATES));
-        section(ui, "Stylistic Sets", &mut |ui, list| stylistic_sets(ui, list, &offered));
-        section(ui, "Figure Style", &mut |ui, list| choices(ui, &lang, list, &offered, FIGURE_STYLE));
-        section(ui, "Figure Width", &mut |ui, list| choices(ui, &lang, list, &offered, FIGURE_WIDTH));
-        section(ui, "Figure Position", &mut |ui, list| {
-            let a = choices(ui, &lang, list, &offered, FIGURE_POSITION);
-            let b = switches(ui, &lang, list, &offered, FRACTION_AND_ORDINAL);
-            a | b
+        section(ui, &lang, "Ligatures", |ui| switches(ui, &lang, &offered, LIGATURES, &mut changes));
+        section(ui, &lang, "Alternates", |ui| switches(ui, &lang, &offered, ALTERNATES, &mut changes));
+        section(ui, &lang, "Stylistic Sets", |ui| stylistic_sets(ui, &lang, &offered, &mut changes));
+        section(ui, &lang, "Figure Style", |ui| choices(ui, &lang, &offered, FIGURE_STYLE, &mut changes));
+        section(ui, &lang, "Figure Width", |ui| choices(ui, &lang, &offered, FIGURE_WIDTH, &mut changes));
+        section(ui, &lang, "Figure Position", |ui| {
+            choices(ui, &lang, &offered, FIGURE_POSITION, &mut changes);
+            switches(ui, &lang, &offered, FRACTION_AND_ORDINAL, &mut changes);
         });
-        section(ui, "Capitals", &mut |ui, list| choices(ui, &lang, list, &offered, CAPITALS));
+        section(ui, &lang, "Capitals", |ui| choices(ui, &lang, &offered, CAPITALS, &mut changes));
     });
-    if changed {
-        let _ = app.run("type.char", json!({"attrs": {"otfFeatures": list}}));
+    if !changes.is_empty() {
+        let _ = app.run("type.feature", json!({"features": changes}));
     }
 }
 
-/// The features the fonts of the selection offer, merged over them.
+/// A collapsible section, open at first. Its body runs only when it has something to show.
+fn section(ui: &mut egui::Ui, lang: &str, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::CollapsingHeader::new(crate::i18n::tr(lang, title)).id_salt(title).default_open(true).show(ui, body);
+}
+
+/// A checkbox for a feature's state: checked when all of the selection has it, a dash when some of
+/// it does, italic when only some of the selection's fonts offer it. Returns the state to set when
+/// clicked.
+fn tri_checkbox(ui: &mut egui::Ui, text: &str, feature: Feature) -> Option<bool> {
+    let mut on = feature.applied == Covered::All;
+    let mut label = egui::RichText::new(text);
+    if feature.available == Covered::Some {
+        label = label.italics();
+    }
+    let response = ui.add(egui::Checkbox::new(&mut on, crate::rtl::widget(ui, label)).indeterminate(feature.applied == Covered::Some));
+    response.clicked().then_some(feature.applied != Covered::All)
+}
+
+/// On/off switches the fonts offer.
+fn switches(ui: &mut egui::Ui, lang: &str, offered: &Offered, items: &[Switch], changes: &mut BTreeMap<String, bool>) {
+    for (tag, label) in items {
+        let Some(feature) = offered.get(tag) else { continue };
+        if let Some(on) = tri_checkbox(ui, crate::i18n::tr(lang, label), feature) {
+            changes.insert(tag.to_string(), on);
+        }
+    }
+}
+
+/// Mutually exclusive choices, as checkboxes: choosing one turns the others off. Choosing a checked
+/// one turns it off.
+fn choices(ui: &mut egui::Ui, lang: &str, offered: &Offered, items: &[Choice], changes: &mut BTreeMap<String, bool>) {
+    for (i, (label, tags)) in items.iter().enumerate() {
+        let Some(feature) = offered.choice(tags) else { continue };
+        let Some(on) = tri_checkbox(ui, crate::i18n::tr(lang, label), feature) else { continue };
+        for t in *tags {
+            changes.insert(t.to_string(), on);
+        }
+        if on {
+            for (j, (_, others)) in items.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                for t in others.iter().filter(|t| !tags.contains(t)) {
+                    changes.insert(t.to_string(), false);
+                }
+            }
+        }
+    }
+}
+
+/// Stylistic sets by the name their fonts give them, or the generic `Stylistic Set NN` when the
+/// selection's fonts name them differently.
+fn stylistic_sets(ui: &mut egui::Ui, lang: &str, offered: &Offered, changes: &mut BTreeMap<String, bool>) {
+    for set in &offered.sets {
+        let label = match &set.name {
+            Some(name) => format!("{name} ({})", set.tag),
+            None => format!("{} {:02}", crate::i18n::tr(lang, "Stylistic Set"), set.number),
+        };
+        if let Some(on) = tri_checkbox(ui, &label, set.feature) {
+            changes.insert(set.tag.clone(), on);
+        }
+    }
+}
+
+/// The features the selection's fonts offer, with their state over the selection.
 fn offered(app: &mut DesignApp) -> Offered {
     let v = app.session.execute("type.openTypeFeatures", &json!({})).unwrap_or(Value::Null);
-    let tags = v["features"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
-    let sets = v["stylisticSets"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|s| Some((u32::try_from(s["set"].as_u64()?).ok()?, s["name"].as_str()?.to_string()))).collect())
-        .unwrap_or_default();
-    Offered { tags, sets }
-}
-
-/// On/off switches the fonts offer; returns whether one changed.
-fn switches(ui: &mut egui::Ui, lang: &str, list: &mut Vec<String>, offered: &Offered, items: &[Switch]) -> bool {
-    let mut changed = false;
-    for (tag, label) in items.iter().filter(|(tag, _)| offered.has(tag)) {
-        let mut on = otf::is_on(list, tag);
-        if ui.checkbox(&mut on, crate::rtl::widget(ui, crate::i18n::tr(lang, label))).changed() {
-            otf::set(list, tag, on);
-            changed = true;
-        }
+    let mut out = Offered::default();
+    for f in v["features"].as_array().into_iter().flatten() {
+        let (Some(tag), Some(applied), Some(available)) = (f["tag"].as_str(), f["applied"].as_str(), f["available"].as_str()) else { continue };
+        out.features.insert(tag.to_string(), Feature { applied: Covered::parse(applied), available: Covered::parse(available) });
     }
-    changed
-}
-
-/// Radio choices (one of several) for a group of tags; returns whether the choice changed.
-fn choices(ui: &mut egui::Ui, lang: &str, list: &mut Vec<String>, offered: &Offered, items: &[Choice]) -> bool {
-    let offered_items: Vec<&Choice> = items.iter().filter(|(_, tags)| offered.offers(tags)).collect();
-    // Nothing to choose between unless a choice besides the default is offered.
-    if offered_items.len() < 2 {
-        return false;
+    for s in v["stylisticSets"].as_array().into_iter().flatten() {
+        let (Some(number), Some(tag), Some(applied), Some(available)) =
+            (s["set"].as_u64(), s["tag"].as_str(), s["applied"].as_str(), s["available"].as_str())
+        else {
+            continue;
+        };
+        let Ok(number) = u32::try_from(number) else { continue };
+        let feature = Feature { applied: Covered::parse(applied), available: Covered::parse(available) };
+        out.features.insert(tag.to_string(), feature);
+        out.sets.push(Set { number, tag: tag.to_string(), name: s["name"].as_str().map(str::to_string), feature });
     }
-    let current =
-        offered_items.iter().position(|(_, tags)| tags.iter().all(|t| list.iter().any(|x| x == t)) && (!tags.is_empty() || !group_on(list, items)));
-    let mut picked = None;
-    for (i, (label, _)) in offered_items.iter().enumerate() {
-        if ui.radio(current == Some(i), crate::rtl::widget(ui, crate::i18n::tr(lang, label))).clicked() {
-            picked = Some(i);
-        }
-    }
-    let Some(i) = picked else { return false };
-    // Only the group's own tags change: the chosen tags go on, the rest of the group goes off.
-    for (_, tags) in items {
-        for t in *tags {
-            list.retain(|x| x != t);
-        }
-    }
-    if let Some((_, tags)) = offered_items.get(i) {
-        list.extend(tags.iter().map(|t| t.to_string()));
-    }
-    true
-}
-
-/// Whether any tag of a radio group is on (so the default choice is not).
-fn group_on(list: &[String], items: &[Choice]) -> bool {
-    items.iter().flat_map(|(_, tags)| tags.iter()).any(|t| list.iter().any(|x| x == t))
-}
-
-/// Stylistic sets, by the names their fonts give them; returns whether one changed.
-fn stylistic_sets(ui: &mut egui::Ui, list: &mut Vec<String>, offered: &Offered) -> bool {
-    let mut changed = false;
-    for (n, name) in &offered.sets {
-        let tag = format!("ss{n:02}");
-        let mut on = otf::is_on(list, &tag);
-        if ui.checkbox(&mut on, crate::rtl::widget(ui, format!("{name} ({tag})"))).changed() {
-            otf::set(list, &tag, on);
-            changed = true;
-        }
-    }
-    changed
+    out
 }
