@@ -394,10 +394,13 @@ impl Document {
         st.tables.clear();
         st.notes.clear();
         st.fix_notes();
+        st.endnotes.clear();
+        st.fix_endnotes();
         st.anchors.clear();
         st.xrefs.clear();
         st.index_refs.clear();
         st.objects.clear();
+        st.editorial.clear();
         st.fix_marks();
         st.rev += 1;
         Ok(())

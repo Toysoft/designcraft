@@ -66,7 +66,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         let r = t.range();
         let r = r.start.min(st.len())..r.end.min(st.len());
         st.delete(r.clone());
-        let id = st.insert_note(r.start, &text, para);
+        let id = st.insert_note(r.start, &text, para).ok_or_else(|| bad("footnote.insert", "the story's footnotes don't match their references"))?;
         sel.text = Some(TextSel { story: t.story, anchor: text.len(), focus: text.len(), frame: t.frame, cell: Some(CellAddr::footnote(id)) });
         Ok(json!({"story": t.story.0, "id": id}))
     })

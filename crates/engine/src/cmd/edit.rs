@@ -74,7 +74,7 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
         }
     }
     let use_clip = formatted && clip.as_ref().is_some_and(|(_, p)| text.as_ref().is_none_or(|x| x.replace("\r\n", "\n") == *p));
-    // Footnotes, cross-references and tables only paste into story text, not cells or footnotes.
+    // Notes, cross-references and tables only paste into story text, not cells or footnotes.
     if use_clip && let Some((slice, _)) = clip {
         let slice = if t.cell.is_some() { strip_objects(&slice) } else { (*slice).clone() };
         return s.edit(|d, sel| {
@@ -93,7 +93,13 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
 
 fn strip_objects(st: &designcraft_doc::Story) -> designcraft_doc::Story {
     let mut out = st.clone();
-    let marks = [designcraft_doc::FOOTNOTE_REF, designcraft_doc::XREF_MARK, designcraft_doc::TABLE_ANCHOR];
+    let marks = [
+        designcraft_doc::FOOTNOTE_REF,
+        designcraft_doc::ENDNOTE_REF,
+        designcraft_doc::NOTE_MARK,
+        designcraft_doc::XREF_MARK,
+        designcraft_doc::TABLE_ANCHOR,
+    ];
     while let Some(i) = out.text.find(marks) {
         let n = out.text[i..].chars().next().map_or(1, char::len_utf8);
         out.delete(i..i + n);

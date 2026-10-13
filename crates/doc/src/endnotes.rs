@@ -87,15 +87,18 @@ impl Story {
         Some(Arc::make_mut(n))
     }
 
-    /// Insert an endnote reference at `pos` with the given text. Returns the endnote id.
-    pub fn insert_endnote(&mut self, pos: usize, text: &str, para: ParaFormat) -> u64 {
+    /// Insert an endnote reference at `pos` with the given text. Returns the endnote id, or
+    /// `None` if the story has no endnote for the new reference.
+    pub fn insert_endnote(&mut self, pos: usize, text: &str, para: ParaFormat) -> Option<u64> {
         let pos = crate::story::floor_char_boundary(&self.text, pos.min(self.len()));
         let fmt = self.char_format_at(pos).clone();
         self.insert_with(pos, &ENDNOTE_REF.to_string(), fmt);
+        // A file may hold fewer endnotes than references; give every reference one.
+        self.fix_endnotes();
         let k = self.endnotes_before(pos);
-        let note = Arc::make_mut(&mut self.endnotes[k]);
+        let note = Arc::make_mut(self.endnotes.get_mut(k)?);
         note.text = Story::with_text(StoryId(0), text, para);
-        note.id
+        Some(note.id)
     }
 
     /// Insert empty endnotes for `n` new reference characters before which `k` references sit.
@@ -105,6 +108,17 @@ impl Story {
             let mut text = Story::new(StoryId(0));
             text.chars[0].format = CharFormat::default();
             self.endnotes.insert((k + i).min(self.endnotes.len()), Arc::new(Footnote { id, text }));
+        }
+    }
+
+    /// Make the endnote list match the reference characters (after wholesale text changes).
+    pub fn fix_endnotes(&mut self) {
+        let n = self.text.matches(ENDNOTE_REF).count();
+        if n < self.endnotes.len() {
+            self.endnotes.truncate(n);
+        } else if n > self.endnotes.len() {
+            let k = self.endnotes.len();
+            self.endnotes_inserted(k, n - k);
         }
     }
 

@@ -121,7 +121,9 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let style = d.endnote_options.para_style.clone();
         let story = d.story_mut(ts.story).ok_or_else(|| bad(ID, "no such story"))?;
-        let id = story.insert_endnote(at, &text, ParaFormat { style, ..Default::default() });
+        let id = story
+            .insert_endnote(at, &text, ParaFormat { style, ..Default::default() })
+            .ok_or_else(|| bad(ID, "the story's endnotes don't match its references"))?;
         let caret = at + designcraft_doc::ENDNOTE_REF.len_utf8();
         if let Some(t) = &mut sel.text {
             (t.anchor, t.focus) = (caret, caret);

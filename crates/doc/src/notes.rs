@@ -166,15 +166,18 @@ impl Story {
         self.text.match_indices(FOOTNOTE_REF).nth(k).map(|(i, _)| i)
     }
 
-    /// Insert a footnote reference at `pos` with the given footnote text. Returns the footnote id.
-    pub fn insert_note(&mut self, pos: usize, text: &str, para: ParaFormat) -> u64 {
+    /// Insert a footnote reference at `pos` with the given footnote text. Returns the footnote
+    /// id, or `None` if the story has no footnote for the new reference.
+    pub fn insert_note(&mut self, pos: usize, text: &str, para: ParaFormat) -> Option<u64> {
         let pos = crate::story::floor_char_boundary(&self.text, pos.min(self.len()));
         let fmt = self.char_format_at(pos).clone();
         self.insert_with(pos, &FOOTNOTE_REF.to_string(), fmt);
+        // A file may hold fewer footnotes than references; give every reference one.
+        self.fix_notes();
         let k = self.notes_before(pos);
-        let note = Arc::make_mut(&mut self.notes[k]);
+        let note = Arc::make_mut(self.notes.get_mut(k)?);
         note.text = Story::with_text(StoryId(0), text, para);
-        note.id
+        Some(note.id)
     }
 
     pub(crate) fn next_note_id(&self) -> u64 {
@@ -283,8 +286,8 @@ mod tests {
     #[test]
     fn references_own_notes_in_order() {
         let mut s = st("alpha beta gamma");
-        let b = s.insert_note(10, "second", ParaFormat::default());
-        let a = s.insert_note(5, "first", ParaFormat::default());
+        let b = s.insert_note(10, "second", ParaFormat::default()).unwrap();
+        let a = s.insert_note(5, "first", ParaFormat::default()).unwrap();
         s.check().unwrap();
         assert_eq!(s.notes.len(), 2);
         assert_eq!(s.notes[0].id, a);

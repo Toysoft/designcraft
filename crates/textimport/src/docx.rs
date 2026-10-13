@@ -305,9 +305,13 @@ impl Ctx {
                         self.blocks(&note, &mut ns, false);
                         // Word puts the reference mark in the note text: we generate the number.
                         let len = st.len();
-                        let id = st.insert_note(len, "", ParaFormat::default());
-                        if let Some(n) = st.note_mut(id) {
-                            n.text = ns;
+                        match st.insert_note(len, "", ParaFormat::default()) {
+                            Some(id) => {
+                                if let Some(n) = st.note_mut(id) {
+                                    n.text = ns;
+                                }
+                            }
+                            None => self.warnings.push("A footnote in the Word file could not be imported.".into()),
                         }
                     }
                     continue;
