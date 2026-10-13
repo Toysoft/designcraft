@@ -634,7 +634,7 @@ pub fn status_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                             "{} ▾",
                             crate::i18n::count_label(
                                 &app.ui.language,
-                                if errors == 1 && app.ui.language != "uk" { "error" } else { "errors" },
+                                if errors == 1 && !matches!(app.ui.language.as_str(), "uk" | "pl") { "error" } else { "errors" },
                                 errors
                             )
                         )

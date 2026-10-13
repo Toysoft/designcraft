@@ -99,7 +99,7 @@ Interface strings translated, of 1,724 measured. Detail: [docs/localization-pari
 | Korean | ko | none | 0% |
 | Vietnamese | vi | none | 0% |
 
-Also shipped: Italian (85%), Ukrainian (83%).
+Also shipped: Italian (85%), Ukrainian (83%), Polish (99%).
 
 ## Upcoming
 

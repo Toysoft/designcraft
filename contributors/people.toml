@@ -25,6 +25,11 @@ sync_github_name = false
 [people.emanuelebonaventura]
 display_name = "insanityxoff"
 
+[people.lewandowskit]
+real_name = "Tomasz Lewandowski"
+display_name = "Tomasz Lewandowski"
+sync_github_name = false
+
 [people.moppeeer]
 sync_github_name = true
 
