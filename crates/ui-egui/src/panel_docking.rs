@@ -69,6 +69,14 @@ fn legacy(app: &DesignApp) -> Layout<String> {
     layout
 }
 
+/// The panel showing in the dock's first tab group (its active tab), if the dock is a tab group.
+fn active_root_panel(layout: &Layout<String>) -> Option<String> {
+    match &layout.root {
+        Some(Node::Tabs { panels, active }) => panels.get(*active).cloned(),
+        _ => None,
+    }
+}
+
 fn first_root(layout: &Layout<String>, except: &str) -> Option<String> {
     let root = Layout { root: layout.root.clone(), floating: Vec::new() };
     root.panels().into_iter().find(|p| p.as_str() != except).cloned()
@@ -200,6 +208,8 @@ fn change(app: &mut DesignApp, operation: &str, params: &Value) -> Result<Value,
         return Err("saved panel layout is invalid; reset the workspace first".into());
     }
     let mut layout = app.ui.docking.clone().unwrap_or_else(|| legacy(app));
+    // The tab that was showing stays showing, whichever panel moved; only "activate" changes it.
+    let previous_active = active_root_panel(&layout);
     let mut hidden: std::collections::BTreeMap<_, _> =
         app.ui.docking_hidden.iter().filter(|(id, _)| normalize(id).is_some()).take(64).map(|(id, at)| (id.clone(), at.clone())).collect();
     let mut restored = false;
@@ -258,15 +268,22 @@ fn change(app: &mut DesignApp, operation: &str, params: &Value) -> Result<Value,
             layout.apply(Action::Close { panel: panel.into() }).map_err(|e| e.to_string())?;
         }
         _ => {
-            if !layout.contains(&panel.to_string())
-                && let Some(location) = hidden.get(panel)
-            {
-                // A missing neighbor is allowed: the normal visible dock becomes the fallback.
-                let _ = layout.restore(panel.into(), location);
+            if !layout.contains(&panel.to_string()) {
+                if let Some(location) = hidden.get(panel) {
+                    // A missing neighbor is allowed: the normal visible dock becomes the fallback.
+                    let _ = layout.restore(panel.into(), location);
+                }
+                ensure(&mut layout, panel)?;
             }
-            ensure(&mut layout, panel)?;
+            layout.apply(Action::Activate { panel: panel.into() }).map_err(|e| e.to_string())?;
             hidden.remove(panel);
         }
+    }
+    if operation != "activate"
+        && let Some(previous) =
+            previous_active.filter(|previous| previous != panel && Layout { root: layout.root.clone(), floating: Vec::new() }.contains(previous))
+    {
+        let _ = layout.apply(Action::Activate { panel: previous });
     }
     app.ui.docking = Some(layout);
     app.ui.docking_hidden = hidden;
@@ -377,7 +394,11 @@ pub(crate) fn show(app: &mut DesignApp, ui: &mut egui::Ui) -> bool {
         }
         ui.ctx().data_mut(|data| data.remove::<LegacyDrag>(egui::Id::new("designcraft-panel-docking").with("legacy-origin")));
     }
-    for action in output.actions {
+    let mut actions = output.actions;
+    if let Some(panel) = ui.ctx().data_mut(|data| data.remove_temp::<String>(close_request_id())) {
+        actions.push(Action::Close { panel });
+    }
+    for action in actions {
         if let Err(error) = app.run("window.panel.layout", json!({"action": action})) {
             app.ui.status = error;
         }
@@ -386,6 +407,15 @@ pub(crate) fn show(app: &mut DesignApp, ui: &mut egui::Ui) -> bool {
     true
 }
 
+/// Where the icon column was last drawn: the flyout opens beside it.
+pub(crate) fn rail_rect_id() -> egui::Id {
+    egui::Id::new("designcraft-icon-rail-rect")
+}
+
+/// The icon column (the panel bar). Every panel is listed except those hidden with its right-click
+/// menu. A docked or floating panel shows as open; clicking its icon selects it in the dock. An
+/// absent panel opens as the flyout beside the column, which never changes the layout. Dragging an
+/// icon starts a dock gesture.
 fn icon_rail(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
     let column = egui::Panel::right("shared-panel-icons")
@@ -393,19 +423,28 @@ fn icon_rail(app: &mut DesignApp, ui: &mut egui::Ui) {
         .resizable(false)
         .frame(egui::Frame::NONE.fill(t.panel))
         .show(ui, |ui| {
+            // Registered before the icons, so the icons take their own clicks and this takes the rest.
+            let background = ui.interact(ui.max_rect(), ui.id().with("rail-background"), egui::Sense::click());
+            background.context_menu(|ui| rail_menu(app, ui));
             egui::ScrollArea::vertical().id_salt("shared-panel-icons-scroll").show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                for &(id, label, icon) in crate::dock::DOCK_TABS.iter().chain(crate::dock::ICON_PANELS) {
-                    if app.ui.docking.as_ref().is_some_and(|layout| {
-                        layout.contains(&id.to_string()) && (app.ui.dock_expanded || layout.floating.iter().any(|g| g.panels.iter().any(|p| p == id)))
-                    }) {
-                        continue;
-                    }
-
+                let listed: Vec<(&str, &str, &str)> = crate::dock::DOCK_TABS
+                    .iter()
+                    .chain(crate::dock::ICON_PANELS)
+                    .copied()
+                    .filter(|(id, _, _)| !app.ui.rail_hidden.iter().any(|hidden| hidden == id))
+                    .collect();
+                for (id, label, icon) in listed {
+                    let docked = app.ui.docking.as_ref().is_some_and(|layout| layout.contains(&id.to_string()));
+                    let open = docked || app.ui.open_panel.as_deref() == Some(id);
                     let response =
-                        crate::icons::button(ui, icon, 28.0, false, crate::i18n::tr(&app.ui.language, label)).interact(egui::Sense::click_and_drag());
+                        crate::icons::button(ui, icon, 28.0, open, crate::i18n::tr(&app.ui.language, label)).interact(egui::Sense::click_and_drag());
                     if response.clicked() {
-                        let _ = app.run("window.panel.activate", json!({"panel":id}));
+                        if docked {
+                            let _ = app.run("window.panel.activate", json!({"panel": id}));
+                        } else {
+                            app.ui.open_panel = if app.ui.open_panel.as_deref() == Some(id) { None } else { Some(id.to_string()) };
+                        }
                     }
                     legacy_tab(app, ui, id, &response);
                 }
@@ -413,7 +452,25 @@ fn icon_rail(app: &mut DesignApp, ui: &mut egui::Ui) {
         })
         .response
         .rect;
-    let _ = column;
+    ui.ctx().data_mut(|data| data.insert_temp(rail_rect_id(), column));
+}
+
+/// The icon column's menu: which panels it lists.
+fn rail_menu(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let language = app.ui.language.clone();
+    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&language, "Show in Panel Bar")).strong());
+    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        for (id, label, _) in crate::dock::DOCK_TABS.iter().chain(crate::dock::ICON_PANELS) {
+            let mut shown = !app.ui.rail_hidden.iter().any(|hidden| hidden == id);
+            if ui.checkbox(&mut shown, crate::rtl::widget(ui, crate::i18n::tr(&language, label))).changed() {
+                if shown {
+                    app.ui.rail_hidden.retain(|hidden| hidden != id);
+                } else {
+                    app.ui.rail_hidden.push(id.to_string());
+                }
+            }
+        }
+    });
 }
 
 pub(crate) fn legacy_tab(app: &mut DesignApp, ui: &mut egui::Ui, panel: &str, response: &egui::Response) {
@@ -478,6 +535,19 @@ pub(crate) fn panel_menu(app: &mut DesignApp, ui: &mut egui::Ui, panel: &str) {
 
 struct PanelContent<'a>(&'a mut DesignApp);
 impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
+    fn group_header_width(&self, _panels: &[String], _active: &String, floating: bool) -> f32 {
+        if floating { 24.0 } else { 0.0 }
+    }
+    fn group_header(&mut self, ui: &mut egui::Ui, _panels: &[String], active: &String, floating: bool) {
+        if !floating {
+            return;
+        }
+        let close = egui::Button::new(egui::RichText::new("×").size(15.0)).frame(false);
+        let response = ui.add_sized(ui.available_size(), close).on_hover_text(crate::i18n::tr(&self.0.ui.language, "Close Panel"));
+        if response.clicked() {
+            ui.ctx().data_mut(|data| data.insert_temp(close_request_id(), active.clone()));
+        }
+    }
     fn body(&mut self, ui: &mut egui::Ui, id: &String) {
         egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -492,6 +562,11 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
     fn action_label(&mut self, ui: &egui::Ui, logical: &str, font: &egui::FontId, color: egui::Color32) -> egui::WidgetText {
         egui::WidgetText::Galley(crate::rtl::plain(ui.ctx(), logical, font.clone(), color))
     }
+}
+
+/// The panel whose floating window's close button was clicked this frame.
+fn close_request_id() -> egui::Id {
+    egui::Id::new("designcraft-panel-close-request")
 }
 
 /// Close the last explicitly opened panel through the same validated layout transaction.

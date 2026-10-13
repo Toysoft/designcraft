@@ -622,3 +622,22 @@ fn legacy_dock_menu_button_opens_the_active_panel_menu() {
     assert_eq!(h.state().session.active().unwrap().doc.page_count(), pages + 1);
     assert!(!egui::Popup::is_any_open(&h.ctx));
 }
+
+#[test]
+fn activating_a_docked_panel_selects_its_tab_without_adding_it_again() {
+    let mut app = app();
+    app.run("window.panel.activate", json!({"panel": "pages"})).unwrap();
+    let count = app.ui.docking.as_ref().unwrap().panels().len();
+    app.run("window.panel.activate", json!({"panel": "layers"})).unwrap();
+    let layout = app.ui.docking.as_ref().unwrap();
+    assert_eq!(layout.panels().len(), count, "{layout:?}");
+    assert_eq!(active_root_panel(layout).as_deref(), Some("layers"));
+}
+
+#[test]
+fn detaching_a_panel_keeps_the_tab_that_was_showing() {
+    let mut app = app();
+    app.run("window.panel.activate", json!({"panel": "layers"})).unwrap();
+    app.run("window.panel.float", json!({"panel": "properties", "x": 50, "y": 70, "width": 330, "height": 410})).unwrap();
+    assert_eq!(active_root_panel(app.ui.docking.as_ref().unwrap()).as_deref(), Some("layers"));
+}

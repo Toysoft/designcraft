@@ -229,6 +229,9 @@ pub struct UiState {
     pub docking: Option<craft_ui::docking::Layout<String>>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub docking_hidden: std::collections::BTreeMap<String, craft_ui::docking::Location<String>>,
+    /// Panels the icon column does not list (right-click the column to choose). Empty: all listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rail_hidden: Vec<String>,
     /// Invalidates in-flight gestures when a workspace is replaced.
     #[serde(skip)]
     pub docking_generation: u64,
@@ -337,6 +340,7 @@ impl Default for UiState {
             floating: Vec::new(),
             docking: None,
             docking_hidden: Default::default(),
+            rail_hidden: Vec::new(),
             docking_generation: 0,
             docking_raise: None,
             docking_opened: None,

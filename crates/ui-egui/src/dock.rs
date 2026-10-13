@@ -2,6 +2,7 @@
 //! column whose panels open as flyouts beside the dock.
 
 use egui::{Color32, Sense, Stroke, vec2};
+use serde_json::json;
 
 use crate::theme::{Tokens, semibold};
 use crate::{DesignApp, icons, panels};
@@ -115,27 +116,34 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         );
     }
     // Collapsed icon strip (37 pt) to the left of the panel stack.
-    egui::Panel::right("icon_column").exact_size(37.0).resizable(false).frame(egui::Frame::NONE.fill(t.panel)).show(ui, |ui| {
-        dock_header(ui, &t, "«");
-        ui.add_space(4.0);
-        ui.vertical_centered(|ui| {
-            for (id, label, icon) in ICON_PANELS {
-                let open = app.ui.open_panel.as_deref() == Some(*id);
-                let floats = app.ui.floating.iter().any(|(p, _)| p == id);
-                let response =
-                    icons::button(ui, icon, 28.0, open || floats, crate::i18n::tr(&app.ui.language, label)).interact(Sense::click_and_drag());
-                if response.clicked() {
-                    if floats {
-                        ui.ctx().move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("floating_panel", *id))));
-                    } else {
-                        app.ui.open_panel = if open { None } else { Some(id.to_string()) };
+    let column = egui::Panel::right("icon_column")
+        .exact_size(37.0)
+        .resizable(false)
+        .frame(egui::Frame::NONE.fill(t.panel))
+        .show(ui, |ui| {
+            dock_header(ui, &t, "«");
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| {
+                for (id, label, icon) in ICON_PANELS {
+                    let open = app.ui.open_panel.as_deref() == Some(*id);
+                    let floats = app.ui.floating.iter().any(|(p, _)| p == id);
+                    let response =
+                        icons::button(ui, icon, 28.0, open || floats, crate::i18n::tr(&app.ui.language, label)).interact(Sense::click_and_drag());
+                    if response.clicked() {
+                        if floats {
+                            ui.ctx().move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("floating_panel", *id))));
+                        } else {
+                            app.ui.open_panel = if open { None } else { Some(id.to_string()) };
+                        }
                     }
+                    crate::panel_docking::legacy_tab(app, ui, id, &response);
+                    ui.add_space(1.0);
                 }
-                crate::panel_docking::legacy_tab(app, ui, id, &response);
-                ui.add_space(1.0);
-            }
-        });
-    });
+            });
+        })
+        .response
+        .rect;
+    ui.ctx().data_mut(|data| data.insert_temp(crate::panel_docking::rail_rect_id(), column));
 }
 
 /// 11 pt dock header strip with a collapse chevron.
@@ -148,15 +156,21 @@ fn dock_header(ui: &mut egui::Ui, t: &Tokens, chevron: &str) {
 
 /// A panel opened from the icon column, shown as a floating flyout next to the dock.
 pub fn flyout(app: &mut DesignApp, ctx: &egui::Context) {
-    if app.ui.docking.is_some() {
+    let Some(id) = app.ui.open_panel.clone() else { return };
+    // A panel already in the dock or floating is selected there, never shown twice.
+    if app.ui.docking.as_ref().is_some_and(|layout| layout.contains(&id)) {
+        app.ui.open_panel = None;
+        let _ = app.run("window.panel.activate", json!({"panel": id}));
         return;
     }
-    let Some(id) = app.ui.open_panel.clone() else { return };
     let t = Tokens::get(ctx);
     let label = crate::i18n::tr(&app.ui.language, ICON_PANELS.iter().find(|p| p.0 == id).map(|p| p.1).unwrap_or("Panel")).to_owned();
     let screen = ctx.content_rect();
-    let dock_w = if app.ui.dock_expanded { ctx.memory(|m| m.area_rect(egui::Id::new("dock")).map(|r| r.width())).unwrap_or(280.0) } else { 0.0 };
-    let pos = egui::pos2(screen.max.x - 37.0 - dock_w - 262.0, 120.0);
+    // Beside the icon column wherever it is drawn, so the flyout never covers the column.
+    let rail = ctx
+        .data(|data| data.get_temp::<egui::Rect>(crate::panel_docking::rail_rect_id()))
+        .unwrap_or_else(|| egui::Rect::from_min_max(egui::pos2(screen.max.x - 37.0, screen.min.y), screen.max));
+    let pos = egui::pos2(rail.min.x - 262.0, 120.0);
     let mut open = true;
     egui::Area::new(egui::Id::new("panel_flyout")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(t.panel).inner_margin(egui::Margin::same(0)).show(ui, |ui| {
