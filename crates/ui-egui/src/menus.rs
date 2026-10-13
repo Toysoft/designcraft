@@ -8,6 +8,7 @@ use crate::{DesignApp, ScreenMode};
 pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.newDocumentDialog", "New Document…", Some("Cmd+N"), "{}"),
     ("app.openDialog", "Open…", Some("Cmd+O"), "{}"),
+    ("app.openRecent", "Open Recent File", None, "{index} — file.openRecent, with an alert when the file can't be opened"),
     ("app.placeDialog", "Place…", Some("Cmd+D"), "{}"),
     ("app.saveDialog", "Save As…", Some("Cmd+Shift+S"), "{}"),
     ("app.save", "Save", Some("Cmd+S"), "{}"),
@@ -205,6 +206,9 @@ pub const MENUS: &[(&str, &[&str])] = &[
         &[
             "ui:app.newDocumentDialog",
             "ui:app.openDialog",
+            ">Open Recent",
+            "cmd:file.clearRecent",
+            "<",
             "-",
             "cmd:file.close",
             "ui:app.save",
@@ -766,6 +770,16 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             Ok(Value::Null)
         }
         "app.openDialog" => app.pick_and_open("open"),
+        "app.openRecent" => {
+            let index = p.get("index").cloned().unwrap_or(Value::Null);
+            let name = index
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| app.session.prefs.recent_files.get(i))
+                .map(|path| recent_label(path))
+                .unwrap_or_default();
+            app.open_named_file("file.openRecent", json!({"index": index}), name)
+        }
         "app.placeDialog" => app.pick_and_open("place"),
         "app.placeWithOptions" => {
             // Word/RTF Import Options: style mapping and conflicts before the text lands.
@@ -2084,6 +2098,9 @@ fn menu_items(app: &mut DesignApp, ui: &mut egui::Ui, items: &[Item], path: &str
                 let sub = format!("{path}/{name}");
                 let shown = crate::i18n::tr(&app.ui.language, name).to_owned();
                 menu_button(ui, crate::rtl::widget(ui, shown), |ui| {
+                    if sub == OPEN_RECENT {
+                        recent_menu_items(app, ui);
+                    }
                     hidden += menu_items(app, ui, children, &sub);
                 });
             }
@@ -2107,6 +2124,55 @@ fn menu_items(app: &mut DesignApp, ui: &mut egui::Ui, items: &[Item], path: &str
         }
     }
     hidden
+}
+
+/// The File › Open Recent submenu, whose files come before its fixed items.
+pub const OPEN_RECENT: &str = "File/Open Recent";
+
+/// A recent file's menu label: its file name.
+pub fn recent_label(path: &str) -> String {
+    std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string())
+}
+
+/// File › Open Recent's files (`app.openRecent {index}`), then a separator; nothing when empty.
+pub fn recent_items(app: &DesignApp) -> Vec<Item> {
+    let mut out: Vec<Item> = app
+        .session
+        .prefs
+        .recent_files
+        .iter()
+        .enumerate()
+        .map(|(i, path)| Item::Cmd { label: recent_label(path), id: "app.openRecent".into(), params: json!({"index": i}), shortcut: None })
+        .collect();
+    if !out.is_empty() {
+        out.push(Item::Sep);
+    }
+    out
+}
+
+/// The recent files at the top of File › Open Recent: file names (not translated), the full path
+/// as tooltip, dimmed when the file is gone (choosing it then says so).
+fn recent_menu_items(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let dim = crate::theme::Tokens::get(ui.ctx()).text_dim;
+    for it in recent_items(app) {
+        match it {
+            Item::Cmd { label, id, params, .. } => {
+                let path = params["index"].as_u64().and_then(|i| app.session.prefs.recent_files.get(i as usize)).cloned().unwrap_or_default();
+                let mut text = egui::RichText::new(label);
+                if !crate::chrome::recent_file_stat(ui.ctx(), &path).exists {
+                    text = text.color(dim);
+                }
+                if ui.button(crate::rtl::widget(ui, text)).on_hover_text(&path).clicked() {
+                    activate(app, &id, &params);
+                    ui.close();
+                }
+            }
+            Item::Sep => {
+                ui.separator();
+            }
+            Item::Sub(..) => {}
+        }
+    }
 }
 
 /// Every menu item as (menu path, label), for Edit › Menus.
@@ -3603,5 +3669,73 @@ mod tests {
         assert!(open, "hovering the visible portion still opens the submenu");
         let (_, Some((_, _, open))) = frame(500.0, vec![]) else { panic!("test menu remains open") };
         assert!(!open, "an open submenu closes when its row becomes fully clipped");
+    }
+
+    fn start_screen_texts(app: &mut crate::DesignApp) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx, "");
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// File › Open Recent: the files first (`app.openRecent {index}`), then Clear Recent Files.
+    #[test]
+    fn open_recent_lists_the_files_then_clear() {
+        let tree = menu_tree();
+        let file = &tree.iter().find(|(m, _)| *m == "File").unwrap().1;
+        let Some(Item::Sub(name, children)) = file.get(2) else { panic!("Open Recent after Open…: {:?}", file.get(2)) };
+        assert_eq!(format!("File/{name}"), OPEN_RECENT);
+        assert!(matches!(children.as_slice(), [Item::Cmd { id, .. }] if id == "file.clearRecent"));
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        assert!(recent_items(&app).is_empty());
+        assert!(!menu_enabled(&app, "file.clearRecent"));
+        app.session.prefs.note_recent_file("/work/a.designcraft");
+        app.session.prefs.note_recent_file("/work/b.idml");
+        let items = recent_items(&app);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| match i {
+                Item::Cmd { label, id, params, .. } => format!("{label} {id} {params}"),
+                Item::Sep => "-".into(),
+                Item::Sub(..) => "sub".into(),
+            })
+            .collect();
+        assert_eq!(labels, ["b.idml app.openRecent {\"index\":0}", "a.designcraft app.openRecent {\"index\":1}", "-"]);
+        assert!(menu_enabled(&app, "file.clearRecent"));
+        assert!(menu_enabled(&app, "app.openRecent"));
+    }
+
+    /// A recent file that is gone says so in an alert (and the start screen still lists it).
+    #[test]
+    fn open_recent_of_a_missing_file_alerts_and_the_start_screen_lists_recent_files() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        assert!(!start_screen_texts(&mut app).iter().any(|t| t == "Recent files"), "no section without recent files");
+        app.session.prefs.note_recent_file("/nonexistent/dc-recent/gone.designcraft");
+        assert!(app.run("app.openRecent", json!({"index": 0})).is_err());
+        let d = app.ui.dialog.take().expect("an alert");
+        assert_eq!(d.fields["title"], "Can't Open the File");
+        assert_eq!(d.fields["file"], "gone.designcraft");
+        assert!(d.fields["message"].as_str().unwrap().contains("can't be found"));
+        assert!(app.run("app.openRecent", json!({"index": 9})).is_err(), "out of range: an error, not a panic");
+        app.ui.dialog = None;
+        let texts = start_screen_texts(&mut app);
+        assert!(texts.iter().any(|t| t == "Recent files"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "gone"), "the card names it without `.designcraft`: {texts:?}");
     }
 }

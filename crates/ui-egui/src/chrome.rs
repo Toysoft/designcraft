@@ -712,6 +712,7 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
             });
             ui.add_space(20.0);
             community_card(app, ui);
+            recent_files(app, ui);
             ui.add_space(24.0);
             ui.label(crate::rtl::widget(
                 ui,
@@ -742,6 +743,117 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
         },
     );
     let _ = Content::Unassigned;
+}
+
+/// Recent files shown on the start screen (File › Open Recent has them all).
+const START_SCREEN_RECENT: usize = 8;
+
+/// Start screen: the most recent files as cards with the first page's picture (saved in the file)
+/// and the name; the full path is the tooltip. A file that is gone is dimmed and says so when
+/// clicked. Nothing when the list is empty.
+fn recent_files(app: &mut DesignApp, ui: &mut egui::Ui) {
+    if app.session.prefs.recent_files.is_empty() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    ui.add_space(24.0);
+    ui.label(crate::rtl::widget(
+        ui,
+        egui::RichText::new(crate::i18n::tr(&app.ui.language, "Recent files")).font(semibold(15.0)).color(t.text_strong),
+    ));
+    ui.add_space(8.0);
+    let rows: Vec<(usize, String)> = app.session.prefs.recent_files.iter().take(START_SCREEN_RECENT).cloned().enumerate().collect();
+    let mut open = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, path) in rows {
+            let stat = recent_file_stat(ui.ctx(), &path);
+            let there = stat.exists;
+            let modified = there.then_some(stat.modified);
+            let (cr, resp) = ui.allocate_exact_size(vec2(140.0, 170.0), Sense::click());
+            let resp = resp.on_hover_text(&path);
+            ui.painter().rect_filled(cr, 6.0, if resp.hovered() { t.hover } else { t.panel });
+            let area = egui::Rect::from_min_size(cr.min + vec2(20.0, 12.0), vec2(100.0, 108.0));
+            match modified.and_then(|m| recent_preview_texture(ui.ctx(), &path, m)) {
+                Some(tex) => {
+                    let size = tex.size_vec2();
+                    let k = (area.width() / size.x).min(area.height() / size.y);
+                    let pr = egui::Rect::from_center_size(area.center(), size * k);
+                    ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    ui.painter().rect_stroke(pr, 0.0, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+                }
+                // No picture (saved before files had one) or the file is gone: a blank page.
+                None => {
+                    let pr = egui::Rect::from_center_size(area.center(), vec2(62.0, 80.0));
+                    ui.painter().rect_filled(pr, 0.0, if there { Color32::from_gray(245) } else { Color32::from_gray(110) });
+                }
+            }
+            let color = if there { t.text_strong } else { t.text_dim };
+            // The name without `.designcraft`, on up to two lines (broken after a space or dash).
+            let label = crate::menus::recent_label(&path);
+            let name = label.strip_suffix(".designcraft").unwrap_or(&label).to_string();
+            let mut job = egui::text::LayoutJob::simple(name, semibold(12.0), color, cr.width() - 12.0);
+            job.wrap.max_rows = 2;
+            job.halign = egui::Align::Center;
+            let galley = ui.painter().layout_job(job);
+            ui.painter().galley(egui::pos2(cr.center().x, area.max.y + 8.0), galley, color);
+            if resp.clicked() {
+                open = Some(i);
+            }
+        }
+    });
+    if let Some(i) = open {
+        let _ = app.run("app.openRecent", json!({"index": i}));
+    }
+}
+
+/// How often a recent file is looked up on disk again, in ms: the start screen and the Open Recent
+/// menu draw every frame and must not touch the file system each time.
+const RECENT_STAT_MS: f64 = 3000.0;
+
+/// A recent file as last seen on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RecentStat {
+    pub exists: bool,
+    pub modified: Option<std::time::SystemTime>,
+    checked: f64,
+}
+
+/// Whether recent file `path` is there and when it last changed, looked up again at most every
+/// [`RECENT_STAT_MS`].
+pub(crate) fn recent_file_stat(ctx: &egui::Context, path: &str) -> RecentStat {
+    recent_file_stat_at(ctx, path, crate::now_ms())
+}
+
+fn recent_file_stat_at(ctx: &egui::Context, path: &str, now: f64) -> RecentStat {
+    let key = egui::Id::new(("recent_stat", path));
+    if let Some(st) = ctx.data(|d| d.get_temp::<RecentStat>(key))
+        && (0.0..RECENT_STAT_MS).contains(&(now - st.checked))
+    {
+        return st;
+    }
+    let meta = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file);
+    let st = RecentStat { exists: meta.is_some(), modified: meta.and_then(|m| m.modified().ok()), checked: now };
+    ctx.data_mut(|d| d.insert_temp(key, st.clone()));
+    st
+}
+
+/// The texture of a recent file's saved first-page picture, decoded once per file version.
+fn recent_preview_texture(ctx: &egui::Context, path: &str, modified: Option<std::time::SystemTime>) -> Option<egui::TextureHandle> {
+    type Cached = (Option<std::time::SystemTime>, Option<egui::TextureHandle>);
+    let key = egui::Id::new(("recent_preview", path));
+    if let Some((m, tex)) = ctx.data(|d| d.get_temp::<Cached>(key))
+        && m == modified
+    {
+        return tex;
+    }
+    let tex = designcraft_engine::cmd::recent_preview(path).and_then(|p| {
+        let size = [usize::try_from(p.width).ok()?, usize::try_from(p.height).ok()?];
+        (size[0].checked_mul(size[1])?.checked_mul(4)? == p.rgba.len()).then(|| {
+            ctx.load_texture(format!("recent_preview:{path}"), egui::ColorImage::from_rgba_unmultiplied(size, &p.rgba), egui::TextureOptions::LINEAR)
+        })
+    });
+    ctx.data_mut(|d| d.insert_temp::<Cached>(key, (modified, tex.clone())));
+    tex
 }
 
 /// Start screen: the ArtCraft community (Discord first) and project links.
@@ -798,6 +910,22 @@ mod tests {
     /// The Control panel's last control with nothing selected.
     const LAST_CONTROL: &str = "Jump to Next Column";
     const FIRST_CONTROL: &str = "Rotate 90° Counterclockwise";
+
+    /// The start screen and Open Recent menu look a recent file up on disk at most every few
+    /// seconds, not every frame.
+    #[test]
+    fn recent_files_are_looked_up_on_disk_every_few_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.designcraft");
+        std::fs::write(&path, b"x").unwrap();
+        let path = path.to_string_lossy().to_string();
+        let ctx = egui::Context::default();
+        let first = super::recent_file_stat_at(&ctx, &path, 10_000.0);
+        assert!(first.exists && first.modified.is_some());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(super::recent_file_stat_at(&ctx, &path, 10_000.0 + super::RECENT_STAT_MS - 1.0), first, "cached");
+        assert!(!super::recent_file_stat_at(&ctx, &path, 10_000.0 + super::RECENT_STAT_MS).exists, "looked up again");
+    }
 
     fn app() -> crate::DesignApp {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());

@@ -828,6 +828,14 @@ fn preferences(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog, max_he
                             d.fields.insert("recoveryMinutes".into(), json!(v));
                         }
                     });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Number of Recent Items to Display:"));
+                        let mut v = d.n("recentFilesMax").unwrap_or(20.0);
+                        if ui.add(egui::DragValue::new(&mut v).range(0.0..=f64::from(designcraft_engine::MAX_RECENT_FILES)).speed(0.2)).changed() {
+                            d.fields.insert("recentFilesMax".into(), json!(v.round()));
+                        }
+                    });
                 }
                 "type" => {
                     crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Type Options")).font(semibold(12.0)));
@@ -1998,6 +2006,7 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 json!({"scaleStrokes": d.b("scaleStrokes"), "dimensionsIncludeStroke": d.b("dimensionsIncludeStroke"), "transformationsAreTotals": d.b("transformationsAreTotals"), "absolutePageNumbers": d.b("absolutePageNumbers"), "highlightHj": d.b("highlightHj"), "highlightKeeps": d.b("highlightKeeps"), "highlightCustomTracking": d.b("highlightCustomTracking"), "highlightSubstitutedFonts": d.b("highlightSubstitutedFonts"), "richBlackOutput": d.b("richBlackOutput"), "typographersQuotes": d.b("typographersQuotes"), "showFontNamesInEnglish": d.b("showFontNamesInEnglish"), "smartTextReflow": d.b("smartTextReflow"),
                     "autocorrect": d.b("autocorrect"), "showAddedText": d.b("showAddedText"), "showNoteAnchors": d.b("showNoteAnchors"),
                     "recoveryMinutes": d.n("recoveryMinutes").unwrap_or(0.5),
+                    "recentFilesMax": d.n("recentFilesMax").unwrap_or(20.0).clamp(0.0, f64::from(designcraft_engine::MAX_RECENT_FILES)) as u32,
                     "autocorrectList": d.s("autocorrectText").lines().filter_map(|l| {
                         let (a, b) = l.split_once('→').or_else(|| l.split_once("->"))?;
                         let (a, b) = (a.trim().to_lowercase(), b.trim().to_string());

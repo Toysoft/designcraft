@@ -983,6 +983,12 @@ impl DesignApp {
             Some(path) => std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string()),
             None => params.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
         };
+        self.open_named_file(cmd, params, file)
+    }
+
+    /// [`Self::open_file`] for a command whose params don't name the file: `file` is shown in the
+    /// alert or warnings.
+    pub fn open_named_file(&mut self, cmd: &str, params: Value, file: String) -> Result<Value, String> {
         let r = self.run(cmd, params);
         if let Err(e) = &r {
             let title = if cmd == "file.place" { "Can't Place the File" } else { "Can't Open the File" };

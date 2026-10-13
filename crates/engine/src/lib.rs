@@ -201,6 +201,31 @@ pub struct Prefs {
     pub show_note_anchors: bool,
     /// Preferences › File Handling: minutes between document recovery saves.
     pub recovery_minutes: f64,
+    /// File › Open Recent: documents opened or saved, most recent first.
+    pub recent_files: Vec<String>,
+    /// Preferences › File Handling › Number of Recent Items to Display (0 keeps no list).
+    pub recent_files_max: u32,
+}
+
+/// The most recent files Preferences lets File › Open Recent keep.
+pub const MAX_RECENT_FILES: u32 = 100;
+
+impl Prefs {
+    /// Move `path` to the front of File › Open Recent (no duplicates, at most `recent_files_max`).
+    pub fn note_recent_file(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        self.recent_files.retain(|p| p != path);
+        self.recent_files.insert(0, path.to_string());
+        self.trim_recent_files();
+    }
+
+    /// Drop the entries beyond `recent_files_max` (capped at `MAX_RECENT_FILES`).
+    pub fn trim_recent_files(&mut self) {
+        self.recent_files_max = self.recent_files_max.min(MAX_RECENT_FILES);
+        self.recent_files.truncate(self.recent_files_max as usize);
+    }
 }
 
 /// A starter autocorrect list (common English typing slips).
@@ -249,6 +274,8 @@ impl Default for Prefs {
             show_added_text: true,
             show_note_anchors: true,
             recovery_minutes: 0.5,
+            recent_files: Vec::new(),
+            recent_files_max: 20,
         }
     }
 }

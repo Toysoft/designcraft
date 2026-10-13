@@ -590,7 +590,10 @@ mod tests {
         s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": text.len()})).unwrap();
         s.execute("type.char", &json!({"fontFamily": NAMED, "fontStyle": "Regular"})).unwrap();
         let src = dir.join("src").join("Fallback.designcraft");
-        s.execute("file.save", &json!({"path": src.to_string_lossy()})).unwrap();
+        // Written without File › Save's preview: drawing it before the document's fonts load would
+        // pull in a system font that covers these characters (Unifont CSUR does) and draws them
+        // ahead of the document's own fonts in this process.
+        std::fs::write(&src, crate::cmd::to_bytes(&s.doc().unwrap().doc)).unwrap();
         let mut s = Session::new();
         assert_eq!(s.execute("file.open", &json!({"path": src.to_string_lossy()})).unwrap()["documentFonts"], 3);
 

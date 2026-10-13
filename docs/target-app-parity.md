@@ -1,6 +1,6 @@
 # DesignCraft parity with Adobe InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (cancelable macOS Dock Quit) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (File ▸ Open Recent) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
 
 The authoritative assessment of how close DesignCraft is to Adobe InDesign. [ROADMAP.md](../ROADMAP.md)
 summarizes it; [gaps.md](gaps.md) lists every known shortfall one at a time; the feature-by-feature
@@ -220,7 +220,7 @@ table is the one summed.
 | Output & production | 92% | 55% | 40–70 | PDF/X-4 only (no X-1a/X-3), no PDF/print presets or `.joboptions`, print via craft-print (CUPS/Windows), no trapping; Output Preview panel |
 | XML & automation | 100% | 35% | (ecosystem dimension) | no ExtendScript/UXP; XML structure depth |
 | View & navigation | 100% | 65% | 10–20 | Navigator, display badges, Show/Hide extras (content grabber, live corners) |
-| Undo, history, saving | 100% | 70% | 5–10 | Undo/Redo name the action; File ▸ Open Recent |
+| Undo, history, saving | 100% | 70% | 5–10 | Undo/Redo name the action |
 | Accessibility | 100% | 50% | 15–25 | tagged PDF exists; PDF/UA validation, reading order depth, screen-reader support in the UI |
 
 ## Remaining effort and calibration

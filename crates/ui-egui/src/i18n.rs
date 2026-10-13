@@ -39,6 +39,29 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("New", ["Neu", "Nouveau", "Nuevo", "新規", "新建"]),
     ("New Document…", ["Neues Dokument …", "Nouveau document…", "Nuevo documento…", "新規ドキュメント…", "新建文档…"]),
     ("Open…", ["Öffnen …", "Ouvrir…", "Abrir…", "開く…", "打开…"]),
+    (
+        "Open Recent",
+        ["Zuletzt verwendete Datei öffnen", "Ouvrir les fichiers récents", "Abrir recientes", "最近使用したファイルを開く", "打开最近的文件"],
+    ),
+    (
+        "Open Recent File",
+        ["Zuletzt verwendete Datei öffnen", "Ouvrir un fichier récent", "Abrir archivo reciente", "最近使用したファイルを開く", "打开最近的文件"],
+    ),
+    (
+        "Clear Recent Files",
+        ["Liste leeren", "Effacer les fichiers récents", "Borrar archivos recientes", "最近使用したファイルをクリア", "清除最近的文件"],
+    ),
+    ("Recent files", ["Zuletzt geöffnet", "Fichiers récents", "Archivos recientes", "最近使用したファイル", "最近的文件"]),
+    (
+        "Number of Recent Items to Display:",
+        [
+            "Anzahl zuletzt verwendeter Dateien:",
+            "Nombre de fichiers récents à afficher :",
+            "Número de elementos recientes:",
+            "最近使用したファイルの表示数:",
+            "最近项目显示数量：",
+        ],
+    ),
     ("Close", ["Schließen", "Fermer", "Cerrar", "閉じる", "关闭"]),
     ("Save", ["Speichern", "Enregistrer", "Guardar", "保存", "保存"]),
     ("Save As…", ["Speichern unter …", "Enregistrer sous…", "Guardar como…", "別名で保存…", "另存为…"]),

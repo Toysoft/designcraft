@@ -965,6 +965,11 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Ruler Units", "وحدات المسطرة"),
     ("Save Swatches for Exchange…", "حفظ عينات الألوان للتبادل…"),
     ("Save recovery data every:", "حفظ بيانات الاسترداد كل:"),
+    ("Open Recent", "فتح الملفات الأخيرة"),
+    ("Open Recent File", "فتح ملف حديث"),
+    ("Clear Recent Files", "مسح الملفات الأخيرة"),
+    ("Recent files", "الملفات الأخيرة"),
+    ("Number of Recent Items to Display:", "عدد العناصر الأخيرة المعروضة:"),
     ("Saves which bars show and where the panels are.", "يحفظ الأشرطة الظاهرة ومواضع اللوحات."),
     ("Search:", "البحث:"),
     (

@@ -5,6 +5,7 @@
 //! - `assets/<id>.<ext>`: embedded placed files, byte-for-byte: one per distinct file, and only
 //!   the ones the document references (see [`Document::compact_assets`])
 //! - `meta.json`: format version and generator
+//! - `preview.png` (optional): a small picture of the first page, for the start screen's recent files
 //!
 //! Older single-file JSON documents (assets as base64 in `assetData`) still open.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -46,6 +47,11 @@ fn ext_for(mime: &str) -> &'static str {
 /// Serialize a document to `.designcraft` bytes. The file holds each distinct placed file once
 /// and leaves out assets nothing references; `doc` itself keeps them (undo can bring them back).
 pub fn save(doc: &Document) -> Result<Vec<u8>, FormatError> {
+    save_with_preview(doc, None)
+}
+
+/// [`save`], plus `preview` (PNG bytes) as `preview.png`.
+pub fn save_with_preview(doc: &Document, preview: Option<&[u8]>) -> Result<Vec<u8>, FormatError> {
     let mut compact = doc.clone();
     compact.compact_assets();
     let doc = &compact;
@@ -60,6 +66,10 @@ pub fn save(doc: &Document) -> Result<Vec<u8>, FormatError> {
         z.start_file("meta.json", deflate).map_err(io)?;
         let meta = json!({"format": "designcraft", "version": VERSION, "generator": concat!("DesignCraft ", env!("CARGO_PKG_VERSION"))});
         z.write_all(meta.to_string().as_bytes()).map_err(|e| FormatError::Io(e.to_string()))?;
+        if let Some(png) = preview {
+            z.start_file(PREVIEW, stored).map_err(io)?;
+            z.write_all(png).map_err(|e| FormatError::Io(e.to_string()))?;
+        }
         z.start_file("document.json", deflate).map_err(io)?;
         let json = serde_json::to_vec_pretty(doc).map_err(|e| FormatError::Io(e.to_string()))?;
         z.write_all(&json).map_err(|e| FormatError::Io(e.to_string()))?;
@@ -76,6 +86,25 @@ pub fn save(doc: &Document) -> Result<Vec<u8>, FormatError> {
     }
     Ok(buf.into_inner())
 }
+
+/// The zip entry holding the first page's picture.
+pub const PREVIEW: &str = "preview.png";
+
+/// The PNG bytes of a `.designcraft` file's preview, reading only the zip's directory and that
+/// entry. None for files without one (saved before previews, or legacy JSON) or that aren't ours.
+pub fn read_preview<R: Read + std::io::Seek>(file: R) -> Option<Vec<u8>> {
+    let mut z = zip::ZipArchive::new(file).ok()?;
+    let mut f = z.by_name(PREVIEW).ok()?;
+    // A preview is small; a huge entry is not one we wrote.
+    if f.size() > MAX_PREVIEW_BYTES {
+        return None;
+    }
+    let mut v = Vec::new();
+    f.read_to_end(&mut v).ok()?;
+    Some(v)
+}
+
+const MAX_PREVIEW_BYTES: u64 = 4 << 20;
 
 /// Read `.designcraft` bytes (zip, or the legacy single JSON file).
 pub fn load(bytes: &[u8]) -> Result<Document, FormatError> {
@@ -404,6 +433,19 @@ mod tests {
         let mut v = serde_json::to_value(&d).unwrap();
         v["settings"].as_object_mut().unwrap().remove("glyphFallback").unwrap();
         assert!(load(&serde_json::to_vec(&v).unwrap()).unwrap().settings.glyph_fallback);
+    }
+
+    #[test]
+    fn the_preview_is_read_back_without_the_document() {
+        let d = Document::new(&NewDocument::default());
+        let png = b"\x89PNG fake".to_vec();
+        let bytes = save_with_preview(&d, Some(&png)).unwrap();
+        assert_eq!(read_preview(Cursor::new(&bytes)), Some(png));
+        assert!(load(&bytes).is_ok(), "the preview doesn't get in the way of opening");
+        // Files without one, legacy JSON and garbage have none.
+        assert_eq!(read_preview(Cursor::new(save(&d).unwrap())), None);
+        assert_eq!(read_preview(Cursor::new(b"{}".to_vec())), None);
+        assert_eq!(read_preview(Cursor::new(Vec::new())), None);
     }
 
     #[test]
