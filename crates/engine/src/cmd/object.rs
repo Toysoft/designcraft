@@ -1069,7 +1069,9 @@ fn transform_resize(s: &mut Session, p: &Value) -> Result<Value> {
     let sy = if sy.abs() < 1e-3 { 1e-3f64.copysign(sy) } else { sy };
     let m = Affine::translate((to.x0, to.y0)) * Affine::scale_non_uniform(sx, sy) * Affine::translate((-from.x0, -from.y0));
     let strokes = s.prefs.scale_strokes;
+    let k = (sx * sy).abs().sqrt();
     s.edit(|d, _| {
+        let mut stories = Vec::new();
         for id in &ids {
             let it = d.item_mut(*id).ok_or(designcraft_doc::DocError::NoItem(*id))?;
             if it.locked {
@@ -1078,8 +1080,16 @@ fn transform_resize(s: &mut Session, p: &Value) -> Result<Value> {
             if distribute {
                 let c = it.bounds().center();
                 it.xf = Affine::translate(m * c - c) * it.xf;
+            } else if scale_content && let Content::Text(t) = &it.content {
+                // The frame takes the scale as its shape, and its story's sizes scale with it (below),
+                // so the type keeps its own geometry instead of being stretched by the frame.
+                stories.push(t.story);
+                bake(it, it.xf.inverse() * m * it.xf);
+                if strokes {
+                    it.stroke.weight *= k;
+                }
             } else if scale_content {
-                scale_item(it, m, (sx * sy).abs().sqrt(), strokes);
+                scale_item(it, m, k, strokes);
             } else if matches!(it.content, Content::Group { .. }) {
                 it.xf = m * it.xf;
             } else {
@@ -1095,8 +1105,32 @@ fn transform_resize(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
         }
+        for sid in stories {
+            scale_story_sizes(d, sid, k);
+        }
         Ok(json!({"resized": ids.len()}))
     })
+}
+
+/// Multiplies the point size, leading and baseline shift of a story's text by `k`. The values are
+/// the ones its styles resolve to, written as the run's own, so a text frame scaled with its
+/// content keeps its text in proportion to the frame (as InDesign does).
+fn scale_story_sizes(d: &mut Document, sid: StoryId, k: f64) {
+    let styles = d.styles.clone();
+    let Some(st) = d.story_mut(sid) else { return };
+    let runs: Vec<(std::ops::Range<usize>, designcraft_doc::story::CharFormat)> = st.runs().map(|(r, f)| (r, f.clone())).collect();
+    for (range, format) in runs {
+        let Some(para) = st.paras.get(st.para_at(range.start)).cloned() else { continue };
+        let (_, base) = styles.resolve_para(&para);
+        let resolved = styles.resolve_char(&base, &format);
+        st.format_chars(range, |f| {
+            f.over.size = Some(resolved.size * k);
+            if let designcraft_doc::Leading::Points(l) = resolved.leading {
+                f.over.leading = Some(designcraft_doc::Leading::Points(l * k));
+            }
+            f.over.baseline_shift = Some(resolved.baseline_shift * k);
+        });
+    }
 }
 
 fn union_bounds(d: &Document, ids: &[ItemId]) -> Rect {
@@ -3325,5 +3359,50 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scale_text_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// Scales a text frame of "Hello" by `k` with its content (Cmd-drag); returns the frame's width
+    /// before and after, and the size its type resolves to.
+    fn scale_with_content(k: f64, size: Option<f64>) -> (f64, f64, f64) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Hello"})).unwrap();
+        let (id, sid) = (r["id"].as_u64().unwrap(), r["story"].as_u64().unwrap());
+        if let Some(size) = size {
+            s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 5})).unwrap();
+            s.execute("type.char", &json!({"attrs": {"size": size}})).unwrap();
+        }
+        let b = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+        let (w0, h0) = (b.width(), b.height());
+        s.execute(
+            "transform.resize",
+            &json!({"ids": [id], "from": [b.x0, b.y0, b.x0 + w0, b.y0 + h0], "to": [b.x0, b.y0, b.x0 + w0 * k, b.y0 + h0 * k], "content": true}),
+        )
+        .unwrap();
+        let b = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
+        s.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 5})).unwrap();
+        let resolved = s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["size"].as_f64().unwrap();
+        (b.width() / w0, resolved, h0)
+    }
+
+    #[test]
+    fn scaling_a_text_frame_with_content_scales_its_point_size() {
+        let (frame_scale, size, _) = scale_with_content(2.0, Some(10.0));
+        assert!((frame_scale - 2.0).abs() < 1e-6, "frame scaled: {frame_scale}");
+        assert!((size - 20.0).abs() < 1e-6, "10 pt text scales to 20 pt: {size}");
+    }
+
+    #[test]
+    fn a_style_size_is_scaled_too() {
+        // No local size: the 12 pt default of the paragraph style, written back as 24 pt.
+        let (_, size, _) = scale_with_content(2.0, None);
+        assert!((size - 24.0).abs() < 1e-6, "12 pt style scales to 24 pt: {size}");
     }
 }
