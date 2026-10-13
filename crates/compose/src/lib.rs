@@ -36,7 +36,7 @@ use designcraft_fonts::{FontDb, ScopedFonts};
 use designcraft_geom::{Point, Rect};
 
 use crate::breaker::{Break, Spacing};
-pub use crate::cache::Cache;
+pub use crate::cache::{Cache, ShownOn};
 use crate::notes::Notes;
 pub use crate::notes::{find_note, hit_note, note_caret};
 use crate::shape::{Glyph, StyleTable, SubstCtx};

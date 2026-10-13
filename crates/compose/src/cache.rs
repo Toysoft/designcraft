@@ -13,8 +13,28 @@ use designcraft_doc::{Document, Item, Story, StoryId, Styles, WrapMode};
 use crate::vars::RunningIndex;
 use crate::{ComposeOptions, ComposedStory};
 
-/// A story, composed for one absolute page (parent-page items) or for its own frames (`None`).
-type Key = (StoryId, Option<usize>);
+/// Where a story's frames are shown, which decides what its page-number markers and variables
+/// read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ShownOn {
+    /// In its own frames.
+    #[default]
+    Own,
+    /// As a parent item on this absolute document page.
+    Page(usize),
+    /// As a base parent's item on this parent spread (index into `parents`): markers show that
+    /// parent's prefix.
+    Parent(usize),
+}
+
+impl From<Option<usize>> for ShownOn {
+    fn from(page: Option<usize>) -> Self {
+        page.map_or(ShownOn::Own, ShownOn::Page)
+    }
+}
+
+/// A story, composed for where it is shown.
+type Key = (StoryId, ShownOn);
 
 struct Entry {
     sig: Vec<usize>,
@@ -61,12 +81,21 @@ impl Cache {
     /// `None` for a story's own frames. Pages are identified by index, not name: names repeat when
     /// sections restart their numbering.
     pub fn get(&self, doc: &Document, sid: StoryId, page: Option<usize>) -> Arc<ComposedStory> {
+        self.get_on(doc, sid, page.into())
+    }
+
+    /// [`Cache::get`] for any [`ShownOn`].
+    pub fn get_on(&self, doc: &Document, sid: StoryId, on: ShownOn) -> Arc<ComposedStory> {
         let Some(story) = doc.stories.get(&sid) else { return Arc::new(ComposedStory { story: sid, ..Default::default() }) };
         let (mut sig, keep_items) = signature(doc, story);
-        let key = (sid, page);
+        let key = (sid, on);
         // The key holds the page's index, which a renumbering doesn't change: its name (section
         // start number, style, prefix) is part of the signature.
-        let page_name = page.map(|p| doc.page_name(p));
+        let (page_name, page) = match on {
+            ShownOn::Own => (None, None),
+            ShownOn::Page(p) => (Some(doc.page_name(p)), Some(p)),
+            ShownOn::Parent(pi) => (doc.parents.get(pi).and_then(|sp| sp.parent.as_ref()).map(|i| i.prefix.clone()), None),
+        };
         if let Some(name) = &page_name {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -153,7 +182,7 @@ impl Cache {
         }
         let replaced = g.0.insert(key, Entry { sig, _keep: (story.clone(), doc.styles.clone(), keep_items), out: out.clone(), stamp });
         drop(g);
-        if key.1.is_none()
+        if key.1 == ShownOn::Own
             && let Some(old) = replaced
         {
             self.previous.lock().unwrap_or_else(|e| e.into_inner()).insert(sid, (old.sig, old.out));
@@ -170,7 +199,7 @@ impl Cache {
         let matches = |s: &[usize]| s.len() >= sig.len() && s[..sig.len()] == sig[..];
         {
             let g = self.map.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(e) = g.0.get(&(sid, None))
+            if let Some(e) = g.0.get(&(sid, ShownOn::Own))
                 && matches(&e.sig)
             {
                 return Some(e.out.clone());

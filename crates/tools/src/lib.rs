@@ -223,16 +223,33 @@ impl ToolContext<'_> {
         let spread = self.doc.spreads.get(si)?;
         let pi = spread.page_at_x(sp.x)?;
         let page = self.doc.first_page_of_spread(si) + pi;
-        let (ppi, ppg) = self.doc.parent_page_for(page)?;
-        let parent = &self.doc.parents[ppi];
-        let pg = &spread.pages[pi];
-        let at = sp - designcraft_geom::Vec2::new(pg.x - parent.pages[ppg].x, 0.0);
-        parent
-            .items
-            .iter()
+        let pg = spread.pages.get(pi)?;
+        if !pg.show_parent_items {
+            return None;
+        }
+        // What the renderer draws on this page, in its order: by layer, then the parent's bases
+        // before the parent. The last hit is the topmost.
+        let mut shown = Vec::new();
+        for (ppi, ppg) in self.doc.shown_parent_pages(SpreadRef::Doc(si), pi) {
+            let Some(parent) = self.doc.parents.get(ppi) else { continue };
+            let Some(parent_page) = parent.pages.get(ppg) else { continue };
+            let off = designcraft_geom::Vec2::new(pg.x - parent_page.x, 0.0);
+            for it in &parent.items {
+                if pg.overridden.contains(&it.id) || parent.pages.len() > 1 && parent.page_at_x(it.bounds().center().x) != Some(ppg) {
+                    continue;
+                }
+                shown.push((it, off));
+            }
+        }
+        shown.sort_by_key(|(it, _)| self.doc.layer_rank(it.layer));
+        shown
+            .into_iter()
             .rev()
-            .find(|it| !it.locked && !pg.overridden.contains(&it.id) && designcraft_doc::edit_hit(it, at, self.tol(4.0)))
-            .map(|it| (page, it.id))
+            .find(|(it, off)| {
+                let layer = self.doc.layer(it.layer);
+                !it.locked && !it.hidden && !layer.is_some_and(|l| !l.visible || l.locked) && designcraft_doc::edit_hit(it, sp - *off, self.tol(4.0))
+            })
+            .map(|(it, _)| (page, it.id))
     }
 
     fn hit_parent(&self, sr: SpreadRef, sp: Point) -> Option<(SpreadRef, ItemId)> {

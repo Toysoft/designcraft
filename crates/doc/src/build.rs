@@ -547,11 +547,95 @@ impl Document {
     pub fn parent_page_for(&self, abs: usize) -> Option<(usize, usize)> {
         let page = self.page(abs)?;
         let pi = self.parent_index(page.parent?)?;
-        let ps = &self.parents[pi];
-        // A parent spread can come without pages from a file.
-        let idx = if ps.pages.len() >= 2 && page.side == PageSide::Left { 0 } else { ps.pages.len().checked_sub(1)? };
-        Some((pi, idx))
+        Some((pi, shown_parent_page(self.parents.get(pi)?.pages.len(), page.side)?))
     }
+
+    /// Parent `pi` and the parents it is based on, base first: `[A, B]` for B based on A.
+    /// A dangling id, a repeated parent or [`MAX_PARENT_DEPTH`] ends the walk.
+    pub fn parent_chain(&self, pi: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut cur = Some(pi);
+        while let Some(i) = cur {
+            let Some(ps) = self.parents.get(i) else { break };
+            if out.contains(&i) || out.len() >= MAX_PARENT_DEPTH {
+                break;
+            }
+            out.push(i);
+            cur = ps.parent.as_ref().and_then(|info| info.based_on).and_then(|b| self.parent_index(b));
+        }
+        out.reverse();
+        out
+    }
+
+    /// Parent pages drawn behind page `page` of spread `sr`, back to front, as (parent index,
+    /// parent page index). A document page shows its parent and that parent's bases; a parent page
+    /// shows the parents its spread is based on.
+    pub fn shown_parent_pages(&self, sr: SpreadRef, page: usize) -> Vec<(usize, usize)> {
+        let Some(pg) = self.spread(sr).and_then(|sp| sp.pages.get(page)) else { return Vec::new() };
+        let chain = match sr {
+            SpreadRef::Doc(_) => pg.parent.and_then(|id| self.parent_index(id)).map(|pi| self.parent_chain(pi)).unwrap_or_default(),
+            SpreadRef::Parent(pi) => {
+                let mut c = self.parent_chain(pi);
+                // The spread's own items are not part of what shows behind it.
+                if c.last() == Some(&pi) {
+                    c.pop();
+                }
+                c
+            }
+        };
+        chain.into_iter().filter_map(|i| Some((i, shown_parent_page(self.parents.get(i)?.pages.len(), pg.side)?))).collect()
+    }
+
+    /// Whether basing parent `pi` on `base` would make a `based_on` cycle (or names no parent).
+    pub fn parent_base_cycles(&self, pi: usize, base: SpreadId) -> bool {
+        let Some(mut cur) = self.parent_index(base) else { return true };
+        // Not `parent_chain`: its depth cap would miss a long cycle. Every parent is visited at most once.
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if cur == pi {
+                return true;
+            }
+            if !seen.insert(cur) || seen.len() > self.parents.len() {
+                return false;
+            }
+            let next = self.parents.get(cur).and_then(|ps| ps.parent.as_ref()).and_then(|info| info.based_on).and_then(|b| self.parent_index(b));
+            let Some(n) = next else { return false };
+            cur = n;
+        }
+    }
+
+    /// Clear `based_on` links that name a missing parent or close a cycle (hand-edited or damaged
+    /// files). Returns one warning per link cleared.
+    pub fn fix_parent_bases(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for pi in 0..self.parents.len() {
+            let Some(ps) = self.parents.get(pi) else { continue };
+            let Some(base) = ps.parent.as_ref().and_then(|info| info.based_on) else { continue };
+            let label = ps.parent.as_ref().map(ParentInfo::label).unwrap_or_default();
+            let why = if self.parent_index(base).is_none() {
+                "names a missing parent"
+            } else if self.parent_base_cycles(pi, base) {
+                "makes a cycle"
+            } else {
+                continue;
+            };
+            if let Some(info) = self.parents.get_mut(pi).map(Arc::make_mut).and_then(|ps| ps.parent.as_mut()) {
+                info.based_on = None;
+            }
+            warnings.push(format!("parent {label}: Based on Parent {why}; it was set to [None]"));
+        }
+        warnings
+    }
+}
+
+/// Deepest `based_on` chain followed.
+pub const MAX_PARENT_DEPTH: usize = 64;
+
+/// The page of a parent spread with `count` pages that shows behind a page on `side`: the left
+/// page of a facing parent for a left page, otherwise the last page. A parent spread can come
+/// without pages from a file.
+fn shown_parent_page(count: usize, side: PageSide) -> Option<usize> {
+    if count >= 2 && side == PageSide::Left { Some(0) } else { count.checked_sub(1) }
 }
 
 #[cfg(test)]
@@ -630,5 +714,69 @@ mod tests {
         assert_eq!(d.parent_page_for(0), Some((1, 1)));
         d.apply_parent(&[0], None).unwrap();
         assert_eq!(d.parent_page_for(0), None);
+    }
+
+    fn base(d: &mut Document, pi: usize, on: Option<SpreadId>) {
+        Arc::make_mut(&mut d.parents[pi]).parent.as_mut().unwrap().based_on = on;
+    }
+
+    /// C based on B based on A: pages using C show A, then B, then C; C itself shows A and B.
+    #[test]
+    fn parent_chain_is_base_first() {
+        let mut d = Document::new(&NewDocument { pages: 2, facing_pages: false, ..Default::default() });
+        let a = d.parents[0].id;
+        let b = d.add_parent("B", "Parent", 1, 12.0, Margins::uniform(36.0));
+        let c = d.add_parent("C", "Parent", 1, 12.0, Margins::uniform(36.0));
+        base(&mut d, 1, Some(a));
+        base(&mut d, 2, Some(b));
+        d.apply_parent(&[1], Some(c)).unwrap();
+        assert_eq!(d.parent_chain(2), vec![0, 1, 2]);
+        assert_eq!(d.shown_parent_pages(SpreadRef::Doc(1), 0), vec![(0, 0), (1, 0), (2, 0)]);
+        assert_eq!(d.shown_parent_pages(SpreadRef::Doc(0), 0), vec![(0, 0)]);
+        assert_eq!(d.shown_parent_pages(SpreadRef::Parent(2), 0), vec![(0, 0), (1, 0)]);
+        assert!(d.parent_base_cycles(0, c), "A on C closes C → B → A");
+        assert!(d.parent_base_cycles(0, a));
+        assert!(!d.parent_base_cycles(2, a));
+        assert!(d.fix_parent_bases().is_empty());
+    }
+
+    /// A cycle or a dangling base from a file is cleared with a warning; walks stay bounded before that.
+    #[test]
+    fn fix_parent_bases_breaks_cycles_and_dangling_ids() {
+        let mut d = Document::new(&NewDocument { pages: 1, facing_pages: false, ..Default::default() });
+        let a = d.parents[0].id;
+        let b = d.add_parent("B", "Parent", 1, 12.0, Margins::uniform(36.0));
+        d.add_parent("C", "Parent", 1, 12.0, Margins::uniform(36.0));
+        base(&mut d, 0, Some(b));
+        base(&mut d, 1, Some(a));
+        base(&mut d, 2, Some(SpreadId(99_999)));
+        assert_eq!(d.parent_chain(0), vec![1, 0]);
+        assert_eq!(d.parent_chain(2), vec![2]);
+        let w = d.fix_parent_bases();
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("A-Parent") && w[0].contains("cycle"), "{w:?}");
+        assert!(w[1].contains("C-Parent") && w[1].contains("missing"), "{w:?}");
+        assert_eq!(d.parents[0].parent.as_ref().unwrap().based_on, None);
+        assert_eq!(d.parents[1].parent.as_ref().unwrap().based_on, Some(a));
+        assert_eq!(d.parents[2].parent.as_ref().unwrap().based_on, None);
+    }
+
+    /// A cycle longer than the drawing depth cap is still found and broken.
+    #[test]
+    fn fix_parent_bases_breaks_a_long_cycle() {
+        let mut d = Document::new(&NewDocument { pages: 1, facing_pages: false, ..Default::default() });
+        for i in 1..65 {
+            d.add_parent(&format!("P{i}"), "Parent", 1, 12.0, Margins::uniform(36.0));
+        }
+        assert_eq!(d.parents.len(), 65);
+        let ids: Vec<SpreadId> = d.parents.iter().map(|p| p.id).collect();
+        for i in 0..65 {
+            base(&mut d, i, Some(ids[(i + 1) % 65]));
+        }
+        assert_eq!(d.parent_chain(0).len(), MAX_PARENT_DEPTH);
+        let w = d.fix_parent_bases();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(d.parents[0].parent.as_ref().unwrap().based_on, None);
+        assert!((0..65).all(|i| d.parent_base_cycles(i, ids[(i + 1) % 65]) == (i == 0)), "only the cleared link would close it again");
     }
 }

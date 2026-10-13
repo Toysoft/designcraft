@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use designcraft_color::BlendMode as DcBlend;
-use designcraft_compose::{Cache, ComposedStory};
+use designcraft_compose::{Cache, ComposedStory, ShownOn};
 use designcraft_doc::{Content, Document, Item, PageSide, SpreadRef, StoryId, StrokeAlign, StrokeType};
 use designcraft_geom::corners;
 use designcraft_geom::{Affine, BezPath, Rect, Shape, Vec2};
@@ -216,7 +216,7 @@ pub struct Renderer {
     resources: Resources,
     glyphs: text::GlyphCache,
     /// Composed stories looked up during the current render.
-    stories: HashMap<(StoryId, Option<usize>), Arc<ComposedStory>>,
+    stories: HashMap<(StoryId, ShownOn), Arc<ComposedStory>>,
     pub threads: u16,
     pub stats: FrameStats,
 }
@@ -394,21 +394,30 @@ impl Renderer {
                 }
             }
         }
-        // Layers back to front; within each layer parent items first (document spreads only).
+        // Layers back to front; within each layer parent items first.
         for layer in doc.layers.iter().rev() {
             if !layer.visible || f.opts.printing_only && !layer.printable {
                 continue;
             }
-            if let SpreadRef::Doc(si) = sr {
-                let first = doc.first_page_of_spread(si);
-                for (pi, page) in sp.pages.iter().enumerate() {
-                    if !page.show_parent_items {
-                        continue;
-                    }
-                    let Some((ppi, ppage)) = doc.parent_page_for(first + pi) else { continue };
-                    let parent = &doc.parents[ppi];
-                    let dx = page.x - parent.pages[ppage].x;
-                    let pr = parent.pages[ppage].bounds();
+            // Document pages show their parent and its bases; a parent spread shows its bases.
+            let first = match sr {
+                SpreadRef::Doc(si) => Some(doc.first_page_of_spread(si)),
+                SpreadRef::Parent(_) => None,
+            };
+            // Base items compose for where they show: the document page, or this parent spread.
+            let shown_on = |pi: usize| match (sr, first) {
+                (SpreadRef::Parent(p), _) => ShownOn::Parent(p),
+                (_, Some(a)) => ShownOn::Page(a + pi),
+                (_, None) => ShownOn::Own,
+            };
+            for (pi, page) in sp.pages.iter().enumerate() {
+                if !page.show_parent_items {
+                    continue;
+                }
+                for (ppi, ppage) in doc.shown_parent_pages(sr, pi) {
+                    let Some(parent) = doc.parents.get(ppi) else { continue };
+                    let Some(ppg) = parent.pages.get(ppage) else { continue };
+                    let dx = page.x - ppg.x;
                     for it in &parent.items {
                         if it.layer != layer.id || page.overridden.contains(&it.id) {
                             continue;
@@ -417,20 +426,19 @@ impl Renderer {
                         if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
                             continue;
                         }
-                        let _ = pr;
-                        self.draw_item(ctx, f, it, Affine::translate((dx, 0.0)), Some(first + pi));
+                        self.draw_item(ctx, f, it, Affine::translate((dx, 0.0)), shown_on(pi));
                     }
                 }
             }
             for it in &sp.items {
                 if it.layer == layer.id {
-                    self.draw_item(ctx, f, it, Affine::IDENTITY, None);
+                    self.draw_item(ctx, f, it, Affine::IDENTITY, ShownOn::Own);
                 }
             }
         }
     }
 
-    fn draw_item(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, parent: Affine, page: Option<usize>) {
+    fn draw_item(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, parent: Affine, page: ShownOn) {
         if it.hidden || f.opts.hidden.contains(&it.id) || f.opts.printing_only && it.nonprinting {
             return;
         }
@@ -530,18 +538,18 @@ impl Renderer {
 
     /// The composed story for a frame (memoised for the current render: the cache lookup
     /// validates the whole thread each time).
-    fn story(&mut self, f: &Frame, sid: StoryId, page: Option<usize>) -> Arc<ComposedStory> {
+    fn story(&mut self, f: &Frame, sid: StoryId, page: ShownOn) -> Arc<ComposedStory> {
         let key = (sid, page);
         if let Some(cs) = self.stories.get(&key) {
             return cs.clone();
         }
-        let cs = f.cache.get(f.doc, sid, page);
+        let cs = f.cache.get_on(f.doc, sid, page);
         self.stories.insert(key, cs.clone());
         cs
     }
 
     /// Fill, content and stroke of a leaf item (no opacity, blend or effects).
-    pub(crate) fn draw_body(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, bp: &BezPath, xf: Affine, page: Option<usize>) {
+    pub(crate) fn draw_body(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, bp: &BezPath, xf: Affine, page: ShownOn) {
         let doc = f.doc;
         // Fill.
         if !it.fill.is_none() {

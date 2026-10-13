@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use designcraft_compose::{ComposedStory, FrameText, Line};
+use designcraft_compose::{ComposedStory, FrameText, Line, ShownOn};
 use designcraft_doc::ItemId;
 use designcraft_fonts::FontDb;
 use designcraft_geom::{Affine, BezPath, Rect, Shape};
@@ -410,7 +410,7 @@ impl Renderer {
         {
             for o in &ft.objects {
                 if let Some(obj) = st.objects.get(o.index) {
-                    self.draw_item(ctx, f, &obj.item, xf * Affine::translate(o.origin.to_vec2()), None);
+                    self.draw_item(ctx, f, &obj.item, xf * Affine::translate(o.origin.to_vec2()), ShownOn::Own);
                 }
             }
         }

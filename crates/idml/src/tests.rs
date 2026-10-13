@@ -1454,3 +1454,27 @@ fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
     check(&d);
     check(&import_idml(&export_idml(&d)).unwrap());
 }
+
+/// Based on Parent travels as the parent pages' `AppliedMaster`; a cycle in a file is broken on
+/// import with a warning.
+#[test]
+fn parent_based_on_round_trips_and_cycles_are_broken() {
+    let mut d = Document::new(&NewDocument { pages: 2, ..Default::default() });
+    let a = d.parents[0].id;
+    let b = d.add_parent("B", "Opening", 2, 12.0, designcraft_doc::Margins::uniform(36.0));
+    d.add_parent("C", "Closing", 2, 12.0, designcraft_doc::Margins::uniform(36.0));
+    let set = |d: &mut Document, pi: usize, on| std::sync::Arc::make_mut(&mut d.parents[pi]).parent.as_mut().unwrap().based_on = on;
+    set(&mut d, 1, Some(a));
+    set(&mut d, 2, Some(b));
+    let back = import_idml(&export_idml(&d)).unwrap();
+    let base_of = |d: &Document, pi: usize| {
+        let b = d.parents[pi].parent.as_ref().unwrap().based_on?;
+        d.parents.iter().find(|p| p.id == b).and_then(|p| p.parent.as_ref()).map(|i| i.prefix.clone())
+    };
+    assert_eq!((base_of(&back, 0), base_of(&back, 1), base_of(&back, 2)), (None, Some("A".into()), Some("B".into())));
+
+    set(&mut d, 0, Some(b));
+    let r = import_idml_report(&export_idml(&d), &|_| None).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("A-Parent") && w.contains("cycle")), "{:?}", r.warnings);
+    assert_eq!((base_of(&r.document, 0), base_of(&r.document, 1)), (None, Some("A".into())));
+}

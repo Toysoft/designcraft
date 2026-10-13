@@ -107,11 +107,13 @@ pub fn import_idml_report(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u
     }
     let mut im = Importer::new(read_link);
     im.run(&root, &top)?;
-    let document = im.finish(&root).map_err(|e| match e {
+    warnings.append(&mut im.warnings);
+    let mut document = im.finish(&root).map_err(|e| match e {
         // Without its spread parts there is nothing to open: say which parts were missing.
         IdmlError::Invalid(msg) if !warnings.is_empty() => IdmlError::Invalid(format!("{msg} ({})", warnings.join("; "))),
         e => e,
     })?;
+    warnings.extend(document.fix_parent_bases());
     document.check().map_err(|e| IdmlError::Invalid(e.to_string()))?;
     Ok(Imported { document, warnings })
 }
@@ -189,6 +191,8 @@ struct Importer<'r> {
     stories: BTreeMap<StoryId, Story>,
     story_ids: HashMap<String, StoryId>,
     parents: Vec<Spread>,
+    /// Things read but not kept as they were, for the import report.
+    warnings: Vec<String>,
     parent_ids: HashMap<String, SpreadId>,
     spreads: Vec<Spread>,
     page_index: HashMap<String, usize>,
@@ -276,6 +280,7 @@ impl<'r> Importer<'r> {
             stories: BTreeMap::new(),
             story_ids: HashMap::new(),
             parents: Vec::new(),
+            warnings: Vec::new(),
             parent_ids: HashMap::new(),
             spreads: Vec::new(),
             page_index: HashMap::new(),
@@ -1964,7 +1969,18 @@ impl<'r> Importer<'r> {
                 let n = e.get("Name").unwrap_or("Parent");
                 n.split_once('-').map(|(_, b)| b.to_string()).unwrap_or_else(|| n.to_string())
             });
-            let based_on = pages.first().and_then(|(_, p)| p.get("AppliedMaster")).and_then(|m| self.parent_ids.get(m)).copied().filter(|b| *b != id);
+            // A parent spread has one base: its first page's. Pages that disagree lose theirs.
+            let applied: Vec<Option<SpreadId>> =
+                pages.iter().map(|(_, p)| p.get("AppliedMaster").and_then(|m| self.parent_ids.get(m)).copied()).collect();
+            let label = format!("{prefix}-{name}");
+            if applied.windows(2).any(|w| w[0] != w[1]) {
+                self.warnings.push(format!("parent {label}: its pages are based on different parents; only the first page's is kept"));
+            }
+            let based_on = applied.first().copied().flatten();
+            if applied.contains(&Some(id)) {
+                self.warnings.push(format!("parent {label}: a page names its own parent as its base, which is ignored"));
+            }
+            let based_on = based_on.filter(|b| *b != id);
             Some(ParentInfo { prefix, name, based_on })
         } else {
             None

@@ -23,6 +23,7 @@ use vello_cpu::peniko::{self, BlendMode, Compose, Mix};
 use vello_cpu::{RenderContext, kurbo};
 
 use crate::{Frame, Renderer, color_of};
+use designcraft_compose::ShownOn;
 
 /// Shadow offset (spread units) for an InDesign angle (degrees, light direction) and distance.
 pub(crate) fn offset(angle: f64, distance: f64) -> Vec2 {
@@ -66,7 +67,7 @@ fn shadow(sigma: f64, color: peniko::Color) -> Filter {
 
 impl Renderer {
     /// Draw an item with soft effects: below-effects, the (feathered) body, inner shadow.
-    pub(crate) fn draw_item_fx(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, bp: &BezPath, xf: Affine, page: Option<usize>) {
+    pub(crate) fn draw_item_fx(&mut self, ctx: &mut RenderContext, f: &Frame, it: &Item, bp: &BezPath, xf: Affine, page: ShownOn) {
         let doc = f.doc;
         let e = &it.effects;
         let sw = if it.stroke.is_none() { 0.0 } else { it.stroke.extent() };

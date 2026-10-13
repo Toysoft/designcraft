@@ -700,13 +700,12 @@ fn draw_frames(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
     for slot in &layout.slots {
         let Some(sp) = doc.spread(slot.spread) else { continue };
         let a = slot.xf;
-        // Parent items on document pages: dotted edges.
-        if let SpreadRef::Doc(si) = slot.spread {
-            let first = doc.first_page_of_spread(si);
-            for (pi, page) in sp.pages.iter().enumerate() {
-                let Some((ppi, ppg)) = doc.parent_page_for(first + pi) else { continue };
-                let parent = &doc.parents[ppi];
-                let dx = page.x - parent.pages[ppg].x;
+        // Parent items on document pages, and base parents' items on a parent spread: dotted edges.
+        for (pi, page) in sp.pages.iter().enumerate() {
+            for (ppi, ppg) in doc.shown_parent_pages(slot.spread, pi) {
+                let Some(parent) = doc.parents.get(ppi) else { continue };
+                let Some(ppage) = parent.pages.get(ppg) else { continue };
+                let dx = page.x - ppage.x;
                 for it in &parent.items {
                     if (parent.pages.len() > 1 && parent.page_at_x(it.bounds().center().x) != Some(ppg)) || page.overridden.contains(&it.id) {
                         continue;

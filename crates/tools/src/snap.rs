@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use designcraft_doc::{Item, ItemId, Orientation, PageSide, Selection, SpreadId, SpreadRef, StrokeAlign};
+use designcraft_doc::{Document, Item, ItemId, Orientation, Selection, SpreadRef, StrokeAlign};
 use designcraft_geom::snap::snap_to_grid;
 use designcraft_geom::{Affine, Point, Rect, Vec2, format_measure};
 
@@ -204,15 +204,13 @@ fn match_rotation(cx: &ToolContext, req: &SnapRequest<'_>, zone_length: f64) -> 
             push_rotation(&mut best, cx.selection, req, item, Affine::IDENTITY, false, 0, &mut seen, proposed, tol);
         }
     }
-    // Parent editing already lists those items on the spread. Do not add them again.
-    if !layout_edits_parents(cx) {
+    if shows_parent_items(cx, req) {
         push_parent_rotations(&mut best, cx, req, &mut seen, proposed, tol);
     }
     best.map(|(_, angle)| angle)
 }
 
-/// Shown parent items, same page and `based_on` walk as parent lengths.
-/// Parent items are only translated onto the page, so the angle is still `item.xf`.
+/// Shown parent items. Parent items are only translated onto the page, so the angle is still `item.xf`.
 fn push_parent_rotations(
     best: &mut Option<(f64, f64)>,
     cx: &ToolContext,
@@ -221,55 +219,9 @@ fn push_parent_rotations(
     proposed: f64,
     tol: f64,
 ) {
-    let SpreadRef::Doc(si) = req.spread else { return };
-    let page_count = cx.doc.spreads.get(si).map(|sp| sp.pages.len()).unwrap_or(0);
-    let first = cx.doc.first_page_of_spread(si);
-    for pi in 0..page_count {
-        let Some(abs) = first.checked_add(pi) else { continue };
-        let Some(page) = cx.doc.page(abs) else { continue };
-        if !page.show_parent_items {
-            continue;
-        }
-        let doc_side = page.side;
-        let overridden = page.overridden.clone();
-        let Some((ppi, _)) = cx.doc.parent_page_for(abs) else { continue };
-        let mut seen_spreads = HashSet::new();
-        push_parent_rotation_chain(best, cx, req, doc_side, &overridden, ppi, seen_items, &mut seen_spreads, proposed, tol);
+    for (item, _) in shown_parent_items(cx.doc, req.spread) {
+        push_rotation(best, cx.selection, req, item, Affine::IDENTITY, false, 0, seen_items, proposed, tol);
     }
-}
-
-fn push_parent_rotation_chain(
-    best: &mut Option<(f64, f64)>,
-    cx: &ToolContext,
-    req: &SnapRequest<'_>,
-    doc_side: PageSide,
-    overridden: &[ItemId],
-    index: usize,
-    seen_items: &mut HashSet<ItemId>,
-    seen_spreads: &mut HashSet<SpreadId>,
-    proposed: f64,
-    tol: f64,
-) {
-    let Some(parent) = cx.doc.parents.get(index) else { return };
-    if !seen_spreads.insert(parent.id) {
-        return;
-    }
-    let next = parent.parent.as_ref().and_then(|info| info.based_on);
-    if let Some(page_idx) = shown_parent_page_index(parent.pages.len(), doc_side) {
-        for item in &parent.items {
-            if overridden.contains(&item.id) {
-                continue;
-            }
-            // A facing parent only shows items whose center sits on this document page's parent page.
-            if parent.pages.len() > 1 && parent.page_at_x(item.bounds().center().x) != Some(page_idx) {
-                continue;
-            }
-            push_rotation(best, cx.selection, req, item, Affine::IDENTITY, false, 0, seen_items, proposed, tol);
-        }
-    }
-    let Some(next_id) = next else { return };
-    let Some(next_index) = cx.doc.parent_index(next_id) else { return };
-    push_parent_rotation_chain(best, cx, req, doc_side, overridden, next_index, seen_items, seen_spreads, proposed, tol);
 }
 
 fn push_rotation(
@@ -938,7 +890,7 @@ fn dimension_lengths(cx: &ToolContext, req: &SnapRequest<'_>) -> Vec<f64> {
             push_own_lengths(&mut out, cx.selection, req, item, Affine::IDENTITY, false, 0, &mut seen);
         }
     }
-    if !layout_edits_parents(cx) {
+    if shows_parent_items(cx, req) {
         push_parent_lengths(&mut out, cx, req, &mut seen);
     }
     out
@@ -1021,52 +973,9 @@ fn stroke_outset(item: &Item) -> f64 {
 }
 
 fn push_parent_lengths(out: &mut Vec<f64>, cx: &ToolContext, req: &SnapRequest<'_>, seen_items: &mut HashSet<ItemId>) {
-    let SpreadRef::Doc(si) = req.spread else { return };
-    let page_count = cx.doc.spreads.get(si).map(|sp| sp.pages.len()).unwrap_or(0);
-    let first = cx.doc.first_page_of_spread(si);
-    for pi in 0..page_count {
-        let Some(abs) = first.checked_add(pi) else { continue };
-        let Some(page) = cx.doc.page(abs) else { continue };
-        if !page.show_parent_items {
-            continue;
-        }
-        let doc_side = page.side;
-        let overridden = page.overridden.clone();
-        let Some((ppi, _)) = cx.doc.parent_page_for(abs) else { continue };
-        let mut seen_spreads = HashSet::new();
-        push_parent_length_chain(out, cx, req, doc_side, &overridden, ppi, seen_items, &mut seen_spreads);
+    for (item, _) in shown_parent_items(cx.doc, req.spread) {
+        push_own_lengths(out, cx.selection, req, item, Affine::IDENTITY, false, 0, seen_items);
     }
-}
-
-fn push_parent_length_chain(
-    out: &mut Vec<f64>,
-    cx: &ToolContext,
-    req: &SnapRequest<'_>,
-    doc_side: PageSide,
-    overridden: &[ItemId],
-    index: usize,
-    seen_items: &mut HashSet<ItemId>,
-    seen_spreads: &mut HashSet<SpreadId>,
-) {
-    let Some(parent) = cx.doc.parents.get(index) else { return };
-    if !seen_spreads.insert(parent.id) {
-        return;
-    }
-    let next = parent.parent.as_ref().and_then(|info| info.based_on);
-    if let Some(page_idx) = shown_parent_page_index(parent.pages.len(), doc_side) {
-        for item in &parent.items {
-            if overridden.contains(&item.id) {
-                continue;
-            }
-            if parent.pages.len() > 1 && parent.page_at_x(item.bounds().center().x) != Some(page_idx) {
-                continue;
-            }
-            push_own_lengths(out, cx.selection, req, item, Affine::IDENTITY, false, 0, seen_items);
-        }
-    }
-    let Some(next_id) = next else { return };
-    let Some(next_index) = cx.doc.parent_index(next_id) else { return };
-    push_parent_length_chain(out, cx, req, doc_side, overridden, next_index, seen_items, seen_spreads);
 }
 
 /// Ruler guides, margins, and column sides. No overlay.
@@ -1143,7 +1052,7 @@ fn pass_align(cx: &ToolContext, req: &SnapRequest<'_>, axis: Axis, tol: f64) -> 
             offer_box(&mut best, req.rect, flags, axis, rect, tol, cx.snap.align_edges, cx.snap.align_centers);
         }
     }
-    if !layout_edits_parents(cx) {
+    if shows_parent_items(cx, req) {
         offer_parent_items(&mut best, cx, req, flags, axis, tol);
     }
     best.map(|b| b.hit)
@@ -1157,6 +1066,12 @@ fn align_skips_item(selection: &Selection, req: &SnapRequest<'_>, id: ItemId) ->
 /// Parent spreads are the canvas while a parent is being edited. Their items are ordinary targets.
 fn layout_edits_parents(cx: &ToolContext) -> bool {
     cx.layout.slots.iter().any(|slot| matches!(slot.spread, SpreadRef::Parent(_)))
+}
+
+/// Whether to offer the parent items drawn on `req.spread`. A parent spread shows its bases' items,
+/// which are not on it.
+fn shows_parent_items(cx: &ToolContext, req: &SnapRequest<'_>) -> bool {
+    matches!(req.spread, SpreadRef::Parent(_)) || !layout_edits_parents(cx)
 }
 
 /// Visible box used for alignment. Groups with children contribute the union of the children.
@@ -1228,72 +1143,44 @@ fn group_box(item: &Item, seen: &mut HashSet<ItemId>, depth: usize, filter: Opti
     acc.filter(|r| rect_finite(*r))
 }
 
-/// Parent items shown on the document spread, shifted into that spread's space.
+/// Parent items shown on the spread, shifted into that spread's space.
 fn offer_parent_items(best: &mut Option<Best>, cx: &ToolContext, req: &SnapRequest<'_>, flags: [bool; 3], axis: Axis, tol: f64) {
-    let SpreadRef::Doc(si) = req.spread else { return };
-    let page_count = cx.doc.spreads.get(si).map(|sp| sp.pages.len()).unwrap_or(0);
-    let first = cx.doc.first_page_of_spread(si);
-    for pi in 0..page_count {
-        let Some(abs) = first.checked_add(pi) else { continue };
-        let Some(page) = cx.doc.page(abs) else { continue };
+    for (item, dx) in shown_parent_items(cx.doc, req.spread) {
+        let Some(rect) = item_target_rect(cx.selection, req, item) else { continue };
+        offer_box(best, req.rect, flags, axis, shift_x(rect, dx), tol, cx.snap.align_edges, cx.snap.align_centers);
+    }
+}
+
+/// Parent items drawn on `spread`, back to front, each with the x shift from its parent spread:
+/// a document page's parent and its bases, or a parent spread's bases. Same page and override
+/// filters as the renderer.
+fn shown_parent_items(doc: &Document, spread: SpreadRef) -> Vec<(&Item, f64)> {
+    let Some(sp) = doc.spread(spread) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (pi, page) in sp.pages.iter().enumerate() {
         if !page.show_parent_items {
             continue;
         }
-        let doc_x = page.x;
-        let doc_side = page.side;
-        let overridden = page.overridden.clone();
-        let Some((ppi, _)) = cx.doc.parent_page_for(abs) else { continue };
-        let mut seen = HashSet::new();
-        offer_parent_chain(best, cx, req, flags, axis, tol, doc_x, doc_side, &overridden, ppi, &mut seen);
-    }
-}
-
-/// Walk `based_on`. A repeated spread id ends the walk.
-fn offer_parent_chain(
-    best: &mut Option<Best>,
-    cx: &ToolContext,
-    req: &SnapRequest<'_>,
-    flags: [bool; 3],
-    axis: Axis,
-    tol: f64,
-    doc_x: f64,
-    doc_side: PageSide,
-    overridden: &[ItemId],
-    index: usize,
-    seen: &mut HashSet<SpreadId>,
-) {
-    let Some(parent) = cx.doc.parents.get(index) else { return };
-    if !seen.insert(parent.id) {
-        return;
-    }
-    let next = parent.parent.as_ref().and_then(|info| info.based_on);
-    if let Some(page_idx) = shown_parent_page_index(parent.pages.len(), doc_side)
-        && let Some(parent_page) = parent.pages.get(page_idx)
-    {
-        let dx = doc_x - parent_page.x;
-        if dx.is_finite() {
+        for (ppi, ppage) in doc.shown_parent_pages(spread, pi) {
+            let Some(parent) = doc.parents.get(ppi) else { continue };
+            let Some(parent_page) = parent.pages.get(ppage) else { continue };
+            let dx = page.x - parent_page.x;
+            if !dx.is_finite() {
+                continue;
+            }
             for item in &parent.items {
-                if overridden.contains(&item.id) {
+                if page.overridden.contains(&item.id) {
                     continue;
                 }
-                // Same other-page skip as the renderer: a facing parent only shows items
-                // whose center sits on the parent page this document page uses.
-                if parent.pages.len() > 1 && parent.page_at_x(item.bounds().center().x) != Some(page_idx) {
+                // A facing parent only shows items whose center sits on the parent page this page uses.
+                if parent.pages.len() > 1 && parent.page_at_x(item.bounds().center().x) != Some(ppage) {
                     continue;
                 }
-                let Some(rect) = item_target_rect(cx.selection, req, item) else { continue };
-                offer_box(best, req.rect, flags, axis, shift_x(rect, dx), tol, cx.snap.align_edges, cx.snap.align_centers);
+                out.push((item.as_ref(), dx));
             }
         }
     }
-    let Some(next_id) = next else { return };
-    let Some(next_index) = cx.doc.parent_index(next_id) else { return };
-    offer_parent_chain(best, cx, req, flags, axis, tol, doc_x, doc_side, overridden, next_index, seen);
-}
-
-/// Left page of a facing parent, otherwise the last page. Same choice as `Document::parent_page_for`.
-fn shown_parent_page_index(page_count: usize, side: PageSide) -> Option<usize> {
-    if page_count >= 2 && side == PageSide::Left { Some(0) } else { page_count.checked_sub(1) }
+    out
 }
 
 fn shift_x(r: Rect, dx: f64) -> Rect {

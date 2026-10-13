@@ -6,7 +6,7 @@ use std::sync::Arc;
 use designcraft_color::swatch::{ColorType, SwatchValue};
 use designcraft_color::{BlendMode as DcBlend, Color, GradientKind};
 use designcraft_compose::Cache;
-use designcraft_doc::{AssetId, Content, Document, Item, PageSide, Spread, StrokeAlign, StrokeType};
+use designcraft_doc::{AssetId, Content, Document, Item, PageSide, Spread, SpreadRef, StrokeAlign, StrokeType};
 use designcraft_geom::kurbo::{PathEl, Shape as _};
 use designcraft_geom::{Affine, BezPath, Rect, Vec2, corners};
 use krilla::color::{cmyk, luma, rgb};
@@ -627,18 +627,21 @@ impl Exporter<'_> {
                 if !page.show_parent_items {
                     continue;
                 }
-                let Some((ppi, ppage)) = doc.parent_page_for(first + pi) else { continue };
-                let parent = &doc.parents[ppi];
-                let dx = page.x - parent.pages[ppage].x;
-                for it in &parent.items {
-                    if it.layer != layer.id || page.overridden.contains(&it.id) {
-                        continue;
+                // The parent's bases first, then the parent.
+                for (ppi, ppage) in doc.shown_parent_pages(SpreadRef::Doc(si), pi) {
+                    let Some(parent) = doc.parents.get(ppi) else { continue };
+                    let Some(ppg) = parent.pages.get(ppage) else { continue };
+                    let dx = page.x - ppg.x;
+                    for it in &parent.items {
+                        if it.layer != layer.id || page.overridden.contains(&it.id) {
+                            continue;
+                        }
+                        // Parent items belong to the parent page they sit on.
+                        if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
+                            continue;
+                        }
+                        self.top_item(s, it, Affine::translate((dx, 0.0)), Some(first + pi), true);
                     }
-                    // Parent items belong to the parent page they sit on.
-                    if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
-                        continue;
-                    }
-                    self.top_item(s, it, Affine::translate((dx, 0.0)), Some(first + pi), true);
                 }
             }
             for it in &sp.items {

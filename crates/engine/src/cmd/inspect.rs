@@ -92,7 +92,10 @@ fn inspect(s: &mut Session, _p: &Value) -> Result<Value> {
         "title": st.title(), "path": st.path, "dirty": st.is_dirty(), "pageCount": d.page_count(),
         "settings": {"pageWidth": d.settings.page_width, "pageHeight": d.settings.page_height, "facingPages": d.settings.facing_pages, "intent": d.settings.intent},
         "spreads": spreads,
-        "parents": d.parents.iter().map(|p| json!({"id": p.id.0, "label": p.parent.as_ref().map(|i| i.label()), "items": p.items.len()})).collect::<Vec<_>>(),
+        "parents": d.parents.iter().map(|p| {
+            let based_on = p.parent.as_ref().and_then(|i| i.based_on).and_then(|b| d.parents.iter().find(|x| x.id == b)).and_then(|x| x.parent.as_ref()).map(|i| i.label());
+            json!({"id": p.id.0, "label": p.parent.as_ref().map(|i| i.label()), "basedOn": based_on, "items": p.items.len()})
+        }).collect::<Vec<_>>(),
         "layers": d.layers,
         "stories": stories,
         "paragraphStyles": d.styles.paragraph.iter().map(|p| &p.name).collect::<Vec<_>>(),

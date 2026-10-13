@@ -239,7 +239,8 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
     rr.threads = designcraft_render::default_threads();
     let k = ppi / 72.0;
     let parent_transparent = |pid: Option<designcraft_doc::SpreadId>| {
-        pid.and_then(|id| d.parents.iter().find(|p| p.id == id)).is_some_and(|p| p.items.iter().any(|it| transparent(it)))
+        pid.and_then(|id| d.parent_index(id))
+            .is_some_and(|pi| d.parent_chain(pi).iter().filter_map(|&i| d.parents.get(i)).any(|p| p.items.iter().any(|it| transparent(it))))
     };
     // An opaque image item showing `img` over `r`.
     let image_item =

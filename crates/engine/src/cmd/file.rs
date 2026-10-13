@@ -18,9 +18,9 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "file.newSample", "Sample Document", ["Help"], None, "{} — a multi-page magazine sample", always, file_sample),
         cmd!(query "file.presets", "Document Presets", [], None, "{}", always, |_, _| Ok(serde_json::to_value(PRESETS).unwrap_or_default())),
         cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"),
-            "{path} — .designcraft or .idml; the fonts in a `Document Fonts` folder beside it load first → {index, documentFonts: faces loaded, warnings: font files skipped (and, for .idml, package parts missing)}",
+            "{path} — .designcraft or .idml; the fonts in a `Document Fonts` folder beside it load first → {index, documentFonts: faces loaded, warnings: font files skipped, Based on Parent links cleared (and, for .idml, package parts missing)}",
             always, file_open),
-        cmd!(noundo "file.openBytes", "Open Bytes", [], None, "{name, base64} — DesignCraft JSON or an IDML package", always, file_open_bytes),
+        cmd!(noundo "file.openBytes", "Open Bytes", [], None, "{name, base64} — DesignCraft JSON or an IDML package → {index, warnings}", always, file_open_bytes),
         cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?}", has_doc, file_save),
         cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path}", has_doc, file_save),
         cmd!(noundo "file.saveACopy", "Save a Copy…", ["File"], None, "{path} — writes the document without changing which file it is or its unsaved state", has_doc, |s, p| {
@@ -114,7 +114,15 @@ pub fn to_bytes(d: &Document) -> Vec<u8> {
 }
 
 pub fn from_bytes(b: &[u8]) -> Result<Document> {
-    designcraft_format::load(b).map_err(|e| EngineError::Other(e.to_string()))
+    load_bytes(b).map(|(d, _)| d)
+}
+
+/// Read `.designcraft` bytes and repair what a hand-edited file can get wrong without failing the
+/// open, with a warning for each repair.
+fn load_bytes(b: &[u8]) -> Result<(Document, Vec<String>)> {
+    let mut d = designcraft_format::load(b).map_err(|e| EngineError::Other(e.to_string()))?;
+    let warnings = d.fix_parent_bases();
+    Ok((d, warnings))
 }
 
 fn file_new(s: &mut Session, p: &Value) -> Result<Value> {
@@ -165,10 +173,11 @@ fn file_open(s: &mut Session, p: &Value) -> Result<Value> {
             return super::interchange::open_idml(s, p);
         }
         let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-        let mut d = from_bytes(&bytes)?;
+        let (mut d, mut warnings) = load_bytes(&bytes)?;
         super::interchange::resolve_packaged_links(&mut d, std::path::Path::new(path).parent());
         super::datamerge::resolve_sources_on_open(&mut d, Some(std::path::Path::new(path)));
-        let (fonts, faces, warnings) = load_document_fonts(&mut d, path);
+        let (fonts, faces, font_warnings) = load_document_fonts(&mut d, path);
+        warnings.extend(font_warnings);
         let mut st = DocState::new(d, Some(path.to_string()));
         st.fonts = fonts;
         let i = s.add_document(st);
@@ -224,13 +233,13 @@ fn file_open_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     if designcraft_idml::is_idml(&b) {
         return super::interchange::open_idml(s, p);
     }
-    let mut d = from_bytes(&b)?;
+    let (mut d, warnings) = load_bytes(&b)?;
     super::datamerge::resolve_sources_on_open(&mut d, None);
     if let Some(n) = str_param(p, "name") {
         d.title = n.to_string();
     }
     let i = s.add_document(DocState::new(d, None));
-    Ok(json!({"index": i}))
+    Ok(json!({"index": i, "warnings": warnings}))
 }
 
 fn file_save(s: &mut Session, p: &Value) -> Result<Value> {

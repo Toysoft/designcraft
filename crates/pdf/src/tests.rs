@@ -446,3 +446,25 @@ fn column_rules_are_drawn() {
     assert!((xs[0] - 214.0).abs() < 0.01 && (xs[1] - 398.0).abs() < 0.01, "{xs:?}");
     assert!(rules(false).is_empty());
 }
+
+/// A page whose parent B is based on A carries A's items, then B's.
+#[test]
+fn based_on_parent_items_export_base_first() {
+    let mut d = Document::new(&NewDocument { pages: 1, facing_pages: false, ..NewDocument::default() });
+    d.swatches.push(Swatch::color("Base Cyan", Color::cmyk(1.0, 0.0, 0.0, 0.0)));
+    d.swatches.push(Swatch::color("Parent Magenta", Color::cmyk(0.0, 1.0, 0.0, 0.0)));
+    let a = d.parents[0].id;
+    let b = d.add_parent("B", "Opening", 1, 12.0, designcraft_doc::Margins::uniform(36.0));
+    std::sync::Arc::make_mut(&mut d.parents[1]).parent.as_mut().unwrap().based_on = Some(a);
+    d.apply_parent(&[0], Some(b)).unwrap();
+    let lid = d.default_layer();
+    for (pi, swatch, r) in [(0, "Base Cyan", Rect::new(36.0, 36.0, 136.0, 136.0)), (1, "Parent Magenta", Rect::new(200.0, 36.0, 300.0, 136.0))] {
+        let mut it = Item::new(ItemId(d.alloc()), lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(r));
+        it.fill = Fill::swatch(swatch);
+        d.insert_item(SpreadRef::Parent(pi), it, None).unwrap();
+    }
+    let s = uncompressed(&d, PdfOptions::default());
+    let (cyan, magenta) = (s.find("1 0 0 0 k"), s.find("0 1 0 0 k"));
+    assert!(cyan.is_some() && magenta.is_some(), "both parents' items are on the page");
+    assert!(cyan < magenta, "the base parent's item is drawn first");
+}

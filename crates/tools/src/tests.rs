@@ -83,6 +83,29 @@ fn cmd_shift_click_overrides_parent_item() {
     assert_eq!(a, vec![Action::Exec("layout.overrideParentItems".into(), serde_json::json!({"page": 0, "ids": [pid.0]}))]);
 }
 
+/// On a page whose parent B is based on A, A's items are hit too, B's win where they overlap, and
+/// nothing is hit when the page hides parent items.
+#[test]
+fn parent_hit_reaches_base_parent_items_topmost_first() {
+    let mut d = Document::new(&NewDocument { pages: 1, facing_pages: false, ..Default::default() });
+    let lid = d.default_layer();
+    let a = d.parents[0].id;
+    let b = d.add_parent("B", "Opening", 1, 12.0, designcraft_doc::Margins::uniform(36.0));
+    Arc::make_mut(&mut d.parents[1]).parent.as_mut().unwrap().based_on = Some(a);
+    d.apply_parent(&[0], Some(b)).unwrap();
+    let (a_item, _) = d.add_text_frame(SpreadRef::Parent(0), Rect::new(100.0, 100.0, 200.0, 200.0), lid, "a", ParaFormat::default()).unwrap();
+    let (b_item, _) = d.add_text_frame(SpreadRef::Parent(1), Rect::new(150.0, 150.0, 250.0, 250.0), lid, "b", ParaFormat::default()).unwrap();
+    let hit = |d: &Document, x: f64, y: f64| {
+        let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(d, false));
+        let off = l.xf(SpreadRef::Doc(0)).translation();
+        ctx(d, &s, &c, &l).hit_parent_on_page(Point::new(x + off.x, y + off.y))
+    };
+    assert_eq!(hit(&d, 120.0, 120.0), Some((0, a_item)));
+    assert_eq!(hit(&d, 175.0, 175.0), Some((0, b_item)), "B's item is drawn over A's");
+    Arc::make_mut(&mut d.spreads[0]).pages[0].show_parent_items = false;
+    assert_eq!(hit(&d, 120.0, 120.0), None);
+}
+
 #[test]
 fn gradient_tool_drag_sets_the_vector() {
     let mut d = Document::new(&NewDocument::default());

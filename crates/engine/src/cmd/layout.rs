@@ -179,6 +179,15 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"id": id.0, "prefix": prefix}))
             })
         }),
+        cmd!(
+            "layout.parents.options",
+            "Parent Options…",
+            [],
+            None,
+            "{parent: \"B\" (prefix or label), basedOn: \"A\" | null (= [None])} — the parent shows its base's items under its own, and so do the pages that use it → {parent, basedOn}",
+            has_doc,
+            parent_options
+        ),
         cmd!(noundo "layout.parents.edit", "Edit Parents", [], None, "{on: bool} — show parent spreads on the canvas", has_doc, |s, p| {
             let st = s.doc_mut()?;
             st.editing_parents = p.get("on").and_then(Value::as_bool).unwrap_or(!st.editing_parents);
@@ -619,6 +628,41 @@ fn parent_ref(d: &designcraft_doc::Document, v: Option<&Value>) -> Option<Option
     }
 }
 
+/// Layout › Pages › Parent Options: Based on Parent. A base that would make a cycle is refused.
+fn parent_options(s: &mut crate::Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "layout.parents.options";
+    let d = &s.doc()?.doc;
+    let find = |name: &str| d.parents.iter().position(|x| x.parent.as_ref().is_some_and(|i| i.prefix == name || i.label() == name));
+    let name = str_param(p, "parent").ok_or_else(|| bad(CMD, "missing `parent`"))?;
+    let pi = find(name).ok_or_else(|| bad(CMD, format!("no parent `{name}`")))?;
+    let base = match p.get("basedOn") {
+        None => return Err(bad(CMD, "missing `basedOn` (a parent, or null for [None])")),
+        Some(Value::Null) => None,
+        Some(Value::String(b)) if b == "[None]" => None,
+        Some(Value::String(b)) => {
+            let bi = find(b).ok_or_else(|| bad(CMD, format!("no parent `{b}`")))?;
+            Some(d.parents.get(bi).map(|x| x.id).ok_or_else(|| bad(CMD, format!("no parent `{b}`")))?)
+        }
+        Some(v) => return Err(bad(CMD, format!("`basedOn` must be a parent name or null, not {v}"))),
+    };
+    let label = |d: &designcraft_doc::Document, i: usize| d.parents.get(i).and_then(|x| x.parent.as_ref()).map(|i| i.label());
+    if let Some(b) = base
+        && d.parent_base_cycles(pi, b)
+    {
+        let b = str_param(p, "basedOn").unwrap_or_default();
+        return Err(bad(CMD, format!("{name} cannot be based on {b}: that would make a cycle")));
+    }
+    let out = json!({"parent": label(d, pi), "basedOn": base.and_then(|b| d.parent_index(b)).and_then(|i| label(d, i))});
+    if d.parents.get(pi).and_then(|x| x.parent.as_ref()).and_then(|i| i.based_on) == base {
+        return Ok(out);
+    }
+    s.edit(|d, _| {
+        let info = d.parents.get_mut(pi).map(std::sync::Arc::make_mut).and_then(|x| x.parent.as_mut()).ok_or_else(|| bad(CMD, "no such parent"))?;
+        info.based_on = base;
+        Ok(out)
+    })
+}
+
 #[allow(dead_code)]
 fn _r(_: Result<()>) {}
 
@@ -919,5 +963,107 @@ mod adjust_tests {
         s.execute("layout.marginsAndColumns", &json!({"margins": 36})).unwrap();
         let b2 = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
         assert_eq!(b, b2);
+    }
+}
+
+#[cfg(test)]
+mod parent_base_tests {
+    use serde_json::{Value, json};
+
+    fn rect(s: &mut crate::Session, spread: Value, r: [f64; 4], swatch: &str) -> u64 {
+        let id = s.execute("frame.create", &json!({"spread": spread, "rect": r, "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.fill", &json!({"ids": [id], "swatch": swatch})).unwrap();
+        id
+    }
+
+    fn page(s: &crate::Session, abs: usize) -> designcraft_render::Rendered {
+        let mut rr = designcraft_render::Renderer::new();
+        rr.threads = 0;
+        rr.render_page(&s.doc().unwrap().doc, &s.cache, abs, 1.0, false, &Default::default()).unwrap()
+    }
+
+    /// Parent A (black), parent B based on A (cyan, half over A's square), and a page item (paper)
+    /// over B's: the page draws A, then B, then its own items.
+    #[test]
+    fn based_on_parent_draws_base_items_under_parent_items() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400, "pages": 2, "facingPages": false, "margins": 0})).unwrap();
+        s.execute("layout.parents.new", &json!({"prefix": "B", "name": "Opening"})).unwrap();
+        rect(&mut s, json!({"kind": "parent", "index": 0}), [0.0, 0.0, 200.0, 200.0], "[Black]");
+        rect(&mut s, json!({"kind": "parent", "index": 1}), [100.0, 0.0, 300.0, 200.0], "C=100 M=0 Y=0 K=0");
+        rect(&mut s, json!(1), [150.0, 0.0, 190.0, 40.0], "[Paper]");
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "B"})).unwrap();
+        let black = |p: [u8; 4]| p[0] < 80 && p[1] < 80 && p[2] < 80;
+        let cyan = |p: [u8; 4]| p[0] < 80 && p[1] > 120 && p[2] > 180;
+        let paper = |p: [u8; 4]| p[0] > 240 && p[1] > 240 && p[2] > 240;
+        assert!(paper(page(&s, 1).pixel(50, 100)), "B alone does not show A's items");
+
+        let r = s.execute("layout.parents.options", &json!({"parent": "B", "basedOn": "A"})).unwrap();
+        assert_eq!(r, json!({"parent": "B-Opening", "basedOn": "A-Parent"}));
+        let img = page(&s, 1);
+        assert!(black(img.pixel(50, 100)), "A's item: {:?}", img.pixel(50, 100));
+        assert!(cyan(img.pixel(150, 150)), "B's item over A's: {:?}", img.pixel(150, 150));
+        assert!(paper(img.pixel(170, 20)), "the page's item over B's: {:?}", img.pixel(170, 20));
+        assert!(black(page(&s, 0).pixel(50, 100)) && !cyan(page(&s, 0).pixel(250, 100)), "page 1 uses A only");
+        // Parent B itself shows A's items under its own.
+        let mut rr = designcraft_render::Renderer::new();
+        rr.threads = 0;
+        let placed = [designcraft_render::Placed { spread: designcraft_doc::SpreadRef::Parent(1), xf: designcraft_geom::Affine::IDENTITY }];
+        let opts = designcraft_render::RenderOptions { background: Some([255, 255, 255, 255]), ..Default::default() };
+        let img = rr.render(&s.doc().unwrap().doc, &s.cache, &placed, 400, 400, designcraft_geom::Affine::IDENTITY, &opts);
+        assert!(black(img.pixel(50, 100)) && cyan(img.pixel(150, 150)), "{:?} {:?}", img.pixel(50, 100), img.pixel(150, 150));
+        let inspect = s.execute("document.inspect", &json!({})).unwrap();
+        assert_eq!(inspect["parents"][1]["basedOn"], "A-Parent");
+        assert_eq!(inspect["parents"][0]["basedOn"], Value::Null);
+
+        // Cycles are refused.
+        assert!(s.execute("layout.parents.options", &json!({"parent": "A", "basedOn": "B"})).is_err());
+        assert!(s.execute("layout.parents.options", &json!({"parent": "B", "basedOn": "B-Opening"})).is_err());
+        assert!(s.execute("layout.parents.options", &json!({"parent": "B", "basedOn": "Z"})).is_err());
+
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(paper(page(&s, 1).pixel(50, 100)), "undo clears Based on Parent");
+        s.execute("edit.redo", &json!({})).unwrap();
+        s.execute("layout.parents.options", &json!({"parent": "B", "basedOn": null})).unwrap();
+        assert_eq!(s.execute("document.inspect", &json!({})).unwrap()["parents"][1]["basedOn"], Value::Null);
+    }
+
+    /// A's page-number marker shown on parent XYZ (based on A) reads XYZ, as markers on XYZ's own items do.
+    #[test]
+    fn base_parent_markers_read_the_showing_parent() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"pages": 1, "facingPages": false})).unwrap();
+        s.execute("layout.parents.new", &json!({"prefix": "XYZ"})).unwrap();
+        s.execute("layout.parents.options", &json!({"parent": "XYZ", "basedOn": "A"})).unwrap();
+        let marker = designcraft_doc::story::PAGE_NUMBER.to_string();
+        let r = s
+            .execute("frame.create", &json!({"spread": {"kind": "parent", "index": 0}, "rect": [72, 30, 500, 60], "content": "text", "text": marker}))
+            .unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        let sid = d.item(designcraft_doc::ItemId(r["id"].as_u64().unwrap())).unwrap().text_frame().unwrap().story;
+        let glyphs = |on| -> usize {
+            let cs = s.cache.get_on(&d, sid, on);
+            cs.frames.iter().flat_map(|f| f.lines.iter()).map(|l| l.glyphs.iter().filter(|g| g.visible && g.adv > 0.0).count()).sum()
+        };
+        assert_eq!(glyphs(designcraft_compose::ShownOn::Own), 1, "A");
+        assert_eq!(glyphs(designcraft_compose::ShownOn::Parent(1)), 3, "XYZ");
+    }
+
+    /// A file whose parents are based on each other opens, with the cycle broken and reported.
+    #[test]
+    fn opening_a_parent_cycle_breaks_it_with_a_warning() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"pages": 1})).unwrap();
+        s.execute("layout.parents.new", &json!({"prefix": "B"})).unwrap();
+        let mut d = s.doc().unwrap().doc.as_ref().clone();
+        let (a, b) = (d.parents[0].id, d.parents[1].id);
+        std::sync::Arc::make_mut(&mut d.parents[0]).parent.as_mut().unwrap().based_on = Some(b);
+        std::sync::Arc::make_mut(&mut d.parents[1]).parent.as_mut().unwrap().based_on = Some(a);
+        let b64 = crate::cmd::base64_encode(&crate::cmd::to_bytes(&d));
+        let r = s.execute("file.openBytes", &json!({"name": "cycle", "base64": b64})).unwrap();
+        assert!(r["warnings"].to_string().contains("cycle"), "{r}");
+        let d = &s.doc().unwrap().doc;
+        assert_eq!(d.parents[0].parent.as_ref().unwrap().based_on, None);
+        assert_eq!(d.parents[1].parent.as_ref().unwrap().based_on, Some(a));
     }
 }
