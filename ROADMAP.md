@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~0% and ~15–25 h away; beta ~28 points and ~420–750 h beyond that (the core-workflow gate, not the percentage: ready for real work is already ~47%)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (cancelable macOS Dock Quit) · **Target:** Adobe InDesign 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (.indd and .indt open through indd-utils) · **Target:** Adobe InDesign 2026
 
 DesignCraft aims at full Adobe InDesign parity, and to be better: faster, open (documented JSON
 format + IDML), scriptable by agents (MCP), and available on the web.
@@ -21,7 +21,7 @@ format + IDML), scriptable by agents (MCP), and available on the web.
 | Audience | Ready | Opus 5.5 agent-hours to ~95% | Work that dominates |
 |---|---|---|---|
 | Full target (ready for real work) | ~47% | 1,150–1,950 (~70% parallel) | depth across all areas, scripting compatibility, localization, typography fidelity, INDD/IDML |
-| Mainstream practitioner | ~42% | 500–850 (~65% parallel) | INDD import and IDML corpus, composition fidelity, weekly-area depth, PDF/X-1a and printing |
+| Mainstream practitioner | ~42% | 500–850 (~65% parallel) | INDD and IDML real-file corpus, composition fidelity, weekly-area depth, PDF/X-1a and printing |
 | Essentials user | ~54% | 135–250 (~50% parallel) | start-up robustness, context menus and copy/paste, threading, fonts, Windows printing |
 
 **Why pre-alpha:** it fails one of InDesign's core workflows, the alpha gate in
@@ -31,7 +31,7 @@ thread or unthread command. Long text flows only through autoflow on Place and P
 Frame, which users report adding and keeping pages wrongly (#165, #140, #194, #352). Everything
 else in the gate works end to end on macOS (document setup, styles, images, object editing, PDF
 export, save and reopen), and ready for real work (~47%) is above the alpha bar, so manual
-threading is the whole distance to alpha. Beyond that, beta needs INDD opening, IDML proven on
+threading is the whole distance to alpha. Beyond that, beta needs INDD and IDML proven on
 real files, composition compared with InDesign's, and basic editing fixed on Windows and Linux.
 Details: [docs/target-app-parity.md](docs/target-app-parity.md).
 
@@ -41,7 +41,7 @@ Details: [docs/target-app-parity.md](docs/target-app-parity.md).
 |---|---|---|---|
 | Features (depth) | 55% | 250–400 | [target-app-parity.md](docs/target-app-parity.md) |
 | Typography and composition fidelity | 45% | 120–200 | [typography-parity.md](docs/typography-parity.md) |
-| File formats | 40% | 150–250 + 20–60 (INDD) | [file-format-parity.md](docs/file-format-parity.md) |
+| File formats | 40% | 150–250 + 10–30 (INDD corpus) | [file-format-parity.md](docs/file-format-parity.md) |
 | UI/UX fidelity | 45% | 120–180 | [ui-parity.md](docs/ui-parity.md) |
 | Stability | 45% | 60–100 | [gaps.md](docs/gaps.md) |
 | Performance | 65% | 40–80 | [gaps.md](docs/gaps.md) |
@@ -109,7 +109,7 @@ Ranked; detail and estimates in [docs/roadmap.md](docs/roadmap.md), the full lis
 1. **Alpha gate:** manual text threading (out-port click, thread/unthread commands) and Primary Text Frame fixes (#165) (15–25 h)
 2. Basic editing on every platform: copy/paste, context menus, caret formatting (30–50 h)
 3. CI running `cargo xtask ci` on pull requests (4–8 h)
-4. Open INDD through a clean-room converter, owner decision on #114 (20–60 h)
+4. INDD real-file corpus: measure what `.indd` files keep through indd-utils (10–30 h)
 5. IDML real-file corpus and fixes (60–100 h)
 6. Composition oracle against InDesign; optical kerning; overset rule (80–140 h)
 7. Start on any GPU; find every installed font (25–50 h)
@@ -129,6 +129,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-13** · `.indd` and `.indt` documents open through File › Open, drop, the web inbox, `file.open`, `file.openBytes`, `file.openIdml` and the CLI: [storytold/indd-utils](https://github.com/storytold/indd-utils) converts them to IDML in memory and the IDML importer reads the result, on desktop and web. Converter warnings come first in the open result; an unreadable file is an open error (#21, #114). No readiness percentage change until a real-file corpus measures it.
 - **2026-10-12** · macOS Dock Quit uses the same unsaved-document prompts as window and menu Quit. Repeated requests keep the current answers; Cancel retains every tab and unsaved recovery checkpoint, and completed Save/Don't Save answers exit through the ordinary event loop. No readiness percentage change.
 - **2026-10-12** · Orderly native exit writes the latest recovery state after finalizing current quit approvals; incomplete or stale plans keep their documents, and Undo to the saved state clears stale recovery. Unavailable or failed recovery is reported. Cancelable macOS Dock Quit remains open (#544). No readiness percentage change.
 - **2026-10-12** · Recovered documents keep a checkpoint until saved, closed or reverted, including a second crash before autosave. Restarted document IDs and explicit recovery folders preserve other snapshots; failed republishing retains the original. No readiness percentage change.

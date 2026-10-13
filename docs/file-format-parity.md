@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (.indd and .indt open through indd-utils) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every format InDesign 2026 reads or writes, with DesignCraft's support, fidelity and tests. The
 InDesign list comes from its bundle's `Info.plist` (`CFBundleDocumentTypes`,
@@ -8,8 +8,8 @@ InDesign list comes from its bundle's `Info.plist` (`CFBundleDocumentTypes`,
 the open/place/export filters in `apps/designcraft/src/main.rs` and the `file.*` commands.
 Overall numbers: [target-app-parity.md](target-app-parity.md); open problems: [gaps.md](gaps.md).
 
-**Dimension score: ~40% ready (estimated), 150–250 h + 20–60 h for INDD integration.** The
-single largest gap is that `.indd` can't be opened.
+**Dimension score: ~40% ready (estimated), 150–250 h + 10–30 h for an INDD corpus.** The
+largest gaps are that neither `.indd` opening nor IDML is measured on real files.
 
 Read/Write: **✓** supported · **~** partial · **✗** missing · **—** InDesign doesn't either.
 Weight: what share of an InDesign professional's file traffic the format carries (used for the
@@ -19,8 +19,8 @@ score below).
 
 | Format | Ext | InDesign | DesignCraft read | DesignCraft write | Fidelity / tests | Weight |
 |---|---|---|---|---|---|---|
-| InDesign document | `.indd` | read/write (native) | ✗ (#21; converters proposed in #98, #114) | ✗ | — | 30% |
-| InDesign template | `.indt` | read/write | ✗ | ✗ | — | 2% |
+| InDesign document | `.indd` | read/write (native) | ✓ (converted to IDML in memory by [storytold/indd-utils](https://github.com/storytold/indd-utils), then the IDML importer; #21, #114) | ✗ | Converter warnings join the open result; unreadable files are open errors. Synthetic-bytes tests only; indd-utils reports 96.9% of IDML values reproduced on ~650 pairs. No real-file corpus test | 30% |
+| InDesign template | `.indt` | read/write | ✓ (as `.indd`) | ✗ | As `.indd` | 2% |
 | InDesign Markup | `.idml` | read/write | ✓ | ✓ | Synthetic fixtures in `crates/idml/src/tests.rs` (49 tests); exported files verified by opening in InDesign 2026 by hand; indd-utils' 98-document run imports 811 spreads / 2,866 stories / 5,812 items. Open: #193, #338, #339, #340, #211. No real-file corpus test | 20% |
 | DesignCraft native | `.designcraft` | — | ✓ | ✓ | zip + JSON, versioned; round-trip tests | — |
 | InDesign book | `.indb` | read/write | ✗ (own `.dcbook`) | ✗ | Books are shallow (see gaps.md) | 2% |
@@ -86,25 +86,27 @@ score below).
 ## Score
 
 Weighted by the Weight column (documents, output and placed tables; resources unweighted),
-counting ✓ = 1, ~ = 0.5, and IDML at 0.6 until a real-file corpus proves it: **~45% present**.
-Taking fidelity into account (no INDD, IDML unproven, PDF/X-1a and presets missing), **~40% ready
-for real work** (estimated). INDD alone moves this dimension by up to 30 points.
+counting ✓ = 1, ~ = 0.5, IDML at 0.6 and INDD at 0 until a real-file corpus measures them:
+**~45% present**. Taking fidelity into account (INDD and IDML unmeasured, PDF/X-1a and presets
+missing), **~40% ready for real work** (estimated). A measured INDD corpus moves this dimension by
+up to 30 points.
 
 ## Remaining effort
 
 | Work | Opus 5.5 h |
 |---|---|
-| INDD import via a clean-room converter (owner decision, #114) | 20–60 |
+| INDD real-file corpus, metric, fixes (#21, #114) | 10–30 |
 | IDML real-file corpus, metric, fixes (#193, #338, #339, #340) | 60–100 |
 | PDF/X-1a and X-3 (transparency flattener), PDF presets and `.joboptions`, external validator | 40–70 |
 | Print fidelity, PostScript level 3 output and print presets | 25–45 |
-| ICML story import, IDMS snippets, INDT templates (once INDD reads) | 15–25 |
+| ICML story import, IDMS snippets | 15–25 |
 | HTML / fixed-layout EPUB with live text | 20–35 |
 | JPEG export dialog, SVG export, EPS export | 10–20 |
-| **Total** | **190–355** (150–250 excluding INDD and PostScript output) |
+| **Total** | **180–325** (150–250 excluding INDD and PostScript output) |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-13 | minor | `.indd` and `.indt` read through storytold/indd-utils; INDD remaining work is a real-file corpus (10–30 h); score unchanged until it is measured |
 | 2026-10-10 | major | Created from InDesign 2026's declared document types and filters, `plan/indesign/08-file-formats.md` and the code |

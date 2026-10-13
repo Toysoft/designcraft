@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (book chapter update safety) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (.indd and .indt open through indd-utils) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -43,14 +43,18 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 - **Estimate:** 30–50 h (reproduce per platform through the control channel, regression tests).
 - **Doc:** [ui-parity.md](ui-parity.md)
 
-### 2. InDesign documents (.indd) can't be opened (FF)
-- **Missing:** INDD (and INDT, INDB, INDL) reading. Everything InDesign users receive is INDD.
-- **Evidence:** #21. Two clean-room converters are proposed: PR #98 and `indd-utils` (#114),
-  which reports 96.9% of InDesign's IDML values reproduced on ~650 INDD/IDML pairs, 0 failures on
-  ~4,300 files, and output that DesignCraft's IDML importer already reads.
-- **Impact:** without it, every job starts with "ask the client for an IDML".
-- **Estimate:** 20–60 h to integrate indd-utils (INDD → IDML → existing importer), warnings UI,
-  corpus test; **owner decision** on provenance and where the crate lives.
+### 2. INDD opening isn't measured on real files (FF)
+- **Missing:** a real-file corpus test of opening `.indd` and `.indt`. They open through
+  [storytold/indd-utils](https://github.com/storytold/indd-utils), which converts them to IDML in
+  memory for the IDML importer, but DesignCraft's own tests use synthetic bytes only. INDB and
+  INDL are still not read.
+- **Evidence:** #21, #114 (PR #98 proposed another converter). indd-utils reports 96.9% of
+  InDesign's IDML values reproduced on ~650 INDD/IDML pairs and 0 failures on ~4,300 files; what
+  DesignCraft draws from those files is unmeasured, and it inherits the IDML importer's open bugs
+  (gap 3).
+- **Impact:** a client's `.indd` opens, but nobody knows how close it comes to the original.
+- **Estimate:** 10–30 h (corpus pinned in a sibling of `storytold/photocraft-corpus`, metric,
+  fixes in indd-utils or the IDML importer).
 - **Doc:** [file-format-parity.md](file-format-parity.md)
 
 ### 3. IDML round-trip isn't proven on real files (FF)
