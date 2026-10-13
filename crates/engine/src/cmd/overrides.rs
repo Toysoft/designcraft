@@ -6,7 +6,7 @@ use designcraft_doc::{Document, ItemId, SpreadRef};
 use designcraft_geom::Vec2;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc};
+use super::{CommandSpec, bad, cmd, has_doc, no_page};
 use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -72,7 +72,7 @@ fn override_items(s: &mut Session, p: &Value) -> Result<Value> {
     let wanted: Option<Vec<ItemId>> = super::ids_param(p, "ids");
     s.edit(|d, sel| {
         let (all, off) = parent_items(d, page).ok_or_else(|| bad("layout.overrideParentItems", "the page has no parent"))?;
-        let (si, pi) = d.page_loc(page).ok_or_else(|| bad("layout.overrideParentItems", "no such page"))?;
+        let (si, pi) = d.page_loc(page).ok_or_else(|| bad("layout.overrideParentItems", no_page(d, page)))?;
         let already = d.spreads[si].pages[pi].overridden.clone();
         let ids: Vec<ItemId> = all.into_iter().filter(|i| wanted.as_ref().is_none_or(|w| w.contains(i)) && !already.contains(i)).collect();
         if ids.is_empty() {

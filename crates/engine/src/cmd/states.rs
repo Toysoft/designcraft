@@ -3,7 +3,7 @@
 use designcraft_doc::{ItemId, Shape};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_selection};
+use super::{CommandSpec, bad, cmd, has_selection, no_object};
 use crate::{Result, Session};
 
 fn target(s: &Session, p: &Value) -> Result<ItemId> {
@@ -44,7 +44,8 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!(query "states.list", "Object States", [], None, "{id?} → {states, active}", has_selection, |s, p| {
             let id = target(s, p)?;
-            let it = s.doc()?.doc.item(id).ok_or_else(|| bad("states.list", "no such object"))?;
+            let d = &s.doc()?.doc;
+            let it = d.item(id).ok_or_else(|| bad("states.list", no_object(id)))?;
             Ok(json!({"states": it.states, "active": it.active_state}))
         }),
         cmd!("states.show", "Show State", [], None, "{id?, index? | name?}", has_selection, |s, p| {
@@ -52,7 +53,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let idx = p.get("index").and_then(Value::as_u64).map(|v| v as usize);
             let name = p.get("name").and_then(Value::as_str).map(str::to_string);
             s.edit(|d, _| {
-                let it = d.item_mut(id).ok_or_else(|| bad("states.show", "no such object"))?;
+                let Some(it) = d.item_mut(id) else { return Err(bad("states.show", no_object(id))) };
                 if it.states.is_empty() {
                     return Err(bad("states.show", "not a multi-state object"));
                 }
@@ -73,7 +74,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let i = p.get("index").and_then(Value::as_u64).ok_or_else(|| bad("states.rename", "`index` required"))? as usize;
             let name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             s.edit(|d, _| {
-                let it = d.item_mut(id).ok_or_else(|| bad("states.rename", "no such object"))?;
+                let Some(it) = d.item_mut(id) else { return Err(bad("states.rename", no_object(id))) };
                 let st = it.states.get_mut(i).ok_or_else(|| bad("states.rename", format!("no state {i}")))?;
                 *st = name;
                 Ok(Value::Null)
@@ -82,7 +83,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("states.release", "Release State to Objects", [], None, "{id?} — back to a plain group (every state shows)", has_selection, |s, p| {
             let id = target(s, p)?;
             s.edit(|d, _| {
-                let it = d.item_mut(id).ok_or_else(|| bad("states.release", "no such object"))?;
+                let Some(it) = d.item_mut(id) else { return Err(bad("states.release", no_object(id))) };
                 it.states.clear();
                 it.active_state = 0;
                 Ok(Value::Null)

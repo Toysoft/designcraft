@@ -12,11 +12,18 @@ three ways — pick whichever fits the agent:
 ## Discover commands
 
 ```sh
-designcraft-cli commands footnote        # every command whose id/label/menu mentions "footnote"
-designcraft-cli describe xref.insert     # label, menu path, shortcut and parameters of one command
+designcraft-cli help run                 # how commands are run, and what the ids don't say (units, pages, selection)
+designcraft-cli commands footnote        # every command whose id/label/menu mentions "footnote", one per line
+designcraft-cli describe xref.insert     # one command: its parameters spelled out, what it acts on, what it answers
 ```
 
-Parameters are documented on each command (`params`), e.g. `{anchor? | paragraph?: text to find | story? + para?, format?}`.
+Parameters are documented on each command (`params`), e.g. ``{anchor? | paragraph?: text to find (first paragraph
+containing it) | story?, para?: 0-based paragraph of `story`, format?: name}``: `?` marks an optional parameter, a
+spaced ` | ` separates alternatives, `…` stands for more, `→` shows the answer and ` — ` starts a remark. The doc is
+the contract: the CLI, MCP and the control channel refuse a parameter the command doesn't take, naming the ones it
+does. A command with no answer of its own answers with what it changed (`changed text frame 8 on page 1`,
+`selected frame 8 on page 1`, `nothing changed`), and an error says what was read, what is wrong and the form that
+works.
 
 ## Scripts: several commands, later ones using earlier results
 
@@ -38,8 +45,9 @@ designcraft-cli script page.dcs --connect 7979      # the same steps, live in th
 ```
 
 The result is JSON: `{"completed": n, "results": [...]}`, plus `failedIndex` / `failedCommand` / `error` when a step
-fails (the exit status is non-zero; `--keep-going` records errors and continues). `run --cmd ID=JSON` accepts the
-same references, and MCP's `batch` tool takes `commands` or `script` text with them.
+fails (the exit status is non-zero; `--keep-going` records errors and continues). `run --cmd COMMAND=PARAMS` accepts
+the same references and prints one `COMMAND → ANSWER` line per command, and MCP's `batch` tool takes `commands` or
+`script` text with them.
 
 `run` works through its arguments in order. `--page`, `--scale` and `--pdf-options` apply to the `--export` /
 `--all-pages` that follow them, so one run can write several sizes

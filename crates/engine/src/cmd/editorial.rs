@@ -5,7 +5,7 @@ use std::sync::Arc;
 use designcraft_doc::{EditorialNote, NOTE_MARK, StoryId};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, has_text, ok, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, has_text, no_story, ok, str_param};
 use crate::Result;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -20,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let author = str_param(p, "author").unwrap_or("").to_string();
             let at = ts.anchor.max(ts.focus);
             s.edit(|d, sel| {
-                let story = d.story_mut(ts.story).ok_or_else(|| bad("note.new", "no such story"))?;
+                let Some(story) = d.story_mut(ts.story) else { return Err(bad("note.new", no_story(ts.story))) };
                 let fmt = story.char_format_at(at).clone();
                 story.insert_with(at, &NOTE_MARK.to_string(), fmt);
                 let k = story.text[..at].matches(NOTE_MARK).count();
@@ -38,7 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let (sid, id) = target(p)?;
             let (text, author) = (str_param(p, "text").map(str::to_string), str_param(p, "author").map(str::to_string));
             s.edit(|d, _| {
-                let st = d.story_mut(sid).ok_or_else(|| bad("note.edit", "no such story"))?;
+                let Some(st) = d.story_mut(sid) else { return Err(bad("note.edit", no_story(sid))) };
                 let n = st.editorial.iter_mut().find(|n| n.id == id).ok_or_else(|| bad("note.edit", format!("no note {id}")))?;
                 let n = Arc::make_mut(n);
                 if let Some(t) = text {
@@ -54,7 +54,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("note.delete", "Delete Note", ["Type", "Notes"], None, "{story, id}", has_doc, |s, p| {
             let (sid, id) = target(p)?;
             s.edit(|d, _| {
-                let st = d.story_mut(sid).ok_or_else(|| bad("note.delete", "no such story"))?;
+                let Some(st) = d.story_mut(sid) else { return Err(bad("note.delete", no_story(sid))) };
                 let at = anchor(st, id).ok_or_else(|| bad("note.delete", format!("no note {id}")))?;
                 st.delete(at..at + NOTE_MARK.len_utf8());
                 ok()
@@ -70,7 +70,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, p| {
                 let (sid, id) = target(p)?;
                 s.edit(|d, _| {
-                    let st = d.story_mut(sid).ok_or_else(|| bad("note.convertToText", "no such story"))?;
+                    let Some(st) = d.story_mut(sid) else { return Err(bad("note.convertToText", no_story(sid))) };
                     let at = anchor(st, id).ok_or_else(|| bad("note.convertToText", format!("no note {id}")))?;
                     let text = st.editorial.iter().find(|n| n.id == id).map(|n| n.text.clone()).unwrap_or_default();
                     st.replace(at..at + NOTE_MARK.len_utf8(), &text);

@@ -47,7 +47,7 @@ fn style_specs() -> Vec<CommandSpec> {
             "Cell Style Options…",
             [],
             None,
-            "{name, …same as style.cell.create} — cells using the style follow",
+            "{name, basedOn?, fill?, tint?, insets?: n|[t,l,b,r], vj?: top|center|bottom|justify, stroke?: {weight, color, tint?}, paragraphStyle?} — cells using the style follow",
             has_doc,
             cell_style_edit
         ),
@@ -66,7 +66,7 @@ fn style_specs() -> Vec<CommandSpec> {
             "Table Style Options…",
             [],
             None,
-            "{name, …same as style.table.create} — tables using the style follow",
+            "{name, basedOn?, header?, body?, footer?, leftColumn?, rightColumn?: cell style names, border?: {weight, color}, altRows?: {first, firstColor, next, nextColor}} — tables using the style follow",
             has_doc,
             table_style_edit
         ),
@@ -126,7 +126,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Convert Cell to Graphic Cell",
             ["Table", "Convert Cell Type"],
             None,
-            "{path | base64+name, fit?: proportional|fill (default proportional)} — an image in the target cell (its text is kept but hidden)",
+            "{path? | base64?: string, name? (with base64: the image name), fit?: proportional|fill (default proportional)} — an image in the target cell (its text is kept but hidden)",
             in_table,
             place_graphic
         ),
@@ -196,7 +196,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Cell Options",
             [],
             None,
-            "{fill?: swatch, tint?, insets?: n | [t,l,b,r], vj?: top|center|bottom|justify, text?, stroke?: {weight?, color?, tint?, type?: solid|dashed|dotted, edges?: all|outer|inner|top|left|bottom|right}}",
+            "{fill?: swatch, tint?, insets?: n|[t,l,b,r], vj?: top|center|bottom|justify, text?, stroke?: {weight?, color?, tint?, type?: solid|dashed|dotted, edges?: all|outer|inner|top|left|bottom|right}}",
             in_table,
             set_cell
         ),
@@ -217,7 +217,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Table Options",
             [],
             None,
-            "{direction?: leftToRight|rightToLeft, border?: {weight?, color?, tint?, type?}, spaceBefore?, spaceAfter?, headerRows?, footerRows?, repeatHeader?, repeatFooter?, altRows?: {first, firstColor, firstTint, next, nextColor, nextTint, skipFirst, skipLast} | null, altCols?: … | null}",
+            "{direction?: leftToRight|rightToLeft, border?: {weight?, color?, tint?, type?}, spaceBefore?, spaceAfter?, headerRows?, footerRows?, repeatHeader?, repeatFooter?, altRows?: {first, firstColor, firstTint, next, nextColor, nextTint, skipFirst, skipLast}|null, altCols?: …|null}",
             in_table,
             options
         ),

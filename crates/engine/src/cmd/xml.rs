@@ -211,27 +211,35 @@ pub fn specs() -> Vec<CommandSpec> {
                 ok()
             })
         }),
-        cmd!("xml.tagText", "Tag Text", [], None, "{tag | null (untag)} — the selected text becomes an inline element", super::has_doc, |s, p| {
-            let tag = str_param(p, "tag").map(str::to_string);
-            if let Some(t) = &tag
-                && !valid_name(t)
-            {
-                return Err(bad("xml.tagText", format!("`{t}` isn't a valid XML name")));
+        cmd!(
+            "xml.tagText",
+            "Tag Text",
+            [],
+            None,
+            "{tag: name|null (null untags)} — the selected text becomes an inline element",
+            super::has_doc,
+            |s, p| {
+                let tag = str_param(p, "tag").map(str::to_string);
+                if let Some(t) = &tag
+                    && !valid_name(t)
+                {
+                    return Err(bad("xml.tagText", format!("`{t}` isn't a valid XML name")));
+                }
+                if s.doc()?.selection.text.is_none_or(|t| t.range().is_empty()) {
+                    return Err(bad("xml.tagText", "select some text"));
+                }
+                if let Some(t) = &tag {
+                    s.edit(|d, _| {
+                        if !d.xml.tags.iter().any(|x| x.name == *t) {
+                            let color = COLORS[d.xml.tags.len() % COLORS.len()];
+                            d.xml.tags.push(XmlTag { name: t.clone(), color });
+                        }
+                        ok()
+                    })?;
+                }
+                s.execute("type.char", &json!({"xmlTag": tag.unwrap_or_default()}))
             }
-            if s.doc()?.selection.text.is_none_or(|t| t.range().is_empty()) {
-                return Err(bad("xml.tagText", "select some text"));
-            }
-            if let Some(t) = &tag {
-                s.edit(|d, _| {
-                    if !d.xml.tags.iter().any(|x| x.name == *t) {
-                        let color = COLORS[d.xml.tags.len() % COLORS.len()];
-                        d.xml.tags.push(XmlTag { name: t.clone(), color });
-                    }
-                    ok()
-                })?;
-            }
-            s.execute("type.char", &json!({"xmlTag": tag.unwrap_or_default()}))
-        }),
+        ),
         cmd!("xml.tag", "Tag Frame", [], None, "{tag (made if new), ids? (default: the selection)} — `tag: null` untags", has_doc, |s, p| {
             let tag = str_param(p, "tag").map(str::to_string);
             if let Some(t) = &tag
@@ -263,7 +271,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Map Styles to Tags",
             [],
             None,
-            "{style: paragraph style, tag | null} — that style's paragraphs export as `<tag>` elements and import back with it",
+            "{style: paragraph style, tag: name|null} — that style's paragraphs export as `<tag>` elements and import back with it",
             has_doc,
             |s, p| {
                 let style = str_param(p, "style").unwrap_or("").to_string();
@@ -316,7 +324,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load DTD…",
             ["Window", "Utilities", "Tags"],
             None,
-            "{path | text} — keep the DTD for validation and add a tag for each declared element; the root takes the first element's name unless already named → {elements}",
+            "{path? | text?} — keep the DTD for validation and add a tag for each declared element; the root takes the first element's name unless already named → {elements}",
             has_doc,
             |s, p| {
                 let text = text_or_path(p, "xml.loadDtd")?;
@@ -372,7 +380,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import XML…",
             ["File"],
             None,
-            "{path | text} — each element's content goes into the next text frame with that tag (child elements of mapped tags become paragraphs in their style) → {placed, unmatched}",
+            "{path? | text?} — each element's content goes into the next text frame with that tag (child elements of mapped tags become paragraphs in their style) → {placed, unmatched}",
             has_doc,
             import_xml
         ),

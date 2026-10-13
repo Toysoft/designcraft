@@ -4,7 +4,7 @@
 use designcraft_doc::{ParaFormat, SpreadRef, StoryId};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, has_text, ok, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, has_text, no_story, ok, str_param};
 use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -23,7 +23,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let text = str_param(p, "text").unwrap_or("").to_string();
             s.edit(|d, _| {
                 let style = d.endnote_options.para_style.clone();
-                let st = d.story_mut(sid).ok_or_else(|| bad("endnote.edit", "no such story"))?;
+                let Some(st) = d.story_mut(sid) else { return Err(bad("endnote.edit", no_story(sid))) };
                 let n = st.endnote_mut(id).ok_or_else(|| bad("endnote.edit", format!("no endnote {id}")))?;
                 n.text = designcraft_doc::Story::with_text(StoryId(0), &text, ParaFormat { style, ..Default::default() });
                 ok()
@@ -32,7 +32,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("endnote.delete", "Delete Endnote", [], None, "{story, id} — removes the reference and its text", has_doc, |s, p| {
             let (sid, id) = target(p)?;
             s.edit(|d, _| {
-                let st = d.story_mut(sid).ok_or_else(|| bad("endnote.delete", "no such story"))?;
+                let Some(st) = d.story_mut(sid) else { return Err(bad("endnote.delete", no_story(sid))) };
                 let k = st.endnotes.iter().position(|n| n.id == id).ok_or_else(|| bad("endnote.delete", format!("no endnote {id}")))?;
                 let at = st
                     .text
@@ -120,7 +120,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
             frame = Some(fid.0);
         }
         let style = d.endnote_options.para_style.clone();
-        let story = d.story_mut(ts.story).ok_or_else(|| bad(ID, "no such story"))?;
+        let Some(story) = d.story_mut(ts.story) else { return Err(bad(ID, no_story(ts.story))) };
         let id = story.insert_endnote(at, &text, ParaFormat { style, ..Default::default() });
         let caret = at + designcraft_doc::ENDNOTE_REF.len_utf8();
         if let Some(t) = &mut sel.text {

@@ -74,7 +74,7 @@ and its second character starts at 3. An offset inside a character snaps back to
 | Tool | What it does |
 |---|---|
 | `list_commands` | Every command (id, label, menu path, shortcut, params, enabled), with `filter` / `enabledOnly` |
-| `execute` | Run any command: `{command, params}` |
+| `execute` | Run any command: `{command, params}`. Parameters the command doesn't take are refused, naming the ones it does; a command with no answer of its own answers with what it changed, as text |
 | `batch` | Run `commands: [{command, params}]` (or `script` text, one `command.id {json}` per line) in order, stopping at the first error (reports `failedIndex`); `"$N.path"` parameters use earlier results ([agents.md](agents.md)) |
 | `inspect_document` | Pages, spreads, items (ids, bounds, fill, story), stories (overset), layers, styles, swatches, selection |
 | `get_story` | Text, frames, paragraphs, lines, overset of a story (`story` or text `frame`) |

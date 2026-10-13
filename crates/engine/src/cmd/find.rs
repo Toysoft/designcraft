@@ -25,7 +25,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Change All (Object)",
             [],
             None,
-            "{…find.objects criteria, change: {fill?, stroke?, strokeWeight?, opacity?}} → {changed}",
+            "{fill?, stroke?: swatch, strokeWeight?, opacity? (0–1), kind?: text|graphic|shape|line|group, layer?, label? (the find.objects criteria), change: {fill?, stroke?, strokeWeight?, opacity?}} → the objects changed",
             has_doc,
             |s, p| {
                 let ids = find_objects(&s.doc()?.doc, p);
@@ -65,7 +65,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             change
         ),
-        cmd!(noundo "find.next", "Find Next", ["Edit"], Some("Cmd+Alt+F"), "{find, grep?, …} — selects the next match after the caret", has_doc, find_next),
+        cmd!(noundo "find.next", "Find Next", ["Edit"], Some("Cmd+Alt+F"), "{find, grep?: bool, caseSensitive?: bool, wholeWord?: bool} — selects the next match after the caret", has_doc, find_next),
     ]
 }
 
@@ -130,7 +130,7 @@ fn scope(s: &Session, p: &Value) -> Result<Vec<(StoryId, std::ops::Range<usize>)
     let d = &st.doc;
     if let Some(sid) = p.get("story").and_then(Value::as_u64) {
         let sid = StoryId(sid);
-        let len = d.story(sid).map(|x| x.len()).ok_or_else(|| bad("find", "no such story"))?;
+        let len = d.story(sid).map(|x| x.len()).ok_or_else(|| bad("find", super::no_story(sid)))?;
         return Ok(vec![(sid, 0..len)]);
     }
     match str_param(p, "scope").unwrap_or("document") {

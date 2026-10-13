@@ -600,12 +600,26 @@ impl DesignApp {
         self.ui.status = s.into();
     }
 
-    /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
+    /// The entry point for the app's own actions (menus, shortcuts, palette, panels).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.dispatch(id, params, Session::execute)
+    }
+
+    /// The entry point for the control channel: [`Session::call`], answered in words.
+    pub fn call(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.dispatch(id, params, Session::call)
+    }
+
+    fn dispatch(
+        &mut self,
+        id: &str,
+        params: Value,
+        engine: fn(&mut Session, &str, &Value) -> designcraft_engine::Result<Value>,
+    ) -> Result<Value, String> {
         if let Some(r) = menus::run_ui(self, id, &params) {
             return r;
         }
-        let r = self.session.execute(id, &params).map_err(|e| e.to_string());
+        let r = engine(&mut self.session, id, &params).map_err(|e| e.to_string());
         self.after_engine();
         if let Err(e) = &r {
             self.status(e.clone());

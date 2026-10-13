@@ -1,15 +1,17 @@
 //! The DesignCraft engine façade.
 //!
 //! Every user-visible action is a command with a stable id (`frame.create`, `text.insert`,
-//! `layout.pages.insert`…) and JSON parameters. The egui UI, the CLI, the control channel and MCP
-//! all go through [`Session::execute`]. Tools (pointer gestures) are hosted here and reduce to
-//! commands, so every gesture is journaled and replayable.
+//! `layout.pages.insert`…) and JSON parameters. The egui UI goes through [`Session::execute`]; the
+//! CLI, the control channel and MCP through [`Session::call`], which also answers in words. Tools
+//! (pointer gestures) are hosted here and reduce to commands, so every gesture is journaled and
+//! replayable.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod atomic;
 pub mod cmd;
+mod describe;
 pub mod dtd;
 pub mod guard;
 pub mod links;
@@ -33,12 +35,14 @@ pub use tooling::{SnapView, UiRequest, ViewInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("unknown command `{0}`")]
+    #[error("{}", unknown_command(.0))]
     UnknownCommand(String),
-    #[error("command `{0}` is not available right now: {1}")]
+    #[error("command `{0}` is not available right now: {1}.{hint}", hint = cmd::how_to_enable(.0, .1))]
     Disabled(String, String),
-    #[error("invalid parameters for `{cmd}`: {msg}")]
+    #[error("invalid parameters for `{cmd}`: {msg}.{}", takes(cmd))]
     BadParams { cmd: String, msg: String },
+    #[error("{}", unknown_params(cmd, unknown))]
+    UnknownParams { cmd: String, unknown: Vec<String> },
     #[error("no active document")]
     NoDocument,
     #[error("{0}")]
@@ -51,6 +55,26 @@ pub enum EngineError {
 impl From<designcraft_doc::DocError> for EngineError {
     fn from(e: designcraft_doc::DocError) -> Self {
         EngineError::Other(e.to_string())
+    }
+}
+
+fn unknown_command(id: &str) -> String {
+    match cmd::similar_commands(id).as_slice() {
+        [] => format!("unknown command `{id}`"),
+        like => format!("unknown command `{id}`; commands named like it: {}", like.join(", ")),
+    }
+}
+
+fn unknown_params(cmd: &str, unknown: &[String]) -> String {
+    let names = unknown.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+    format!("`{cmd}` was given {names}, which it doesn't take.{}", takes(cmd))
+}
+
+fn takes(cmd: &str) -> String {
+    match find_command(cmd).map(|c| c.params) {
+        Some(doc) if cmd::param_keys(doc).is_ok_and(|k| k.is_empty()) => format!(" `{cmd}` takes no parameters."),
+        Some(doc) => format!(" `{cmd}` takes {doc}."),
+        None => String::new(),
     }
 }
 
@@ -390,11 +414,52 @@ impl Session {
         }
     }
 
-    /// Run a command by id. Edits push one undo step (unless inside an interaction).
-    /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
-    /// document as it was (see [`guard`]).
+    /// Run command `id` as the app does. Edits push one undo step (unless inside an interaction).
+    /// A panic inside it becomes [`EngineError::Internal`] and leaves the document as it was (see
+    /// [`guard`]).
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         self.guarded(id, |s| s.execute_unguarded(id, params))
+    }
+
+    /// Run command `id` for a caller outside the app (the CLI, MCP, the control channel): parameters
+    /// the command doesn't take are refused, and a command with no answer of its own, or only a
+    /// count of changed objects, answers with what it changed, as a sentence (`changed text frame 8
+    /// on page 1`, `nothing changed`). A font family or style the command put in use that isn't
+    /// installed is named after a `;` in that sentence.
+    pub fn call(&mut self, id: &str, params: &Value) -> Result<Value> {
+        let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.into()))?;
+        cmd::check_params(spec, params)?;
+        let before = self.active().map(|d| (d.uid, d.doc.clone(), d.selection.clone()));
+        let asked = self.ui_requests.len();
+        let r = self.execute(id, params)?;
+        let bare_count = r.as_object().is_some_and(|o| o.len() == 1 && o.get("changed").is_some_and(Value::is_number));
+        if !r.is_null() && !bare_count {
+            return Ok(r);
+        }
+        let newly_missing: Vec<String> = match (&before, self.active()) {
+            (Some((uid, old, _)), Some(d)) if *uid == d.uid && !Arc::ptr_eq(old, &d.doc) => {
+                let was = cmd::fonts::missing(old);
+                cmd::fonts::missing(&d.doc)
+                    .into_iter()
+                    .filter(|f| !was.contains(f))
+                    .map(|(fam, st)| cmd::fonts::not_installed(&d.doc, &fam, &st))
+                    .collect()
+            }
+            _ => vec![],
+        };
+        let mut said = describe::changes(before, self.active(), self.ui_requests.get(asked..).unwrap_or_default());
+        for warning in newly_missing {
+            said.push_str("; ");
+            said.push_str(&warning);
+        }
+        Ok(said.into())
+    }
+
+    /// A session with one new document open and nothing selected.
+    pub fn with_new() -> Self {
+        let mut s = Session::new();
+        let _ = s.execute("file.new", &Value::Null);
+        s
     }
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {
@@ -406,7 +471,7 @@ impl Session {
             let Some(ids) = named else { return Err(EngineError::Disabled(id.into(), e)) };
             let st = self.doc()?;
             if let Some(gone) = ids.iter().find(|i| st.doc.item(**i).is_none()) {
-                return Err(EngineError::Disabled(id.into(), format!("no object with id {}", gone.0)));
+                return Err(EngineError::Other(describe::no_object(*gone)));
             }
         }
         // Preview is temporary. Save, merge, and every other edit restore the template first.

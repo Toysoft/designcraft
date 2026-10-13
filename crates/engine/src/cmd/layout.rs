@@ -3,7 +3,7 @@
 use designcraft_doc::{LAYER_COLORS, Layer, LayerId, Margins, SpreadId};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, ok, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_layer, none_at, ok, str_param};
 use crate::Result;
 
 /// Each page's margin box, by spread and page id.
@@ -101,13 +101,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Rotate Spread",
             [],
             None,
-            "{spread?: index (0), angle: 90 (clockwise) | -90 | 180 | 0 (clear)} — turn one spread on screen (output is unaffected)",
+            "{spread?: index (0), angle: 90|-90|180|0 (clockwise degrees; 0 clears)} — turn one spread on screen (output is unaffected)",
             has_doc,
             |s, p| {
                 let si = p.get("spread").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let angle = p.get("angle").and_then(Value::as_i64).unwrap_or(90);
                 s.edit(|d, _| {
-                    let sp = d.spreads.get_mut(si).ok_or_else(|| bad("layout.rotateSpreadView", "no such spread"))?;
+                    let n = d.spreads.len();
+                    let sp = d.spreads.get_mut(si).ok_or_else(|| bad("layout.rotateSpreadView", none_at("spread", si, n)))?;
                     let pg = std::sync::Arc::make_mut(sp).pages.first_mut().ok_or_else(|| bad("layout.rotateSpreadView", "empty spread"))?;
                     pg.view_rotation = if angle == 0 { 0 } else { ((pg.view_rotation as i64 + angle.div_euclid(90)).rem_euclid(4)) as u8 };
                     Ok(json!({"rotation": pg.view_rotation as u32 * 90}))
@@ -138,7 +139,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("layout.pages.duplicateSpread", "Duplicate Spread", ["Layout", "Pages"], None, "{spread}", has_doc, |s, p| {
             let si = p.get("spread").and_then(Value::as_u64).unwrap_or(0) as usize;
             s.edit(|d, _| {
-                let sp = d.spreads.get(si).cloned().ok_or_else(|| bad("layout.pages.duplicateSpread", "no such spread"))?;
+                let sp = d.spreads.get(si).cloned().ok_or_else(|| bad("layout.pages.duplicateSpread", none_at("spread", si, d.spreads.len())))?;
                 let after = d.first_page_of_spread(si) + sp.pages.len() - 1;
                 let parent = sp.pages.first().and_then(|p| p.parent);
                 d.insert_pages(Some(after), sp.pages.len(), parent)?;
@@ -232,7 +233,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Document Setup…",
             ["File"],
             Some("Cmd+Alt+P"),
-            "{width?, height?, pages?: count, startPage?: n, facingPages?, binding?: leftToRight|rightToLeft, intent?: print|web|mobile, bleed?, slug?: n | [top, bottom, inside, outside], adjustLayout?: bool (objects follow the new page size)} → the document setup",
+            "{width?, height?, pages?: count, startPage?: n, facingPages?, binding?: leftToRight|rightToLeft, intent?: print|web|mobile, bleed?, slug?: n|[top, bottom, inside, outside], adjustLayout?: bool (objects follow the new page size)} → the document setup",
             has_doc,
             |s, p| {
                 let p = p.clone();
@@ -362,7 +363,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 let si = p.get("spread").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let allow = p.get("allow").and_then(Value::as_bool).unwrap_or(true);
                 s.edit(|d, _| {
-                    let sp = d.spreads.get_mut(si).ok_or_else(|| bad("layout.spreadShuffle", "no such spread"))?;
+                    let n = d.spreads.len();
+                    let sp = d.spreads.get_mut(si).ok_or_else(|| bad("layout.spreadShuffle", none_at("spread", si, n)))?;
                     std::sync::Arc::make_mut(sp).allow_shuffle = allow;
                     if allow {
                         d.repaginate();
@@ -436,7 +438,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let id = LayerId(p.get("id").and_then(Value::as_u64).unwrap_or(0));
             let to = p.get("to").and_then(Value::as_u64).unwrap_or(0) as usize;
             s.edit(|d, _| {
-                let i = d.layers.iter().position(|l| l.id == id).ok_or_else(|| bad("layer.move", "no such layer"))?;
+                let i = d.layers.iter().position(|l| l.id == id).ok_or_else(|| bad("layer.move", no_layer(d, id)))?;
                 let l = d.layers.remove(i);
                 let to = to.min(d.layers.len());
                 d.layers.insert(to, l);
@@ -479,7 +481,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let id = LayerId(p.get("id").and_then(Value::as_u64).unwrap_or(0));
             let p = p.clone();
             s.edit(|d, _| {
-                let l = d.layer_mut(id).ok_or_else(|| bad("layer.set", "no such layer"))?;
+                let Some(l) = d.layer_mut(id) else { return Err(bad("layer.set", no_layer(d, id))) };
                 if let Some(v) = p.get("name").and_then(Value::as_str) {
                     l.name = v.into();
                 }
@@ -532,7 +534,8 @@ pub fn specs() -> Vec<CommandSpec> {
                     .ok_or_else(|| bad("layer.merge", "no layers"))?;
                 s.edit(|d, _| {
                     if d.layer(into).is_none() || ids.iter().any(|l| d.layer(*l).is_none()) {
-                        return Err(bad("layer.merge", "no such layer"));
+                        let gone = std::iter::once(into).chain(ids.iter().copied()).find(|l| d.layer(*l).is_none()).unwrap_or(into);
+                        return Err(bad("layer.merge", no_layer(d, gone)));
                     }
                     let gone: Vec<LayerId> = ids.iter().copied().filter(|l| *l != into).collect();
                     for sp in d.spreads.iter_mut().chain(d.parents.iter_mut()) {
@@ -600,7 +603,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let id = LayerId(p.get("id").and_then(Value::as_u64).unwrap_or(0));
             let st = s.doc_mut()?;
             if st.doc.layer(id).is_none() {
-                return Err(bad("layer.activate", "no such layer"));
+                return Err(bad("layer.activate", no_layer(&st.doc, id)));
             }
             st.active_layer = id;
             st.revision += 1;

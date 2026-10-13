@@ -4,7 +4,7 @@
 use designcraft_doc::{Document, ParaFormat, Selection, Story, StoryId};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, rect_param, spread_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_story, rect_param, spread_param};
 use crate::Result;
 
 /// `child` re-made from `parent`'s content (keeping the child's id and frames).
@@ -80,7 +80,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("story.unlink", "Unlink", [], None, "{story}", has_doc, |s, p| {
             let sid = StoryId(p.get("story").and_then(Value::as_u64).ok_or_else(|| bad("story.unlink", "missing story"))?);
             s.edit(|d, _| {
-                let st = d.story_mut(sid).ok_or_else(|| bad("story.unlink", "no such story"))?;
+                let Some(st) = d.story_mut(sid) else { return Err(bad("story.unlink", no_story(sid))) };
                 st.link = None;
                 Ok(Value::Null)
             })

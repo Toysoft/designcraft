@@ -7,7 +7,7 @@ use designcraft_doc::{Content, Document, Item, LiquidRule, ObjectLiquid, Orienta
 use designcraft_geom::{Affine, Rect};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, has_selection, str_param, targets};
+use super::{CommandSpec, bad, cmd, has_doc, has_selection, no_spread, str_param, targets};
 use crate::Result;
 
 /// One axis of an object-based rule: the new (lo, hi) for an object at (lo, hi) on a page that
@@ -173,7 +173,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let gi = p.get("index").and_then(Value::as_u64).ok_or_else(|| bad("guide.liquid", "`index` required"))? as usize;
             let on = p.get("on").and_then(Value::as_bool).unwrap_or(true);
             s.edit(|d, _| {
-                let sp = d.spread_mut(sr).ok_or_else(|| bad("guide.liquid", "no such spread"))?;
+                let Some(sp) = d.spread_mut(sr) else { return Err(bad("guide.liquid", no_spread(d, sr))) };
                 let g = sp.pages.get_mut(pi).and_then(|pg| pg.guides.get_mut(gi)).ok_or_else(|| bad("guide.liquid", "no such guide"))?;
                 g.liquid = on;
                 Ok(Value::Null)

@@ -8,7 +8,7 @@ use designcraft_doc::{
 use designcraft_geom::Affine;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_story, str_param};
 use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Anchored Object…",
             ["Object", "Anchored Object"],
             None,
-            "{ids, story?, pos? (default: the text insertion point), position?: inline|aboveLine|custom, yOffset?, align?: left|center|right, spaceBefore?, spaceAfter?, xRelative?/yRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, xOffset?, objectPoint?/refPoint?: 0..8, keepWithinColumn?} — moves the items into the text",
+            "{ids, story?, pos? (default: the text insertion point), position?: inline|aboveLine|custom, yOffset?, align?: left|center|right, spaceBefore?, spaceAfter?, xRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, yRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, xOffset?, objectPoint?: 0..8, refPoint?: 0..8, keepWithinColumn?} — moves the items into the text",
             has_doc,
             insert
         ),
@@ -27,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Anchored Object Options…",
             ["Object", "Anchored Object"],
             None,
-            "{story?, index? (default: the object at the insertion point), position?: inline|aboveLine|custom, yOffset?, align?: left|center|right, spaceBefore?, spaceAfter?, xRelative?/yRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, xOffset?, objectPoint?/refPoint?: 0..8, keepWithinColumn?}",
+            "{story?, index? (default: the object at the insertion point), position?: inline|aboveLine|custom, yOffset?, align?: left|center|right, spaceBefore?, spaceAfter?, xRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, yRelative?: anchor|textFrame|columnEdge|pageMargin|pageEdge, xOffset?, objectPoint?: 0..8, refPoint?: 0..8, keepWithinColumn?}",
             has_doc,
             options
         ),
@@ -172,7 +172,7 @@ fn object_ref(s: &Session, p: &Value, cmd: &str) -> Result<(StoryId, usize)> {
         .text
         .filter(|t| t.cell.is_none())
         .ok_or_else(|| bad(cmd, "give `story` and `index`, or put the insertion point next to an anchored object"))?;
-    let story = st.doc.story(t.story).ok_or_else(|| bad(cmd, "no such story"))?;
+    let story = st.doc.story(t.story).ok_or_else(|| bad(cmd, no_story(t.story)))?;
     let r = t.range();
     let at = [r.start, r.start.saturating_sub(OBJECT_MARK.len_utf8())]
         .into_iter()
@@ -198,7 +198,7 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
 fn release(s: &mut Session, p: &Value) -> Result<Value> {
     let (sid, k) = object_ref(s, p, "anchored.release")?;
     let d0 = s.doc()?.doc.clone();
-    let st = d0.story(sid).ok_or_else(|| bad("anchored.release", "no such story"))?;
+    let st = d0.story(sid).ok_or_else(|| bad("anchored.release", no_story(sid)))?;
     let obj = st.objects.get(k).cloned().ok_or_else(|| bad("anchored.release", "no such anchored object"))?;
     let pos = st.text.match_indices(OBJECT_MARK).nth(k).map(|(i, _)| i).ok_or_else(|| bad("anchored.release", "no mark"))?;
     // Where it shows now: its frame's transform and its placement.

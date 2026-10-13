@@ -5,7 +5,7 @@ use designcraft_doc::{Content, Fill, Item, ItemId, Selection, Shape};
 use designcraft_geom::Rect;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, rect_param, spread_param, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_object, rect_param, spread_param, str_param};
 use crate::{Result, Session};
 
 /// Alt text prefix that marks a generated code (and carries its content for editing).
@@ -74,7 +74,7 @@ fn qr_code(s: &mut Session, p: &Value) -> Result<Value> {
                 id
             }
             (None, Some(t)) => {
-                let it = d.item(t).ok_or_else(|| bad(ID, "no such object"))?.clone();
+                let it = d.item(t).ok_or_else(|| bad(ID, no_object(t)))?.clone();
                 if it.alt_text.starts_with(MARK) {
                     // Edit QR Code: same place and size.
                     let b = it.path.bounds().unwrap_or(Rect::ZERO);

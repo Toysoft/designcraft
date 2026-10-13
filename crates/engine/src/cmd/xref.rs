@@ -3,7 +3,7 @@
 use designcraft_doc::{CrossRef, StoryId, TextSel, XrefFormat};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_story, str_param};
 use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -13,7 +13,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Cross-Reference…",
             ["Type", "Hyperlinks & Cross-References"],
             None,
-            "{anchor? | paragraph?: text to find (first paragraph containing it) | story? + para? (0-based), format?: name (default Full Paragraph & Page Number)} — at the insertion point; the text updates itself as the destination moves",
+            "{anchor? | paragraph?: text to find (first paragraph containing it) | story?, para?: 0-based paragraph of `story`, format?: name (default Full Paragraph & Page Number)} — at the insertion point; the text updates itself as the destination moves",
             in_story_text,
             insert
         ),
@@ -61,7 +61,7 @@ fn destination(d: &mut designcraft_doc::Document, p: &Value) -> Result<u64> {
         let hit = d.stories.values().find_map(|st| st.text.find(text).map(|i| (st.id, i)));
         hit.ok_or_else(|| bad("xref.insert", format!("no paragraph contains `{text}`")))?
     } else if let (Some(sid), Some(pi)) = (p.get("story").and_then(Value::as_u64), p.get("para").and_then(Value::as_u64)) {
-        let st = d.story(StoryId(sid)).ok_or_else(|| bad("xref.insert", "no such story"))?;
+        let st = d.story(StoryId(sid)).ok_or_else(|| bad("xref.insert", no_story(StoryId(sid))))?;
         let r = st.para_ranges().get(pi as usize).cloned().ok_or_else(|| bad("xref.insert", "no such paragraph"))?;
         (StoryId(sid), r.start)
     } else {

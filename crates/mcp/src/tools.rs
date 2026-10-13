@@ -18,7 +18,10 @@ impl ToolResult {
         Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: false }
     }
     pub fn json(v: &Value) -> Self {
-        Self::text(serde_json::to_string_pretty(v).unwrap_or_default())
+        match v {
+            Value::String(said) => Self::text(said.clone()),
+            v => Self::text(serde_json::to_string_pretty(v).unwrap_or_default()),
+        }
     }
     pub fn error(t: impl Into<String>) -> Self {
         Self { content: vec![json!({"type": "text", "text": t.into()})], is_error: true }

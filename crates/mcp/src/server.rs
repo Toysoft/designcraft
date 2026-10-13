@@ -23,7 +23,11 @@ space (y down; on a single-page spread the page's top-left is (0,0); a default L
 is a command: find ids and parameters with list_commands and run them with execute (or several with batch). Typical \
 flow: new_document → execute frame.create {rect:[x0,y0,x1,y1], content:\"text\", text:\"…\"} → set_story_text / \
 execute type.char / style.paragraph.apply → render_page to look at the result. inspect_document lists pages, items \
-(ids, bounds), stories (overset) and styles. place_image puts a picture on the page.";
+(ids, bounds), stories (overset) and styles. place_image puts a picture on the page. Object ids are unique in the \
+document. frame.create selects the frame it creates and, with content \"text\", puts the caret in it; a command \
+whose parameters list `ids` acts on those objects, else on the selected ones (selection.set {ids:[…]} selects). \
+Parameters a command doesn't take are refused, naming the ones it does; a command with no answer of its own says \
+what it changed.";
 
 /// Resource URIs.
 pub const DOC_URI: &str = "designcraft://document";

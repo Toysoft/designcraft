@@ -7,7 +7,7 @@ use designcraft_doc::{Document, Guide, Orientation, SpreadRef};
 use designcraft_geom::Rect;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_spread, none_at, str_param};
 use crate::{Result, Session};
 
 const MAX_GUIDE_DIVISIONS: u64 = 1000;
@@ -30,7 +30,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("guide.deleteAll", "Delete All Guides on Spread", ["View", "Grids & Guides"], None, "{spread?}", has_doc, |s, p| {
             let r = guide_spread(p, "guide.deleteAll")?;
             s.edit(|d, _| {
-                let sp = d.spread_mut(r).ok_or_else(|| bad("guide.deleteAll", "no such spread"))?;
+                let Some(sp) = d.spread_mut(r) else { return Err(bad("guide.deleteAll", no_spread(d, r))) };
                 let mut n = 0;
                 for pg in &mut sp.pages {
                     n += pg.guides.len();
@@ -41,7 +41,8 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!(query "guide.list", "Guides", [], None, "{spread?} → [{page, index, orientation, position, spread}]", has_doc, |s, p| {
             let d = &s.doc()?.doc;
-            let sp = d.spread(guide_spread(p, "guide.list")?).ok_or_else(|| bad("guide.list", "no such spread"))?;
+            let r = guide_spread(p, "guide.list")?;
+            let sp = d.spread(r).ok_or_else(|| bad("guide.list", no_spread(d, r)))?;
             let mut out = Vec::new();
             for (pi, pg) in sp.pages.iter().enumerate() {
                 for (i, g) in pg.guides.iter().enumerate() {
@@ -129,8 +130,9 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let layer = s.doc()?.active_layer;
     s.edit(|d, _| {
-        let sp = d.spread_mut(r).ok_or_else(|| bad("guide.add", "no such spread"))?;
-        let pg = sp.pages.get_mut(pi).ok_or_else(|| bad("guide.add", "no such page"))?;
+        let Some(sp) = d.spread_mut(r) else { return Err(bad("guide.add", no_spread(d, r))) };
+        let n = sp.pages.len();
+        let pg = sp.pages.get_mut(pi).ok_or_else(|| bad("guide.add", none_at("page of the spread", pi, n)))?;
         pg.guides.push(Guide { orientation: o, position: pos, spread: spread_guide, locked: false, layer: Some(layer), liquid: false });
         Ok(json!({"page": pi, "index": pg.guides.len() - 1}))
     })
@@ -170,7 +172,8 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     let (r, pi, i) = guide_ref(p, "guide.delete")?;
     s.edit(|d, _| {
         check_editable(d, r, pi, i, "guide.delete")?;
-        let pg = d.spread_mut(r).and_then(|sp| sp.pages.get_mut(pi)).ok_or_else(|| bad("guide.delete", "no such page"))?;
+        let n = d.spread(r).map_or(0, |sp| sp.pages.len());
+        let pg = d.spread_mut(r).and_then(|sp| sp.pages.get_mut(pi)).ok_or_else(|| bad("guide.delete", none_at("page of the spread", pi, n)))?;
         if i >= pg.guides.len() {
             return Err(bad("guide.delete", "no such guide"));
         }
@@ -240,11 +243,12 @@ fn create_guides(s: &mut Session, p: &Value) -> Result<Value> {
     let r = guide_spread(p, "layout.createGuides")?;
     let only = optional_usize(p, "page", "layout.createGuides")?;
     let page_count = {
-        let sp = s.doc()?.doc.spread(r).ok_or_else(|| bad("layout.createGuides", "no such spread"))?;
+        let d = &s.doc()?.doc;
+        let sp = d.spread(r).ok_or_else(|| bad("layout.createGuides", no_spread(d, r)))?;
         match only {
             Some(page) => {
                 if sp.pages.get(page).is_none() {
-                    return Err(bad("layout.createGuides", "no such page"));
+                    return Err(bad("layout.createGuides", none_at("page of the spread", page, sp.pages.len())));
                 }
                 1
             }
@@ -260,7 +264,7 @@ fn create_guides(s: &mut Session, p: &Value) -> Result<Value> {
         .ok_or_else(|| bad("layout.createGuides", format!("a single command may create at most {MAX_GUIDES_CREATED} guides")))?;
     let layer = s.doc()?.active_layer;
     s.edit(|d, _| {
-        let sp = d.spread_mut(r).ok_or_else(|| bad("layout.createGuides", "no such spread"))?;
+        let Some(sp) = d.spread_mut(r) else { return Err(bad("layout.createGuides", no_spread(d, r))) };
         let mut n = 0usize;
         for (pi, pg) in sp.pages.iter_mut().enumerate() {
             if only.is_some_and(|o| o != pi) {

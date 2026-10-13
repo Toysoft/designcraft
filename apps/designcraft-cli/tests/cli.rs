@@ -58,33 +58,225 @@ fn run_cmd_references_and_describe() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("\"text\":\"Hello\""));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\nstory.get → {") && stdout.contains("\"text\":\"Hello\""), "{stdout}");
     let out = cli().args(["describe", "footnote.insert"]).output().unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["label"], "Insert Footnote");
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("footnote.insert: Insert Footnote, in Type."));
     let out = cli().args(["commands", "footnote."]).output().unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(v.as_array().unwrap().iter().all(|c| c.to_string().contains("footnote")));
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert!(list.lines().count() > 1 && list.lines().all(|l| l.starts_with("footnote.")), "{list}");
 }
 
-/// `designcraft-cli --help` printed usage to stderr and exited 1; asking for help is not an
-/// error (#243). It now goes to stdout and succeeds, while an unknown command keeps the same
-/// usage on stderr and fails.
+const SUBCOMMANDS: [&str; 10] = ["run", "commands", "describe", "script", "app", "mcp", "perf", "bench", "validate-pdf", "links"];
+
+fn words(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Asking for help is not an error: it goes to stdout and succeeds (#243); an unknown subcommand
+/// is named before the overview on stderr and fails.
 #[test]
-fn help_goes_to_stdout_and_unknown_args_to_stderr() {
+fn help_lists_every_subcommand_with_a_run_example() {
     for flag in ["--help", "-h", "help"] {
         let out = cli().arg(flag).output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success(), "{flag}: {:?}", out.status);
-        assert!(stdout.starts_with("usage: designcraft-cli"), "{flag}: {stdout:?}");
-        assert!(stdout.contains("designcraft-cli --version"), "{flag}: {stdout:?}");
+        assert!(stdout.starts_with("designcraft-cli works on DesignCraft documents"), "{flag}: {stdout:?}");
+        for sub in SUBCOMMANDS {
+            assert!(stdout.contains(&format!("\n  {sub} ")), "{flag} lacks {sub}: {stdout}");
+        }
+        assert!(stdout.contains("designcraft-cli run --cmd 'frame.create={"), "{stdout}");
         assert!(out.stderr.is_empty(), "{flag} wrote to stderr: {}", String::from_utf8_lossy(&out.stderr));
     }
-    // An unknown option is still an error: usage on stderr, nothing on stdout, non-zero exit.
-    let out = cli().arg("--no-such-option").output().unwrap();
-    assert!(!out.status.success(), "{:?}", out.status);
-    assert!(out.stdout.is_empty(), "unexpected stdout: {}", String::from_utf8_lossy(&out.stdout));
-    assert!(String::from_utf8_lossy(&out.stderr).starts_with("usage: designcraft-cli"));
+    for args in [vec!["frobnicate"], vec!["help", "frobnicate"], vec!["--no-such-option"]] {
+        let out = cli().args(&args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}: {:?}", out.status);
+        assert!(out.stdout.is_empty(), "unexpected stdout: {}", String::from_utf8_lossy(&out.stdout));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("is not a subcommand.\n\ndesigncraft-cli works on"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn every_subcommand_answers_help_and_does_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("dc-cli-help-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for sub in SUBCOMMANDS {
+        for args in [vec![sub, "--help"], vec![sub, "-h", "out.png"], vec!["help", sub]] {
+            let out = cli().args(&args).current_dir(&dir).output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(stdout.starts_with(&format!("usage: designcraft-cli {sub}")), "{args:?}: {stdout}");
+        }
+    }
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "help wrote a file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_help_says_what_the_ids_do_not() {
+    let out = cli().args(["run", "--help"]).output().unwrap();
+    let help = words(&String::from_utf8_lossy(&out.stdout));
+    for fact in [
+        "COMMAND is a command id, then `=`, then the command's parameters as one JSON object",
+        "A rect is [x0, y0, x1, y1]: two corners, not a width and height",
+        "Pages are counted from 0 in parameters",
+        "frame.create selects the frame it creates",
+        "selection.set {\"ids\": [...]} selects objects",
+        "\"story\": \"$0.story\" passes 9",
+        "If a command fails, run stops there",
+    ] {
+        assert!(help.contains(fact), "missing: {fact}\n{help}");
+    }
+}
+
+#[test]
+fn describe_spells_out_the_parameters() {
+    let out = cli().args(["describe", "frame.create"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "frame.create: Create Frame.
+
+Parameters:
+  spread, optional
+  rect                 [x0,y0,x1,y1] (spread coords)
+  shape, optional      rectangle|ellipse|polygon
+  content, optional    graphic|text|unassigned
+  sides, optional      3–100 (polygon; default 6)
+  starInset, optional  0–100 (% for a star polygon)
+  text, optional       string
+  caret, optional      bool
+  vertical, optional   bool (text: a new vertical story)
+
+Run it with: designcraft-cli run --cmd 'frame.create={…}'
+"
+    );
+    let out = cli().args(["describe", "object.fill"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "object.fill: Fill.
+
+Parameters:
+  swatch          (a swatch's name, e.g. [Paper])
+  tint, optional  0..1
+  ids, optional
+Acts on the objects in `ids`, else on the selected objects.
+
+Run it with: designcraft-cli run --cmd 'object.fill={…}'
+"
+    );
+    let out = cli().args(["describe", "file.newSample"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "file.newSample: Sample Document, in Help.
+
+Takes no parameters.
+Note: a multi-page magazine sample
+
+Run it with: designcraft-cli run --cmd file.newSample
+"
+    );
+    let out = cli().args(["describe", "xref.insert"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("  anchor, optional\n  or paragraph, optional"), "{text}");
+    let out = cli().args(["describe", "frame.crate"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "designcraft-cli: unknown command `frame.crate`; commands named like it: frame.create\n");
+}
+
+#[test]
+fn commands_lists_one_line_per_command() {
+    let out = cli().args(["commands", "object.fill"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "object.fill — Fill: {swatch (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?}\n");
+    let out = cli().args(["commands", "sample document"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "file.newSample — Sample Document — a multi-page magazine sample\n");
+}
+
+#[test]
+fn a_label_before_the_command_is_read_back_to_the_agent() {
+    let out = cli().args(["run", "--cmd", r#"create=frame.create={"rect":[36,36,300,200]}"#]).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with(
+            "designcraft-cli: --cmd 1 of 1 was read as command `create` with parameters `frame.create={\"rect\":[36,36,300,200]}`. `create` is not a command: --cmd takes COMMAND=PARAMS, a command id, then `=`, then a JSON object, e.g. --cmd 'frame.create={\"rect\":[72,72,300,200]}'. Commands named like it: frame.create, "
+        ) && err.ends_with(". Nothing ran.\n"),
+        "{err}"
+    );
+    let out = cli().args(["run", "--cmd", r#"frame.create={"rect":[36,36,300,200],}"#]).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with(
+            "designcraft-cli: --cmd 1 of 1 was read as command `frame.create` with parameters `{\"rect\":[36,36,300,200],}`, which are not JSON: "
+        ),
+        "{err}"
+    );
+    assert!(err.contains(". `frame.create` takes {spread?, rect: [x0,y0,x1,y1] (spread coords), ") && err.ends_with("}. Nothing ran.\n"), "{err}");
+}
+
+#[test]
+fn a_failing_command_says_which_and_what_was_not_written() {
+    let dir = std::env::temp_dir().join(format!("dc-cli-fail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("a.png");
+    let out = cli()
+        .args([
+            "run",
+            "--cmd",
+            r#"frame.create={"rect":[36,36,300,200]}"#,
+            "--cmd",
+            r#"frame.create={"rct":[0,0,1,1]}"#,
+            "--export",
+            png.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("frame.create → {\"id\":"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "designcraft-cli: --cmd 2 of 2: `frame.create` was given `rct`, which it doesn't take. `frame.create` takes {}. Nothing after it ran. {} was not written.\n",
+            designcraft_engine::find_command("frame.create").unwrap().params,
+            png.display()
+        )
+    );
+    assert!(!png.exists());
+    let out = cli().args(["run", "--cmd", r#"text.insert={"text":"Hi"}"#]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "designcraft-cli: --cmd 1 of 1: command `text.insert` is not available right now: no text insertion point. text.select {\"story\": …, \"anchor\": 0, \"focus\": 0} puts the caret in a story; frame.create with \"content\": \"text\" puts it in the new frame. Nothing after it ran.\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_command_prints_what_it_did() {
+    let out = cli()
+        .args([
+            "run",
+            "--cmd",
+            r#"frame.create={"rect":[36,36,300,200],"content":"text","text":"Hello"}"#,
+            "--cmd",
+            r#"text.select={"story":"$0.story","anchor":0,"focus":5}"#,
+            "--cmd",
+            r#"type.char={"attrs":{"size":28}}"#,
+            "--cmd",
+            "edit.deselectAll",
+            "--cmd",
+            r#"selection.set={"ids":["$0.id"]}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap().trim_start_matches("frame.create → ")).unwrap();
+    let (id, story) = (&first["id"], &first["story"]);
+    assert_eq!(
+        stdout,
+        format!(
+            "frame.create → {first}\ntext.select → selected bytes 0–5 of story {story}, “Hello”\ntype.char → changed story {story}\nedit.deselectAll → no text is selected\nselection.set → selected text frame {id} on page 1\n"
+        )
+    );
 }
 
 /// `designcraft-cli commands | head -1` panicked with "failed printing to

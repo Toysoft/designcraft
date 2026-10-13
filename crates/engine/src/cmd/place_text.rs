@@ -6,7 +6,7 @@ use designcraft_doc::{CharacterStyle, Content, Document, ParaFormat, ParagraphSt
 use designcraft_geom::Rect;
 use serde_json::{Value, json};
 
-use super::bad;
+use super::{bad, no_page};
 use crate::{Result, Session};
 
 /// Add the imported styles the document doesn't have yet (existing styles win, as in InDesign's
@@ -198,7 +198,7 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
                 Some(f) => f,
                 None => {
                     let pg = page.unwrap_or(0).min(d.page_count().saturating_sub(1));
-                    let (si, pi) = d.page_loc(pg).ok_or_else(|| bad("file.place", "no such page"))?;
+                    let (si, pi) = d.page_loc(pg).ok_or_else(|| bad("file.place", no_page(d, pg)))?;
                     let r: Rect = rect.unwrap_or_else(|| d.spreads[si].pages[pi].margin_rect());
                     let layer = d.default_layer();
                     d.add_text_frame(SpreadRef::Doc(si), r, layer, "", ParaFormat::default())?.0

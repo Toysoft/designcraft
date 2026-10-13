@@ -8,7 +8,7 @@ use designcraft_doc::{Asset, AssetId, Content, Graphic, Item, ItemId, Shape};
 use designcraft_geom::{Affine, Rect, shapes};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_doc, str_param};
+use super::{CommandSpec, bad, cmd, has_doc, no_object, str_param};
 use crate::{Result, Session};
 
 fn math_item(d: &mut designcraft_doc::Document, latex: &str, size: f64, lid: designcraft_doc::LayerId, at: (f64, f64)) -> Item {
@@ -59,10 +59,10 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     // Edit an existing expression in place.
     if let Some(id) = super::id_param(p, "id") {
         return s.edit(|d, _| {
-            let old = d.item(id).ok_or_else(|| bad("math.insert", "no such object"))?;
+            let old = d.item(id).ok_or_else(|| bad("math.insert", no_object(id)))?;
             let at = old.bounds();
             let it = math_item(d, &latex, size, lid, (at.x0, at.y0));
-            let target = d.item_mut(id).ok_or_else(|| bad("math.insert", "no such object"))?;
+            let Some(target) = d.item_mut(id) else { return Err(bad("math.insert", no_object(id))) };
             target.path = it.path;
             target.content = it.content;
             target.alt_text = latex.clone();

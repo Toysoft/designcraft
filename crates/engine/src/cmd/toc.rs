@@ -28,7 +28,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"story": toc.story.0, "entries": n}))
             })
         }),
-        cmd!(query "toc.entries", "Table of Contents Entries", [], None, "{entries | styles} → [{level, text, page}] without changing the document", has_doc, |s, p| {
+        cmd!(query "toc.entries", "Table of Contents Entries", [], None, "{entries? | styles?} → [{level, text, page}] without changing the document", has_doc, |s, p| {
             let entries = entries_param(p)?;
             let d = &s.doc()?.doc;
             let skip = d.toc.as_ref().map(|t| t.story);

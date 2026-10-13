@@ -7,7 +7,7 @@ use designcraft_doc::{Asset, AssetId, Content, Graphic, Item, ItemId, MediaOptio
 use designcraft_geom::{Affine, Rect, shapes};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, cmd, has_selection, ok, targets};
+use super::{CommandSpec, bad, cmd, has_selection, no_object, ok, targets};
 use crate::{Result, Session};
 
 pub(crate) fn place_media(s: &mut Session, p: &Value, name: String, mime: &str, bytes: Vec<u8>, link: Option<String>) -> Result<Value> {
@@ -73,7 +73,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Media Options",
             [],
             None,
-            "{ids?, playOnPageLoad?, loop?, controls?, poster?: {path | base64+name} | null (placeholder)} — for placed video and sound",
+            "{ids?, playOnPageLoad?, loop?, controls?, poster?: {path?, base64?, name?}|null (null: the placeholder)} — for placed video and sound",
             has_selection,
             |s, p| {
                 let ids = targets(s, p)?;
@@ -125,7 +125,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "media.get", "Media", [], None, "{id?} → {kind, name, playOnPageLoad, loop, controls, poster}", has_selection, |s, p| {
             let id = super::id_param(p, "id").or_else(|| s.active().and_then(|d| d.selection.items.first().copied())).ok_or_else(|| bad("media.get", "no selection"))?;
             let d = &s.doc()?.doc;
-            let it = d.item(id).ok_or_else(|| bad("media.get", "no such object"))?;
+            let it = d.item(id).ok_or_else(|| bad("media.get", no_object(id)))?;
             let (Some(m), Content::Graphic(g)) = (&it.media, &it.content) else { return Err(bad("media.get", "not a video or sound")) };
             let a = d.assets.get(&g.asset);
             Ok(json!({"kind": a.and_then(|a| designcraft_doc::media_kind(&a.mime)), "name": a.map(|a| a.name.clone()), "playOnPageLoad": m.play_on_page_load,

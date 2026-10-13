@@ -105,7 +105,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Character Style…",
             [],
             None,
-            "{name, basedOn?: style | \"[None]\", chars?: {…}} — the style sets only `chars` → {name} (made unique)",
+            "{name, basedOn?: style|\"[None]\", chars?: {…}} — the style sets only `chars` → {name} (made unique)",
             has_doc,
             create_char
         ),
@@ -114,7 +114,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Character Style Options…",
             [],
             None,
-            "{name, rename?, basedOn?: style | \"[None]\" | null, chars?: {attr: value | null (no longer set)}} — renaming updates every use",
+            "{name, rename?, basedOn?: style|\"[None]\"|null, chars?: {attr: value|null (no longer set)}} — renaming updates every use",
             has_doc,
             edit_char
         ),
@@ -153,7 +153,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move to Group",
             [],
             None,
-            "{kind: paragraph|character, names: [style names], group: \"Heads\" | \"Heads/Display\" | \"\" (out of any group)} — styles are named Group/Name; every use is renamed → {renamed: {old: new}}",
+            "{kind: paragraph|character, names: [style names], group: \"Heads\"|\"Heads/Display\"|\"\" (out of any group)} — styles are named Group/Name; every use is renamed → {renamed: {old: new}}",
             has_doc,
             group_styles
         ),
@@ -162,7 +162,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Swatches…",
             [],
             None,
-            "{path?|base64?, replace?: bool} — colour swatches from a swatch exchange (.ase) file; names already in the document are kept unless `replace` → {added, replaced}",
+            "{path? | base64?: string, replace?: bool} — colour swatches from a swatch exchange (.ase) file; names already in the document are kept unless `replace` → {added, replaced}",
             has_doc,
             load_swatches
         ),
@@ -236,7 +236,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Ink Manager",
             [],
             None,
-            "{allToProcess?: bool, ink?: spot swatch, toProcess?: bool, alias?: spot swatch | null} — output: spots to process, ink aliases",
+            "{allToProcess?: bool, ink?: spot swatch, toProcess?: bool, alias?: spot swatch|null} — output: spots to process, ink aliases",
             has_doc,
             |s, p| {
                 let all = p.get("allToProcess").and_then(Value::as_bool);
@@ -320,7 +320,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 })
             }
         ),
-        cmd!("swatch.moveToGroup", "Move to Color Group", [], None, "{swatches: [names], group: name | null (top level)}", has_doc, |s, p| {
+        cmd!("swatch.moveToGroup", "Move to Color Group", [], None, "{swatches: [names], group: name|null (top level)}", has_doc, |s, p| {
             let names: Vec<String> = p
                 .get("swatches")
                 .and_then(Value::as_array)

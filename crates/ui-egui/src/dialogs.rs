@@ -4087,7 +4087,7 @@ mod tests {
                 json!({
                     "preset": "A4", "pages": pages, "facingPages": false, "gutter": 0,
                     "margins": {"top": 10, "bottom": 20, "inside": 30, "outside": 40},
-                    "title": "  ", "status": "internal", "primaryTextFrame": true
+                    "title": "  ", "status": "internal"
                 }),
             );
             confirm(&mut app).unwrap();

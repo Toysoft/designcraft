@@ -32,7 +32,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create Frame",
             [],
             None,
-            "{spread?, rect: [x0,y0,x1,y1] (spread coords), shape?: rectangle|ellipse|polygon, content?: graphic|text|unassigned, sides?: 6, text?: string, caret?: bool, vertical?: bool (text: a new vertical story)}",
+            "{spread?, rect: [x0,y0,x1,y1] (spread coords), shape?: rectangle|ellipse|polygon, content?: graphic|text|unassigned, sides?: 3–100 (polygon; default 6), starInset?: 0–100 (% for a star polygon), text?: string, caret?: bool, vertical?: bool (text: a new vertical story)}",
             has_doc,
             frame_create
         ),
@@ -477,7 +477,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Directional Feather",
             ["Object", "Effects"],
             None,
-            "{on?: bool, widths?: [top, left, bottom, right] | number, ids?}",
+            "{on?: bool, widths?: [top, left, bottom, right]|number, ids?}",
             has_selection,
             |s, p| {
                 let p2 = p.clone();
@@ -523,7 +523,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Corner Options…",
             ["Object"],
             None,
-            "{shape: none|rounded|inverseRounded|inset|bevel|fancy, size, ids?}",
+            "{shape: none|rounded|inverseRounded|inset|bevel|fancy, size: pt, ids?}",
             has_selection,
             |s, p| {
                 let shape =
@@ -577,11 +577,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "Frame Fitting Options…",
             ["Object", "Fitting"],
             None,
-            "{autoFit?: bool, fitting?: none|fillProportionally|fitProportionally|fitContentToFrame|centerContent, align?: 0..8 (reference point, 4 = centre), crop?: n | [t, l, b, r] (negative adds space), ids?}",
+            "{autoFit?: bool, fitting?: none|fillProportionally|fitProportionally|fitContentToFrame|centerContent, align?: 0..8 (reference point, 4 = centre), crop?: n|[t, l, b, r] (negative adds space), ids?}",
             has_selection,
             fitting_options
         ),
-        cmd!("object.rename", "Rename", [], None, "{id, name}", has_doc, |s, p| {
+        cmd!("object.rename", "Rename", [], None, "{name, ids?}", has_doc, |s, p| {
             let name = str_param(p, "name").unwrap_or("").to_string();
             set_flag(s, p, move |i| i.name = name.clone(), false)
         }),
@@ -638,7 +638,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move Gap",
             [],
             None,
-            "{at: [x, y] (spread), delta | dx/dy, spread?} — Gap tool: the gap at `at` between objects (or an object and the page edge) moves by `delta`; the objects on both sides resize → {axis, changed}",
+            "{at: [x, y] (spread), delta?: pt along the gap, dx?: pt (a drag; the part along the gap counts), dy?: pt (likewise), spread?} — Gap tool: the gap at `at` between objects (or an object and the page edge) moves by `delta`; the objects on both sides resize → {axis, changed}",
             has_doc,
             gap_move
         ),
@@ -838,7 +838,7 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
     let rect = Rect::new(rect.x0, rect.y0, rect.x1.max(rect.x0 + 0.5), rect.y1.max(rect.y0 + 0.5));
     s.edit(|d, sel| {
         if d.spread(sr).is_none() {
-            return Err(bad("frame.create", "no such spread"));
+            return Err(bad("frame.create", super::no_spread(d, sr)));
         }
         let (path, sh) = match shape {
             "ellipse" | "oval" => (shapes::ellipse(rect), Shape::Oval),
@@ -1194,7 +1194,7 @@ fn transform_info(s: &mut Session, p: &Value) -> Result<Value> {
     let totals = s.prefs.transformations_are_totals;
     let d = &s.doc()?.doc;
     let id = *ids.first().ok_or_else(|| bad("transform.info", "nothing selected"))?;
-    let (_, m) = measured_xf(d, id, totals).ok_or_else(|| bad("transform.info", "no such object"))?;
+    let (_, m) = measured_xf(d, id, totals).ok_or_else(|| bad("transform.info", super::no_object(id)))?;
     let mut out = values_json(m);
     if let Some(g) = d.item(id).and_then(Item::graphic) {
         out["content"] = values_json(if totals { m * g.xf } else { g.xf });
@@ -2627,7 +2627,7 @@ mod named_target_tests {
         assert_eq!(columns(&s), Some(2));
         s.execute("transform.set", &json!({"id": r["id"], "x": 100, "ref": 0})).unwrap();
         let e = s.execute("object.textFrameOptions", &json!({"ids": [99999], "columns": 1})).unwrap_err().to_string();
-        assert!(e.contains("no object with id 99999"), "{e}");
+        assert!(e.contains("no object 99999 in the document"), "{e}");
         assert_eq!(columns(&s), Some(2));
         // An empty `ids` names nothing (as `targets` reads it), even beside an `id`.
         let e = s.execute("object.textFrameOptions", &json!({"ids": [], "id": r["id"], "columns": 3})).unwrap_err().to_string();

@@ -7,13 +7,13 @@ use designcraft_doc::{Asset, AssetId, Content, Document, Graphic, Item, ItemId, 
 use designcraft_geom::{Affine, Rect, shapes};
 use serde_json::{Value, json};
 
-use super::{CommandSpec, always, bad, cmd, f64_or, has_doc, ok, str_param};
+use super::{CommandSpec, always, bad, cmd, f64_or, has_doc, no_page, no_spread, ok, str_param};
 use crate::{DocState, EngineError, Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "file.new", "Document…", ["File", "New"], Some("Cmd+N"),
-            "{preset?: \"Letter\"|\"A4\"|…, width?, height?, pages?, facingPages?, columns?, gutter?, margins?: number|{top,bottom,inside,outside}, bleed?, title?}",
+            "{preset?: \"Letter\"|\"A4\"|…, width?: pt, height?: pt, pages?: count, facingPages?: bool, columns?: count, gutter?: pt, margins?: pt|{top,bottom,inside,outside}, bleed?: pt, primaryTextFrame?: bool, title?}",
             always, file_new),
         cmd!(noundo "file.newSample", "Sample Document", ["Help"], None, "{} — a multi-page magazine sample", always, file_sample),
         cmd!(query "file.presets", "Document Presets", [], None, "{}", always, |_, _| Ok(serde_json::to_value(PRESETS).unwrap_or_default())),
@@ -102,7 +102,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place…",
             ["File"],
             Some("Cmd+D"),
-            "{path?|base64?, name?, frame?: id (place into), spread?, x?, y?, width?, pdfPage?: n (1-based, Image Import Options), pdfCrop?: crop|trim|bleed|art|media, layoutPage?: n (IDML / .designcraft: that page's objects as a group)} — places an image (into the selected empty frame if any); text files (.txt, .docx, .rtf, .md) and Excel workbooks (.xlsx, as a table) go into the insertion point, the selected frame or a new frame on `page`/`rect` — {autoflow?: adds pages with threaded frames until the text fits, removeStyles?, styleMap?: {imported name: document style}, styleConflicts?: useExisting|redefine|autoRename}",
+            "{path? | base64?: string, name?, frame?: id (place into), spread?, x?, y?, width?, pdfPage?: n (1-based, Image Import Options), pdfCrop?: crop|trim|bleed|art|media, layoutPage?: n (IDML / .designcraft: that page's objects as a group), height?: pt (video or sound: the frame's height), page?: index (text: the page of the new frame), rect?: [x0,y0,x1,y1] (text: the new frame), autoflow?: bool (text: adds pages with threaded frames until it fits), removeStyles?: bool, styleMap?: {imported name: document style}, styleConflicts?: useExisting|redefine|autoRename} — places an image into the selected empty frame if any, else a new frame; text files (.txt, .docx, .rtf, .md) and Excel workbooks (.xlsx, as a table) go into the insertion point, the selected frame or a new frame on `page`/`rect`",
             has_doc,
             file_place
         ),
@@ -368,7 +368,7 @@ fn file_place(s: &mut Session, p: &Value) -> Result<Value> {
             });
             fid
         } else {
-            let sp = d.spread(spread).ok_or_else(|| bad("file.place", "no such spread"))?;
+            let sp = d.spread(spread).ok_or_else(|| bad("file.place", no_spread(d, spread)))?;
             let pr = sp.pages.first().map(|pg| pg.margin_rect()).unwrap_or(Rect::new(36.0, 36.0, 300.0, 300.0));
             let (x, y) = (px.unwrap_or(pr.x0), py.unwrap_or(pr.y0));
             let id = ItemId(d.alloc());
@@ -543,7 +543,7 @@ fn place_layout_page(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -> Re
     if page == 0 || page > n {
         return Err(bad(ID, format!("the document has {n} page(s)")));
     }
-    let (si, pi) = src.page_loc(page - 1).ok_or_else(|| bad(ID, "no such page"))?;
+    let (si, pi) = src.page_loc(page - 1).ok_or_else(|| bad(ID, no_page(&src, page - 1)))?;
     let sp = &src.spreads[si];
     let pr = sp.pages[pi].bounds();
     let ids: Vec<ItemId> = sp.items.iter().filter(|it| !it.hidden && sp.page_at_x(it.bounds().center().x) == Some(pi)).map(|it| it.id).collect();

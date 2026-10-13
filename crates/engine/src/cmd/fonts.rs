@@ -43,6 +43,31 @@ fn for_each_story(d: &Document, f: &mut dyn FnMut(&Story)) {
     }
 }
 
+pub(crate) fn missing(d: &Document) -> Vec<(String, String)> {
+    list(d)
+        .into_iter()
+        .filter(|f| f["missing"] == true || f["styleMissing"] == true)
+        .map(|f| (f["family"].as_str().unwrap_or_default().to_string(), f["style"].as_str().unwrap_or_default().to_string()))
+        .collect()
+}
+
+pub(crate) fn not_installed(d: &Document, family: &str, style: &str) -> String {
+    let db = designcraft_fonts::FontDb::global().scoped(d.font_scope);
+    let with_styles = |f: &str| format!("{f} (styles {})", db.styles(f).join(", "));
+    if db.has_family(family) {
+        return format!("font family {family} has no {style} style; it has {}", db.styles(family).join(", "));
+    }
+    let q = family.to_lowercase();
+    let like: Vec<String> = db.families().into_iter().filter(|f| f.to_lowercase().contains(&q) || q.contains(&f.to_lowercase())).take(5).collect();
+    match like.as_slice() {
+        [] => format!("no font family {family} is installed, so its text renders in the fallback font"),
+        like => format!(
+            "no font family {family} is installed, so its text renders in the fallback font; installed families named like it: {}",
+            like.iter().map(|f| with_styles(f)).collect::<Vec<_>>().join("; ")
+        ),
+    }
+}
+
 fn list(d: &Document) -> Vec<Value> {
     let db = designcraft_fonts::FontDb::global().scoped(d.font_scope);
     let mut used: BTreeMap<(String, String), usize> = BTreeMap::new();

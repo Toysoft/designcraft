@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 
 use designcraft_engine::cmd::{base64_decode, base64_encode};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{Backend, Headless, PROTOCOL_VERSION, Remote, Server, control_addr, tool_definitions};
 
@@ -499,4 +499,52 @@ fn explicit_typing_rejects_stale_selection_and_closed_document() {
     assert_eq!(b.session.execute("story.get", &json!({"story":f["story"]})).unwrap()["text"], "Hello");
     b.session.execute("file.close", &json!({})).unwrap();
     assert!(b.call("ui.text", json!({"text":"X"})).is_err());
+}
+
+#[test]
+fn execute_answers_in_words() {
+    let mut s = server();
+    let r = call(&mut s, "execute", json!({"command": "frame.create", "params": {"rct": [36, 36, 300, 200]}}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text_of(&r).starts_with("execute: `frame.create` was given `rct`, which it doesn't take. `frame.create` takes {spread?, rect: "), "{r}");
+    let f = ok(&mut s, "execute", json!({"command": "frame.create", "params": {"rect": [36, 36, 300, 200], "content": "text", "text": "Hi"}}));
+    ok(&mut s, "execute", json!({"command": "text.select", "params": {"story": f["story"], "anchor": 0, "focus": 2}}));
+    let r = call(&mut s, "execute", json!({"command": "type.char", "params": {"attrs": {"size": 28}}}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(text_of(&r), format!("changed story {}", f["story"]));
+    let r = call(&mut s, "execute", json!({"command": "edit.deselectAll"}));
+    assert_eq!(text_of(&r), "no text is selected");
+}
+
+#[test]
+fn every_tool_takes_the_arguments_its_schema_declares() {
+    let mut s = server();
+    let dir = tmp("schema");
+    std::fs::create_dir_all(&dir).unwrap();
+    for t in tool_definitions() {
+        let name = t["name"].as_str().unwrap();
+        if ["screenshot", "click", "drag", "menu_list", "ui_inspect", "ui_set", "dialog_set", "dialog_confirm", "dialog_cancel"].contains(&name) {
+            continue;
+        }
+        let args: Map<String, Value> = t["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| {
+                let value = match (k.as_str(), v["type"].as_str()) {
+                    ("path", _) => json!(dir.join("x.png").to_str().unwrap()),
+                    ("command", _) => json!("edit.deselectAll"),
+                    (_, Some("number" | "integer")) => json!(10),
+                    (_, Some("boolean")) => json!(false),
+                    (_, Some("array")) => json!([]),
+                    (_, Some("object")) => json!({}),
+                    _ => json!("x"),
+                };
+                (k.clone(), value)
+            })
+            .collect();
+        let r = call(&mut s, name, Value::Object(args));
+        assert!(!text_of(&r).contains("which it doesn't take"), "{name}: {r}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

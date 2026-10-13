@@ -60,7 +60,7 @@ fn one(s: &mut Session, p: &Value, accept: bool) -> Result<Value> {
     let sid = p.get("story").and_then(Value::as_u64).map(StoryId).ok_or_else(|| super::bad(id, "`story` required"))?;
     let start = p.get("start").and_then(Value::as_u64).ok_or_else(|| super::bad(id, "`start` required"))? as usize;
     s.edit(|d, sel| {
-        let st = d.story_mut(sid).ok_or_else(|| super::bad(id, "no such story"))?;
+        let Some(st) = d.story_mut(sid) else { return Err(super::bad(id, super::no_story(sid))) };
         let (r, mark) = st
             .runs()
             .find(|(r, f)| matches!(f.over.change, Some(ChangeMark::Inserted | ChangeMark::Deleted)) && r.start <= start && start < r.end)

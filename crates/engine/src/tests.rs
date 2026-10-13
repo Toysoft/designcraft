@@ -569,3 +569,180 @@ fn commands_take_non_object_params_without_panicking() {
         assert!(r.is_ok(), "{p}: {r:?}");
     }
 }
+
+#[test]
+fn every_params_doc_names_its_keys() {
+    let bad: Vec<String> =
+        command_specs().iter().filter_map(|c| cmd::param_keys(c.params).err().map(|e| format!("{}: {e}\n    {}", c.id, c.params))).collect();
+    assert!(bad.is_empty(), "{} docs don't parse:\n{}", bad.len(), bad.join("\n"));
+    let value_words = ["null", "bool", "string"];
+    let phantom: Vec<String> = command_specs()
+        .iter()
+        .flat_map(|c| {
+            cmd::param_keys(c.params).unwrap_or_default().into_iter().filter(|k| value_words.contains(k)).map(move |k| format!("{}: `{k}`", c.id))
+        })
+        .collect();
+    assert!(phantom.is_empty(), "a value read as a key (a spaced ` | ` between values?):\n{}", phantom.join("\n"));
+    assert_eq!(cmd::param_keys("{index} | {id}").unwrap(), ["index", "id"]);
+    assert_eq!(cmd::param_keys("{path? | base64?: string, kind?: a|b (x, y), ids?} → {id}").unwrap(), ["path", "base64", "kind", "ids"]);
+    assert_eq!(cmd::param_keys("{} — a remark").unwrap(), Vec::<&str>::new());
+}
+
+fn said(s: &mut Session, id: &str, params: serde_json::Value) -> String {
+    match s.call(id, &params) {
+        Ok(Value::String(t)) => t,
+        Ok(v) => v.to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+#[test]
+fn a_call_refuses_parameters_the_command_does_not_take() {
+    let mut s = session();
+    assert_eq!(
+        said(&mut s, "frame.create", json!({"rct": [36, 36, 300, 200]})),
+        format!("`frame.create` was given `rct`, which it doesn't take. `frame.create` takes {}.", find_command("frame.create").unwrap().params)
+    );
+    assert_eq!(
+        said(&mut s, "edit.deselectAll", json!({"ids": [1]})),
+        "`edit.deselectAll` was given `ids`, which it doesn't take. `edit.deselectAll` takes no parameters."
+    );
+    assert_eq!(
+        said(&mut s, "object.lock", json!([1])),
+        "invalid parameters for `object.lock`: parameters are a JSON object, not an array. `object.lock` takes {ids?}."
+    );
+    let id = s.call("frame.create", &json!({"rect": [36, 36, 300, 200]})).unwrap()["id"].clone();
+    s.call("edit.deselectAll", &json!({})).unwrap();
+    assert_eq!(said(&mut s, "selection.set", json!({"ids": [id]})), format!("selected frame {id} on page 1"));
+    assert!(s.call("type.char", &json!({"size": 24})).is_err_and(|e| e.to_string().contains("not available")), "an open doc refuses no key");
+}
+
+#[test]
+fn an_open_object_takes_any_key_but_a_closed_alternative_is_checked_whole() {
+    let mut s = session();
+    let r = s.call("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Hi"})).unwrap();
+    s.call("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 2})).unwrap();
+    assert_eq!(said(&mut s, "type.char", json!({"size": 24, "tracking": 10})), format!("changed story {}", r["story"]));
+    assert!(
+        said(&mut s, "type.char", json!({"attrs": {"size": 24}, "bogus": true}))
+            .starts_with("`type.char` was given `bogus`, which it doesn't take. `type.char` takes {attrs: ")
+    );
+    assert!(
+        said(&mut s, "type.para", json!({"attrs": {"align": "center"}, "align": "left"}))
+            .starts_with("`type.para` was given `align`, which it doesn't take.")
+    );
+    assert!(
+        said(&mut s, "type.char", json!({"siz": 24})).starts_with("invalid parameters for `type.char`: "),
+        "the command checks the attribute names itself"
+    );
+}
+
+#[test]
+fn pages_and_parents_are_described() {
+    let mut s = session();
+    assert_eq!(said(&mut s, "layout.pages.delete", json!({"pages": [0]})), "deleted page 1 (as numbered before)");
+    assert_eq!(said(&mut s, "layout.pages.applyParent", json!({"pages": [0], "parent": null})), "changed the parent applied to page 1");
+    let id = s.call("frame.create", &json!({"rect": [36, 36, 300, 200]})).unwrap()["id"].clone();
+    assert_eq!(
+        said(&mut s, "object.lock", json!({})),
+        format!("changed frame {id} on page 1; nothing is selected"),
+        "a bare changed count is described"
+    );
+}
+
+#[test]
+fn an_unknown_command_names_the_commands_like_it() {
+    let mut s = session();
+    assert_eq!(said(&mut s, "frame.crate", json!({})), "unknown command `frame.crate`; commands named like it: frame.create");
+    let like = said(&mut s, "new", json!({}));
+    assert!(
+        like.starts_with("unknown command `new`; commands named like it: file.new, file.newSample, ") && like.matches(',').count() <= 7,
+        "{like}"
+    );
+    assert_eq!(said(&mut s, "zzz", json!({})), "unknown command `zzz`");
+}
+
+#[test]
+fn a_call_that_returns_nothing_says_what_changed() {
+    let mut s = session();
+    let r = s.call("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Hi"})).unwrap();
+    let (id, story) = (r["id"].clone(), r["story"].clone());
+    assert_eq!(said(&mut s, "edit.deselectAll", json!({})), "no text is selected");
+    assert_eq!(said(&mut s, "selection.set", json!({"ids": [id]})), format!("selected text frame {id} on page 1"));
+    assert_eq!(said(&mut s, "object.fill", json!({"swatch": "[Black]"})), format!("changed text frame {id} on page 1"));
+    assert_eq!(said(&mut s, "edit.deselectAll", json!({})), "nothing is selected");
+    assert_eq!(said(&mut s, "edit.deselectAll", json!({})), "nothing changed");
+    assert_eq!(said(&mut s, "text.select", json!({"story": story, "anchor": 0, "focus": 2})), format!("selected bytes 0–2 of story {story}, “Hi”"));
+    assert_eq!(said(&mut s, "type.char", json!({"size": 24})), format!("changed story {story}"));
+    assert_eq!(said(&mut s, "text.select", json!({"story": story, "anchor": 1, "focus": 1})), format!("the caret is in story {story} at byte 1"));
+}
+
+#[test]
+fn a_command_not_available_says_what_makes_it_so() {
+    let mut s = Session::new();
+    assert_eq!(
+        said(&mut s, "frame.create", json!({"rect": [0, 0, 10, 10]})),
+        "command `frame.create` is not available right now: no document open. file.new or file.open opens one."
+    );
+    let mut s = session();
+    assert_eq!(
+        said(&mut s, "text.insert", json!({"text": "x"})),
+        "command `text.insert` is not available right now: no text insertion point. text.select {\"story\": …, \"anchor\": 0, \"focus\": 0} puts the caret in a story; frame.create with \"content\": \"text\" puts it in the new frame."
+    );
+    assert_eq!(
+        said(&mut s, "object.fill", json!({"swatch": "Black"})),
+        "command `object.fill` is not available right now: nothing selected. Acts on the objects in `ids`, else on the selected objects. selection.set {\"ids\": […]} selects objects; frame.create selects the frame it creates."
+    );
+    assert_eq!(
+        said(&mut s, "select.container", json!({})),
+        "command `select.container` is not available right now: nothing selected. Acts on the selected objects. selection.set {\"ids\": […]} selects objects; frame.create selects the frame it creates."
+    );
+    for c in command_specs() {
+        let Some(acts) = c.acts_on() else { continue };
+        let keys = cmd::param_keys(c.params).unwrap();
+        assert!(!acts.contains("`ids`") || keys.contains(&"ids"), "{}: {acts}", c.id);
+        assert!(!acts.contains("`id`") || keys.contains(&"id"), "{}: {acts}", c.id);
+    }
+}
+
+#[test]
+fn a_missing_object_or_index_is_named() {
+    let mut s = session();
+    assert_eq!(
+        said(&mut s, "object.fill", json!({"ids": [999], "swatch": "[Black]"})),
+        "no object 999 in the document; document.inspect lists the objects with their ids"
+    );
+    let n = s.doc().unwrap().doc.spreads.len();
+    assert_eq!(
+        said(&mut s, "layout.pages.duplicateSpread", json!({"spread": 7})),
+        format!(
+            "invalid parameters for `layout.pages.duplicateSpread`: no spread at index 7; indices run 0–{}. `layout.pages.duplicateSpread` takes {{spread}}.",
+            n - 1
+        )
+    );
+    assert_eq!(
+        said(&mut s, "text.select", json!({"story": 999, "anchor": 0, "focus": 0})),
+        format!(
+            "invalid parameters for `text.select`: no story 999 in the document; document.inspect lists the stories with their ids. `text.select` takes {}.",
+            find_command("text.select").unwrap().params
+        )
+    );
+    assert!(said(&mut s, "layer.set", json!({"id": 999, "name": "x"})).contains("no layer with id 999; the layers are Layer 1 (id "));
+}
+
+#[test]
+fn a_font_that_is_not_installed_is_named_in_the_answer() {
+    let mut s = session();
+    let r = s.call("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Hi"})).unwrap();
+    let story = r["story"].clone();
+    s.call("text.select", &json!({"story": story, "anchor": 0, "focus": 2})).unwrap();
+    let answer = said(&mut s, "type.char", json!({"attrs": {"fontFamily": "No Such Family"}}));
+    assert_eq!(answer, format!("changed story {story}; no font family No Such Family is installed, so its text renders in the fallback font"));
+    assert_eq!(said(&mut s, "type.char", json!({"attrs": {"size": 20}})), format!("changed story {story}"), "said once");
+    let installed = designcraft_fonts::FontDb::global().families().into_iter().next().unwrap();
+    let typo = format!("{installed} Nope");
+    let answer = said(&mut s, "type.char", json!({"attrs": {"fontFamily": typo}}));
+    assert!(answer.contains(&format!("installed families named like it: {installed} (styles ")), "{answer}");
+    let answer = said(&mut s, "type.char", json!({"attrs": {"fontFamily": installed, "fontStyle": "Wobbly"}}));
+    assert!(answer.contains(&format!("font family {installed} has no Wobbly style; it has ")), "{answer}");
+}

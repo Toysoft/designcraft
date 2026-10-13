@@ -51,7 +51,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.library = Some(lib);
             ok()
         }),
-        cmd!(noundo "library.open", "Open Library", [], None, "{path | json} → {items}", always, |s, p| {
+        cmd!(noundo "library.open", "Open Library", [], None, "{path? | json?} → {items}", always, |s, p| {
             let (text, path) = match (str_param(p, "json"), str_param(p, "path")) {
                 (Some(j), _) => (j.to_string(), None),
                 (None, Some(path)) => {

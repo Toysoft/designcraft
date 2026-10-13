@@ -33,7 +33,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Select Data Source…",
             [],
             None,
-            "{path | bytes|base64, name, delimiter?: comma|tab|semicolon, sheet?} → {fields, records, warnings}",
+            "{path? | bytes?: base64, name?, delimiter?: comma|tab|semicolon, sheet?} → {fields, records, warnings}",
             has_doc,
             source_select
         ),

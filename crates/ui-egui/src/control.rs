@@ -114,7 +114,7 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().unwrap_or(json!({}));
             let params = if params.is_null() { json!({}) } else { params };
-            wrap(app.run(id, params))
+            wrap(app.call(id, params))
         }
         "engine.commands" => ok(all_commands(app)),
         "document.inspect" => wrap(app.run("document.inspect", json!({}))),
@@ -419,6 +419,28 @@ mod automation_contract_tests {
             },
         );
         output.textures_delta.clear();
+    }
+    #[test]
+    fn engine_execute_answers_in_words() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let refused = call(&mut app, &ctx, "engine.execute", json!({"command": "frame.create", "params": {"rct": [0, 0, 10, 10]}}));
+        assert_eq!(refused["ok"], false);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("`frame.create` was given `rct`, which it doesn't take. `frame.create` takes {spread?, rect: "),
+            "{refused}"
+        );
+        let f = call(&mut app, &ctx, "engine.execute", json!({"command": "frame.create", "params": {"rect": [36, 36, 300, 200]}}));
+        let id = f["result"]["id"].clone();
+        let said = call(&mut app, &ctx, "engine.execute", json!({"command": "object.lock", "params": {}}));
+        assert_eq!(said["result"], format!("changed frame {id} on page 1; nothing is selected"));
+        let said = call(&mut app, &ctx, "engine.execute", json!({"command": "edit.deselectAll"}));
+        assert_eq!(said["result"], "nothing changed");
+        let said = call(&mut app, &ctx, "engine.execute", json!({"command": "selection.set", "params": {"ids": [id]}}));
+        assert_eq!(said["result"], format!("selected frame {id} on page 1"));
     }
     #[test]
     fn control_typing_uses_explicit_caret_but_retains_widget_events() {
