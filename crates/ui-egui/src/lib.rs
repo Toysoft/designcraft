@@ -1078,29 +1078,7 @@ impl DesignApp {
             if let Some(layout) = split_layout {
                 // Two panes with a divider; each has its own view (zoom, scroll) and render cache.
                 ui.painter().rect_filled(layout.divider, 0.0, t.border);
-                // Resolve the clicked pane before either canvas handles this frame's keys.
-                if let Some(p) = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()) {
-                    if layout.first.contains(p) {
-                        self.focus_pane = 0;
-                    } else if layout.second.contains(p) {
-                        self.focus_pane = 1;
-                    }
-                }
-                for (k, half) in [layout.first, layout.second].into_iter().enumerate() {
-                    self.switch_pane(k as u8);
-                    // A new pane starts at the other pane's view.
-                    if k == 1 && self.view().is_none() {
-                        self.switch_pane(0);
-                        let v = self.view().copied();
-                        self.switch_pane(1);
-                        if let (Some(mut v), Some(m)) = (v, self.view_mut()) {
-                            v.fitted = false;
-                            *m = v;
-                        }
-                    }
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(half), |ui| canvas::show(self, ui));
-                }
-                self.switch_pane(self.focus_pane);
+                canvas::show_split(self, ui, [layout.first, layout.second]);
             } else {
                 self.switch_pane(0);
                 // With a second window, the main one takes the focus back when clicked.

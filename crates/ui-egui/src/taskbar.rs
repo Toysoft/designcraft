@@ -424,6 +424,12 @@ mod tests {
         h.event(egui::Event::PointerMoved(at));
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
         h.run_steps(1);
+        assert_eq!(h.state().app.focus_pane, 0, "the popup owns the press over the sibling canvas");
+        assert_eq!(h.state().app.ui.task_bar_at, Some(expected));
+        // Change focus independently while the invoking popup still owns the held press.
+        h.state_mut().app.focus_pane = 1;
+        h.run_steps(1);
+        assert!(h.get_by_label_contains("Pin Bar Position").rect().contains(at), "the pressed popup item remains under the release");
         assert_eq!(h.state().app.focus_pane, 1);
         assert_ne!(h.state().app.ui.task_bar_at, Some(expected), "fixture HUD positions must differ");
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
