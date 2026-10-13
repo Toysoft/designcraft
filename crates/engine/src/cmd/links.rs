@@ -182,9 +182,9 @@ pub(crate) type TextChecks = std::collections::HashMap<String, (Fingerprint, Str
 pub(crate) fn text_status(l: &TextFileLink, checks: &mut TextChecks) -> &'static str {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let now = match std::fs::metadata(&l.path) {
+        // A FIFO, a device or a folder is missing (only the path is looked at).
+        let now = match crate::io::file_metadata(&l.path) {
             Err(_) => return "missing",
-            Ok(m) if !m.is_file() => return "missing",
             Ok(m) => super::datamerge::fingerprint_from(&m),
         };
         if now.size != l.size {
@@ -262,22 +262,7 @@ fn list(d: &Document, checks: &mut TextChecks) -> Vec<Value> {
 /// A linked text file's bytes, with its size and time from before they were read.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_text(path: &str) -> Result<(Vec<u8>, Fingerprint)> {
-    use std::io::Read;
-    let err = |e: std::io::Error| EngineError::Other(format!("{path}: {e}"));
-    let m = std::fs::metadata(path).map_err(err)?;
-    if !m.is_file() {
-        return Err(EngineError::Other(format!("{path}: not a file")));
-    }
-    let too_large = || EngineError::Other(format!("{path}: larger than {} MiB", MAX_TEXT_LINK_BYTES / (1024 * 1024)));
-    if m.len() > MAX_TEXT_LINK_BYTES {
-        return Err(too_large());
-    }
-    // At most one byte over the limit, in case the file grew since.
-    let mut b = Vec::new();
-    std::fs::File::open(path).map_err(err)?.take(MAX_TEXT_LINK_BYTES + 1).read_to_end(&mut b).map_err(err)?;
-    if b.len() as u64 > MAX_TEXT_LINK_BYTES {
-        return Err(too_large());
-    }
+    let (b, m) = crate::io::read_regular(path, MAX_TEXT_LINK_BYTES).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     Ok((b, super::datamerge::fingerprint_from(&m)))
 }
 
@@ -889,8 +874,8 @@ mod text_link_tests {
     }
 }
 
-#[cfg(test)]
 #[cfg(unix)]
+#[cfg(test)]
 mod text_link_read_tests {
     use std::time::Duration;
 

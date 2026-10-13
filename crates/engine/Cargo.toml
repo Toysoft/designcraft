@@ -32,6 +32,10 @@ quick-xml = { workspace = true }
 caseless = { workspace = true }
 unicode-segmentation = { workspace = true }
 
+# O_NONBLOCK for crate::io::read_regular (already in the build through other crates).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true }
 

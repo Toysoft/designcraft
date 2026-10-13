@@ -993,6 +993,7 @@ dependencies = [
  "hayro-interpret",
  "hayro-syntax",
  "kurbo",
+ "libc",
  "log",
  "quick-xml 0.38.4",
  "regex",

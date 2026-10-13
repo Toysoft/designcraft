@@ -8,8 +8,10 @@
 //! it is ([`is_file`], [`is_dir`], [`exists`], [`metadata`]), and as the roots' own message where
 //! it asks for the bytes.
 
-use std::fs::Metadata;
 use std::path::Path;
+
+/// What [`metadata`] returns, for callers that may not name `std::fs` themselves.
+pub use std::fs::Metadata;
 
 /// The bytes of the file at `path`, inside the automation read root when there is one.
 pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<u8>, String> {
@@ -78,6 +80,47 @@ pub fn metadata(path: impl AsRef<Path>) -> std::io::Result<Metadata> {
     let path = path.as_ref();
     crate::file_access::check_read(path).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
     std::fs::metadata(path)
+}
+
+/// [`metadata`] of a regular file: anything else at `path` (a FIFO, a device, a folder) is a
+/// `NotFound` error. Only the path is looked at; nothing is opened.
+pub fn file_metadata(path: impl AsRef<Path>) -> std::io::Result<Metadata> {
+    let path = path.as_ref();
+    let m = metadata(path)?;
+    if m.is_file() { Ok(m) } else { Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{}: not a file", path.display()))) }
+}
+
+/// The bytes of the regular file at `path`, no more than `limit` of them, with the metadata of the
+/// file that was opened, inside the automation read root when there is one.
+///
+/// The file is opened first and the opened file is checked (so it can't be swapped between the
+/// check and the read), and on Unix it is opened without waiting for a writer (`O_NONBLOCK`), so
+/// a FIFO doesn't block. A FIFO, a device or a folder is a `NotFound` error and a file larger than
+/// `limit` a `FileTooLarge` one, before anything is read.
+pub fn read_regular(path: impl AsRef<Path>, limit: u64) -> std::io::Result<(Vec<u8>, Metadata)> {
+    use std::io::{Error, ErrorKind, Read};
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(|e| Error::new(ErrorKind::PermissionDenied, e))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let mut file = options.open(path)?;
+    let m = file.metadata()?;
+    if !m.is_file() {
+        return Err(Error::new(ErrorKind::NotFound, "not a file"));
+    }
+    let too_large = || Error::new(ErrorKind::FileTooLarge, format!("larger than {} MiB", limit / (1024 * 1024)));
+    if m.len() > limit {
+        return Err(too_large());
+    }
+    // One byte over the limit at most, in case the file grew since it was opened.
+    let mut bytes = Vec::new();
+    (&mut file).take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    Ok((bytes, m))
 }
 
 /// Is there a file at `path` that automation may read?
