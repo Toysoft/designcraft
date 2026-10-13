@@ -773,6 +773,25 @@ impl Tool for SelectionTool {
                 }
             }
             PointerKind::DoubleClick => {
+                // A double click on a handle fits the selected text frames to their text: a corner
+                // both ways, a top or bottom handle the height, a side handle the width.
+                if let Some(h) = handle_at(cx, p) {
+                    let axes = match h {
+                        1 | 5 => "height",
+                        3 | 7 => "width",
+                        _ => "both",
+                    };
+                    let frames: Vec<Action> = cx
+                        .selection
+                        .items
+                        .iter()
+                        .filter(|id| cx.doc.item(**id).is_some_and(|i| i.is_text_frame()))
+                        .map(|id| Action::Exec("text.fitFrame".into(), json!({"frame": id.0, "axes": axes})))
+                        .collect();
+                    if !frames.is_empty() {
+                        return frames;
+                    }
+                }
                 if let Some((_, id)) = cx.hit(p)
                     && cx.doc.item(id).is_some_and(|i| i.is_text_frame())
                 {

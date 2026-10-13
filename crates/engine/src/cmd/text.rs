@@ -1,5 +1,7 @@
 //! Text editing (Type tool) and character/paragraph formatting.
 
+use std::sync::Arc;
+
 use designcraft_compose as compose;
 use designcraft_doc::story::floor_char_boundary;
 use designcraft_doc::{CellAddr, CharAttrs, Content, ItemId, ParaAttrs, Selection, StoryId, TextSel};
@@ -267,7 +269,55 @@ pub fn specs() -> Vec<CommandSpec> {
             break_link
         ),
         cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection, and its start as `selectedText` (one line, up to 60 characters)", has_doc, selection_attrs),
+        cmd!(
+            "text.fitFrame",
+            "Fit Frame to Text",
+            [],
+            None,
+            "{frame, axes?: both|width|height} — resizes a text frame to its text, keeping its top-left corner (double-click a handle)",
+            has_doc,
+            fit_frame
+        ),
     ]
+}
+
+/// Height of the text area used to measure a story: taller than any text, so nothing is overset.
+const MEASURE_HEIGHT: f64 = 1_000_000.0;
+
+/// Fits a text frame to its text. `both` (a corner handle) sets the width and height, `width` (a side
+/// handle) only the width, `height` only the height. The width is the longest line's, the height the
+/// text's. The frame keeps its top-left corner.
+fn fit_frame(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "text.fitFrame";
+    let frame = id_param(p, "frame").ok_or_else(|| bad(ID, "missing frame"))?;
+    let (fit_w, fit_h) = match str_param(p, "axes").unwrap_or("both") {
+        "both" => (true, true),
+        "width" => (true, false),
+        "height" => (false, true),
+        other => return Err(bad(ID, format!("unknown axes `{other}`; use both, width or height"))),
+    };
+    let sid = story_of(s, p).ok_or_else(|| bad(ID, "not a text frame"))?;
+    let doc = Arc::clone(&s.doc()?.doc);
+    let item = doc.item(frame).ok_or_else(|| bad(ID, "no such frame"))?;
+    let from = item.bounds();
+    let mut specs = compose::frame_specs(&doc, sid);
+    let spec = specs.iter_mut().find(|f| f.id == frame).ok_or_else(|| bad(ID, "not a text frame"))?;
+    if spec.vertical {
+        return Err(bad(ID, "fitting a vertical text frame is not supported yet"));
+    }
+    let [top, left, bottom, right] = spec.opts.inset;
+    spec.area.y1 = spec.area.y0 + MEASURE_HEIGHT;
+    let area_x0 = spec.area.x0;
+    let st = doc.story(sid).ok_or_else(|| bad(ID, "no such story"))?;
+    let cs = compose::compose(&doc, st, &specs, &compose::ComposeOptions::default());
+    let ft = cs.frame(frame).ok_or_else(|| bad(ID, "the frame holds no text"))?;
+    let text_w = ft.lines.iter().map(|l| l.end_x - area_x0).fold(0.0, f64::max);
+    let w = if fit_w { (text_w + left + right).max(0.0) } else { from.width() };
+    let h = if fit_h { (ft.content_height + top + bottom).max(0.0) } else { from.height() };
+    // `transform.resize` takes its rectangles as [x0, y0, x1, y1].
+    let rect = |w: f64, h: f64| json!([from.x0, from.y0, from.x0 + w, from.y0 + h]);
+    s.execute("transform.resize", &json!({"ids": [frame.0], "from": rect(from.width(), from.height()), "to": rect(w, h)}))?;
+    Ok(json!({"width": w, "height": h}))
 }
 
 pub(crate) fn story_of(s: &Session, p: &Value) -> Option<StoryId> {
@@ -2243,5 +2293,66 @@ mod bold_italic_tests {
         let e = s.execute("type.italic", &json!({})).unwrap_err().to_string();
         assert!(e.contains("Source Sans 3 has no italic"), "{e}");
         assert_eq!(style(&mut s), "Bold", "unchanged");
+    }
+}
+
+#[cfg(test)]
+mod fit_frame_tests {
+    use designcraft_doc::ItemId;
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// A text frame at [72, 72, 400, 200] holding `text`; returns its id.
+    fn frame(s: &mut Session, text: &str) -> u64 {
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": text})).unwrap();
+        r["id"].as_u64().unwrap()
+    }
+
+    fn rect(s: &Session, id: u64) -> (f64, f64, f64, f64) {
+        let b = s.doc().unwrap().doc.item(ItemId(id)).unwrap().bounds();
+        (b.x0, b.y0, b.width(), b.height())
+    }
+
+    #[test]
+    fn a_corner_fit_shrinks_width_and_height_from_the_top_left() {
+        let mut s = Session::new();
+        let id = frame(&mut s, "Hi");
+        let (x0, y0, w0, h0) = rect(&s, id);
+        s.execute("text.fitFrame", &json!({"frame": id})).unwrap();
+        let (x, y, w, h) = rect(&s, id);
+        assert!((x - x0).abs() < 1e-6 && (y - y0).abs() < 1e-6, "top left kept: {x}, {y}");
+        assert!(w < w0 && h < h0, "fitted to the text: {w} x {h} from {w0} x {h0}");
+        assert!(h > 0.0 && w > 0.0);
+    }
+
+    #[test]
+    fn a_height_fit_changes_only_the_height() {
+        let mut s = Session::new();
+        let id = frame(&mut s, "Hi");
+        let (_, _, w0, h0) = rect(&s, id);
+        s.execute("text.fitFrame", &json!({"frame": id, "axes": "height"})).unwrap();
+        let (_, _, w, h) = rect(&s, id);
+        assert!((w - w0).abs() < 1e-6, "width kept: {w}");
+        assert!(h < h0, "height fitted: {h}");
+    }
+
+    #[test]
+    fn a_width_fit_changes_only_the_width() {
+        let mut s = Session::new();
+        let id = frame(&mut s, "Hi");
+        let (_, _, w0, h0) = rect(&s, id);
+        s.execute("text.fitFrame", &json!({"frame": id, "axes": "width"})).unwrap();
+        let (_, _, w, h) = rect(&s, id);
+        assert!((h - h0).abs() < 1e-6, "height kept: {h}");
+        assert!(w < w0, "width fitted: {w}");
+    }
+
+    #[test]
+    fn an_unknown_axis_is_an_error() {
+        let mut s = Session::new();
+        let id = frame(&mut s, "Hi");
+        assert!(s.execute("text.fitFrame", &json!({"frame": id, "axes": "diagonal"})).is_err());
     }
 }
