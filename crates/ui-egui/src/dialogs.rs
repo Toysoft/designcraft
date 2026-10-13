@@ -2034,10 +2034,12 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 }
                 app.run("view.snapPreferences", snap)?;
             }
-            if !d.fields.contains_key("horizontalUnits") {
-                return Ok(Value::Null);
+            let Some(horizontal) = d.fields.get("horizontalUnits") else { return Ok(Value::Null) };
+            let mut doc = json!({"horizontalUnits": horizontal});
+            // Fields can come from `ui.dialog.open`; rulers it doesn't name keep their units.
+            if let Some(vertical) = d.fields.get("verticalUnits") {
+                doc["verticalUnits"] = vertical.clone();
             }
-            let mut doc = json!({"horizontalUnits": d.fields["horizontalUnits"], "verticalUnits": d.fields["verticalUnits"]});
             let mut bg = json!({"relativeTo": d.s("bg.relativeTo"), "color": d.fields.get("bg.color").cloned().unwrap_or(json!([140, 205, 230]))});
             if let Some(v) = d.m("bg.start") {
                 bg["start"] = json!(v.max(0.0));
@@ -4093,6 +4095,24 @@ mod tests {
         }
         click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, option).center());
         assert!(app.ui.dialog.as_ref().unwrap().b("absolutePageNumbers"));
+    }
+
+    #[test]
+    fn preferences_ok_sets_only_the_ruler_units_it_is_given() {
+        // `ui.dialog.open` takes any fields, so the vertical units can be missing.
+        for (vertical, want) in [(None, "inches"), (Some("points"), "points")] {
+            let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({})).unwrap();
+            app.run("document.preferences", json!({"verticalUnits": "inches"})).unwrap();
+            let mut fields = json!({"horizontalUnits": "millimeters", "bg.relativeTo": "topOfPage"});
+            if let Some(vertical) = vertical {
+                fields["verticalUnits"] = json!(vertical);
+            }
+            app.ui.dialog = Some(Dialog::new("preferences", fields));
+            confirm(&mut app).unwrap();
+            let units = app.run("document.preferences", json!({})).unwrap();
+            assert_eq!((units["horizontalUnits"].as_str(), units["verticalUnits"].as_str()), (Some("millimeters"), Some(want)));
+        }
     }
 
     #[test]
