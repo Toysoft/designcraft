@@ -172,6 +172,9 @@ mod tests {
                     Err(e) => panic!("accept failed: {e}"),
                 }
             };
+            // Accepted sockets can inherit the listener's nonblocking mode. The server
+            // waits for both requests with timeouts, rather than reading before they arrive.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
