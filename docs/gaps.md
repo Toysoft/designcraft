@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (book chapter update safety) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (Move Pages position validation and fixed-spread guard) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -37,6 +37,9 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
   paste #212); Paste in Place onto the selected page (#348); right-click context menus that don't
   open (#238, #187, #160, #312); threading (gap 0); double-click word selection in fields
   (#189); character formatting set at a caret is discarded (#289).
+- **Progress:** Move Pages (#348) validates one-based absolute positions in its dialog; the
+  zero-based API is unchanged. Documents containing non-shuffling multi-page spreads reject
+  moves before mutation; support for those moves, paste and page dragging remain open.
 - **Evidence:** 16 issues from 2026-10-05 to 2026-10-10, mostly against the 0.4/0.5 release builds.
 - **Impact:** a layout artist can't finish the simplest job. This dominates the
   ready-for-real-work number.
