@@ -501,6 +501,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Scale X Percentage", "Percentual de escala X"),
     ("Scale Y Percentage", "Percentual de escala Y"),
     ("Search commands", "Pesquisar comandos"),
+    ("No matching commands", "Nenhum comando correspondente"),
     ("Search fonts", "Pesquisar fontes"),
     ("Search styles and commands…", "Pesquisar estilos e comandos…"),
     ("Search: character or U+code", "Pesquisar: caractere ou código U+"),

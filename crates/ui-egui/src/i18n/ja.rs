@@ -1100,6 +1100,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Scale X Percentage", "X 方向の拡大・縮小率"),
     ("Scale Y Percentage", "Y 方向の拡大・縮小率"),
     ("Search commands", "コマンドを検索"),
+    ("No matching commands", "一致するコマンドはありません"),
     ("Search fonts", "フォントを検索"),
     ("Search styles and commands…", "スタイルとコマンドを検索…"),
     ("Search: character or U+code", "検索: 文字または U+ コード"),

@@ -2116,7 +2116,7 @@ fn parse_shortcut(sc: &str) -> Option<(egui::Modifiers, egui::Key)> {
 pub fn shortcuts(app: &mut DesignApp, ctx: &egui::Context) {
     // Only a focused text field takes the keys: the canvas (or a button) having focus after a click
     // must not swallow tool shortcuts until Esc clears it.
-    if ctx.text_edit_focused() || app.ui.dialog.is_some() || app.ui.palette.is_some() {
+    if ctx.text_edit_focused() || app.ui.dialog.is_some() || app.ui.palette.is_some() || crate::chrome::search_had_focus(ctx) {
         return;
     }
     let typing = app.session.wants_text();
@@ -2239,7 +2239,7 @@ pub struct QuickItem {
 /// Quick Apply matches (styles first, as InDesign lists them), at most 14.
 pub fn quick_apply_items(session: &designcraft_engine::Session, query: &str) -> Vec<QuickItem> {
     let ql = query.to_lowercase();
-    let hit = |label: &str, id: &str| ql.is_empty() || label.to_lowercase().contains(&ql) || id.to_lowercase().contains(&ql);
+    let hit = |label: &str, id: &str| quick_match(&ql, &[label, id]);
     let mut out = Vec::new();
     if let Some(st) = session.active() {
         let styles = &st.doc.styles;
@@ -2263,15 +2263,49 @@ pub fn quick_apply_items(session: &designcraft_engine::Session, query: &str) -> 
     if ql.is_empty() {
         out.clear();
     }
-    let commands = designcraft_engine::command_specs()
+    let commands = quick_commands().filter(|(id, l, _)| hit(l, id)).map(|(id, l, sc)| QuickItem {
+        label: l.to_string(),
+        id: id.to_string(),
+        params: json!({}),
+        shortcut: sc.map(str::to_string),
+        kind: "",
+    });
+    out.extend(commands);
+    out.truncate(14);
+    out
+}
+
+/// The commands Quick Apply and the application bar's search find: (id, label, default shortcut).
+fn quick_commands() -> impl Iterator<Item = (&'static str, &'static str, Option<&'static str>)> {
+    designcraft_engine::command_specs()
         .iter()
         .filter(|c| !c.menu.is_empty() || c.shortcut.is_some())
         .map(|c| (c.id, c.label, c.shortcut))
         .chain(UI_COMMANDS.iter().map(|c| (c.0, c.1, c.2)))
-        .filter(|(id, l, _)| hit(l, id))
-        .map(|(id, l, sc)| QuickItem { label: l.to_string(), id: id.to_string(), params: json!({}), shortcut: sc.map(str::to_string), kind: "" });
-    out.extend(commands);
-    out.truncate(14);
+}
+
+/// Whether any of `texts` contains the lowercased query (an empty query matches everything).
+fn quick_match(query_lower: &str, texts: &[&str]) -> bool {
+    query_lower.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(query_lower))
+}
+
+/// The application bar's search: the commands whose label in the interface language, English
+/// label or id contains `query`, labelled in the interface language with the shortcut in effect.
+/// Nothing for an empty query; at most 14.
+pub fn command_search(app: &DesignApp, query: &str) -> Vec<QuickItem> {
+    let ql = query.trim().to_lowercase();
+    if ql.is_empty() {
+        return Vec::new();
+    }
+    let lang = app.ui.language.as_str();
+    let mut out: Vec<QuickItem> = Vec::new();
+    for (id, label, _) in quick_commands() {
+        let shown = crate::i18n::tr(lang, label);
+        if out.len() >= 14 || out.iter().any(|it| it.id == id) || !quick_match(&ql, &[shown, label, id]) {
+            continue;
+        }
+        out.push(QuickItem { label: shown.to_string(), id: id.to_string(), params: Value::Null, shortcut: shortcut_of(app, id), kind: "" });
+    }
     out
 }
 
@@ -3199,6 +3233,19 @@ mod tests {
         assert!(!ctx.text_edit_focused());
         native_frame(&mut app, &ctx, vec![], Some("edit.selectAll"));
         assert_eq!(document_items(&app), (2, 2));
+    }
+
+    #[test]
+    fn command_search_matches_labels_in_the_interface_language() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.ui.language = "de".into();
+        let items = command_search(&app, "gruppieren");
+        let group = items.iter().find(|i| i.id == "object.group").unwrap();
+        assert_eq!(group.label, "Gruppieren");
+        assert_eq!(group.shortcut.as_deref(), Some("Cmd+G"));
+        assert!(command_search(&app, "group").iter().any(|i| i.id == "object.group"), "English labels match too");
+        assert!(command_search(&app, "  ").is_empty());
+        assert!(command_search(&app, "e").len() <= 14);
     }
 
     #[test]

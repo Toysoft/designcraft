@@ -10,6 +10,149 @@ use crate::theme::{Tokens, semibold};
 use crate::widgets::{caption, measure, number};
 use crate::{DesignApp, icons};
 
+fn search_id() -> egui::Id {
+    egui::Id::new("app_bar_search")
+}
+
+/// Whether the application bar's search field had the keyboard last frame. Escape takes egui's
+/// focus away before any widget runs, so that press must not reach the global shortcuts.
+pub fn search_had_focus(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.had_focus_last_frame(search_id()))
+}
+
+/// The search field's state between frames: the query, the highlighted match, whether the matches
+/// are shown, and the widget that had the keyboard before the field took it.
+#[derive(Clone, Default)]
+struct SearchState {
+    query: String,
+    highlight: usize,
+    open: bool,
+    previous_focus: Option<egui::Id>,
+}
+
+/// The application bar's search field: finds menu commands by their labels in the interface
+/// language. ↑/↓ move through the matches; Return or a click runs one as its menu item would.
+/// Running one or pressing Escape clears the field and gives the keyboard back to the widget that
+/// had it. While the field has the keyboard, no key reaches the shortcuts or the document.
+fn search_field(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let id = search_id();
+    let state_id = id.with("state");
+    let mut st: SearchState = ui.data(|d| d.get_temp(state_id)).unwrap_or_default();
+    let (r, _) = ui.allocate_exact_size(vec2(125.0, 18.0), Sense::hover());
+    ui.painter().rect(r, 1.0, t.input, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    icons::paint(ui.painter(), egui::Rect::from_min_size(r.min + vec2(3.0, 2.0), vec2(14.0, 14.0)), "search", t.icon);
+    let focused = ui.memory(|m| m.has_focus(id));
+    let had_focus = search_had_focus(ui.ctx());
+    if !focused && !had_focus {
+        st.previous_focus = ui.memory(|m| m.focused());
+    }
+    let none = egui::Modifiers::NONE;
+    let (down, up, enter, escape) = if focused || had_focus {
+        ui.input_mut(|i| {
+            (
+                i.consume_key(none, egui::Key::ArrowDown),
+                i.consume_key(none, egui::Key::ArrowUp),
+                i.consume_key(none, egui::Key::Enter),
+                i.consume_key(none, egui::Key::Escape),
+            )
+        })
+    } else {
+        (false, false, false, false)
+    };
+    let lang = app.ui.language.clone();
+    let hint = crate::rtl::widget(ui, egui::RichText::new(crate::i18n::tr(&lang, "Search")).color(t.text_dim));
+    let field = egui::Rect::from_min_max(r.min + vec2(19.0, 0.0), r.max - vec2(3.0, 0.0));
+    let resp = ui
+        .put(
+            field,
+            egui::TextEdit::singleline(&mut st.query)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .font(egui::FontId::proportional(11.0))
+                .text_color(t.text)
+                .hint_text(hint)
+                .desired_width(field.width())
+                .vertical_align(egui::Align::Center)
+                // Return runs the highlighted match instead of leaving the field.
+                .return_key(None),
+        )
+        .on_hover_text(crate::i18n::tr(&lang, "Search commands"));
+    if resp.changed() {
+        st.highlight = 0;
+        st.open = true;
+    }
+    if resp.gained_focus() {
+        st.open = true;
+    }
+    let items = if st.open { crate::menus::command_search(app, &st.query) } else { Vec::new() };
+    let last = items.len().saturating_sub(1);
+    if down {
+        st.highlight = st.highlight.saturating_add(1);
+    }
+    if up {
+        st.highlight = st.highlight.saturating_sub(1);
+    }
+    st.highlight = st.highlight.min(last);
+    let mut run = None;
+    if enter && let Some(it) = items.get(st.highlight).filter(|it| crate::menus::menu_enabled(app, &it.id)) {
+        run = Some(it.id.clone());
+    }
+    let mut over_matches = false;
+    if st.open && !st.query.trim().is_empty() {
+        let shown = egui::Area::new(id.with("matches"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(r.right_bottom() + vec2(0.0, 2.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    let size = vec2(300.0, 22.0);
+                    ui.set_width(size.x);
+                    if items.is_empty() {
+                        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "No matching commands")).color(t.text_dim));
+                    }
+                    for (k, it) in items.iter().enumerate() {
+                        let mut b = egui::Button::new(crate::rtl::widget(ui, it.label.as_str())).frame(false).min_size(size);
+                        if let Some(sc) = &it.shortcut {
+                            b = b.shortcut_text(crate::menus::shortcut_text(sc));
+                        }
+                        if k == st.highlight {
+                            ui.painter().rect_filled(egui::Rect::from_min_size(ui.cursor().min, size), 2.0, t.hover);
+                        }
+                        let enabled = crate::menus::menu_enabled(app, &it.id);
+                        // The button aligns its label by the layout it's in: left, like the menus.
+                        let row = ui.allocate_ui_with_layout(
+                            size,
+                            egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Min),
+                            |ui| ui.add_enabled(enabled, b),
+                        );
+                        if row.inner.clicked() {
+                            run = Some(it.id.clone());
+                        }
+                    }
+                });
+            });
+        over_matches = shown.response.contains_pointer();
+    }
+    if escape || run.is_some() {
+        st.query.clear();
+        st.open = false;
+        let previous = st.previous_focus.take();
+        ui.memory_mut(|m| match previous {
+            Some(p) => m.request_focus(p),
+            None => m.surrender_focus(id),
+        });
+    } else if !resp.has_focus() && !over_matches {
+        // A click elsewhere or Tab took the keyboard: the matches close, the query stays.
+        st.open = false;
+    }
+    ui.data_mut(|d| d.insert_temp(state_id, st));
+    if let Some(cmd) = run {
+        crate::menus::activate(app, &cmd, &serde_json::Value::Null);
+    }
+}
+
 pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let left = if app.integrated_titlebar { 78 } else { 8 };
@@ -43,18 +186,7 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                     let size = vec2(ui.available_width().max(tools_w), ui.available_height());
                     let tools = ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(4.0);
-                        // Search field.
-                        let (r, _) = ui.allocate_exact_size(vec2(125.0, 18.0), Sense::click());
-                        ui.painter().rect(r, 1.0, t.input, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
-                        icons::paint(ui.painter(), egui::Rect::from_min_size(r.min + vec2(3.0, 2.0), vec2(14.0, 14.0)), "search", t.icon);
-                        crate::rtl::paint(
-                            ui.painter(),
-                            r.min + vec2(20.0, 9.0),
-                            egui::Align2::LEFT_CENTER,
-                            crate::i18n::tr(&app.ui.language, "Search"),
-                            egui::FontId::proportional(11.0),
-                            t.text_dim,
-                        );
+                        search_field(app, ui);
                         ui.add_space(8.0);
                         let current = app.ui.workspace.clone();
                         let shown = crate::i18n::workspace_name(&app.ui.language, &current);
@@ -765,7 +897,7 @@ fn community_card(app: &mut DesignApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use egui::{pos2, vec2};
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     use crate::test_window::{self, wheel};
 
@@ -781,6 +913,92 @@ mod tests {
 
     fn rect(h: &egui_kittest::Harness<'static, test_window::Window>, label: &str) -> egui::Rect {
         h.get_by_label(label).rect()
+    }
+
+    /// The application bar's search field (German interface).
+    fn search_node<'h>(h: &'h egui_kittest::Harness<'static, test_window::Window>) -> egui_kittest::Node<'h> {
+        h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some("Suchen"))
+    }
+
+    /// A document with two frames, the Selection tool, German menus, and the search field clicked.
+    fn searching() -> egui_kittest::Harness<'static, test_window::Window> {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.ui.language = "de".into();
+        let mut h = test_window::open(app, vec2(1440.0, 900.0));
+        let app = &mut h.state_mut().app;
+        app.run("frame.create", serde_json::json!({"rect": [36, 36, 200, 200]})).unwrap();
+        app.run("frame.create", serde_json::json!({"rect": [236, 36, 400, 200]})).unwrap();
+        app.run("edit.deselectAll", serde_json::json!({})).unwrap();
+        h.run_steps(4);
+        let field = search_node(&h).rect();
+        test_window::click_at(&mut h, field.center());
+        assert!(h.ctx.memory(|m| m.has_focus(super::search_id())), "a click gives the field the keyboard");
+        h
+    }
+
+    /// A match in the search's list, whose accessible label ends in its shortcut.
+    fn row<'h>(h: &'h egui_kittest::Harness<'static, test_window::Window>, label: &'static str) -> Option<egui_kittest::Node<'h>> {
+        h.query_by(move |n| n.label().is_some_and(|l| l == label || l.starts_with(&format!("{label} "))))
+    }
+
+    fn items(h: &egui_kittest::Harness<'static, test_window::Window>) -> (usize, usize) {
+        let d = h.state().app.session.active().unwrap();
+        (d.doc.spreads.iter().flat_map(|sp| &sp.items).count(), d.selection.items.len())
+    }
+
+    #[test]
+    fn the_search_field_finds_and_runs_menu_commands() {
+        let mut h = searching();
+        h.event(egui::Event::Text("gruppier".into()));
+        h.run_steps(4);
+        assert!(row(&h, "Gruppieren").is_some(), "the German label is listed");
+        assert!(row(&h, "Gruppierung aufheben").is_some());
+        // Nothing is selected, so Group is off and Return doesn't run it.
+        assert!(row(&h, "Gruppieren").is_some_and(|n| n.accesskit_node().is_disabled()));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(4);
+        assert_eq!(items(&h), (2, 0), "a disabled command doesn't run");
+        // Select both frames, then ↓ ↑ Return runs the first match, as Object › Group would.
+        h.state_mut().app.run("edit.selectAll", serde_json::json!({})).unwrap();
+        h.key_press(egui::Key::ArrowDown);
+        h.run_steps(2);
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(4);
+        assert_eq!(items(&h).0, 1, "the two frames are grouped");
+        assert!(row(&h, "Gruppieren").is_none(), "the matches closed");
+        assert!(!h.ctx.memory(|m| m.has_focus(super::search_id())), "the field gave the keyboard back");
+    }
+
+    #[test]
+    fn keys_typed_in_the_search_field_stay_out_of_the_document() {
+        let mut h = searching();
+        h.state_mut().app.run("edit.selectAll", serde_json::json!({})).unwrap();
+        // Escape would switch this tool back to the Selection tool.
+        h.state_mut().app.run("tool.select", serde_json::json!({"tool": "rectangleFrame"})).unwrap();
+        h.run_steps(2);
+        // Tool keys, Delete and Backspace edit the query; the tool and the frames stay.
+        for key in [egui::Key::P, egui::Key::T, egui::Key::M, egui::Key::Delete, egui::Key::Backspace] {
+            h.key_press(key);
+            h.run_steps(2);
+        }
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(2);
+        assert_eq!(h.state().app.session.tool_id(), "rectangleFrame");
+        assert_eq!(items(&h), (2, 2), "nothing was deleted or deselected");
+        h.event(egui::Event::Text("zz-no-such-command".into()));
+        h.run_steps(4);
+        assert!(h.query_by_label("Keine passenden Befehle").is_some());
+        // Escape closes the matches and clears the field without touching the document.
+        h.key_press(egui::Key::Escape);
+        h.run_steps(4);
+        assert!(h.query_by_label("Keine passenden Befehle").is_none());
+        assert!(!h.ctx.text_edit_focused());
+        assert_eq!(h.state().app.session.tool_id(), "rectangleFrame");
+        assert_eq!(items(&h), (2, 2));
+        let field = search_node(&h);
+        assert_eq!(field.value().unwrap_or_default(), "", "the query is cleared");
     }
 
     #[test]

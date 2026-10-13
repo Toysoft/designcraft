@@ -502,6 +502,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Scale X Percentage", "نسبة التحجيم الأفقي"),
     ("Scale Y Percentage", "نسبة التحجيم العمودي"),
     ("Search commands", "البحث عن الأوامر"),
+    ("No matching commands", "لا توجد أوامر مطابقة"),
     ("Search fonts", "البحث عن الخطوط"),
     ("Search styles and commands…", "البحث عن الأنماط والأوامر…"),
     ("Search: character or U+code", "البحث بحرف أو رمز U+"),
