@@ -945,6 +945,8 @@ dependencies = [
  "regex",
  "unicode-bidi",
  "unicode-bidi-mirroring",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
