@@ -255,7 +255,73 @@ impl Tokens {
 
 /// Install the UI fonts for the interface language `lang` (it orders the CJK fallbacks).
 pub fn install_fonts(ctx: &egui::Context, lang: &str) {
-    ctx.set_fonts(font_definitions(designcraft_fonts::CRAFT_FONTS, lang));
+    let mut fonts = font_definitions(designcraft_fonts::CRAFT_FONTS, lang);
+    add_system_korean(&mut fonts, lang);
+    ctx.set_fonts(fonts);
+}
+
+/// Korean UI text (Hangul in document names, styles, layers and text): neither the bundled faces
+/// nor craft-fonts cover Hangul, so the system's Korean face (Malgun Gothic on Windows, Apple SD
+/// Gothic Neo on macOS, Nanum or Noto CJK on Linux) joins every family, read once per run. It goes
+/// right after the app's own faces for `ko` and at the end otherwise, so Han characters keep the
+/// Japanese or Chinese forms of those interfaces. Nothing is added when no such face is found.
+fn add_system_korean(fonts: &mut FontDefinitions, lang: &str) {
+    let Some((regular, bold)) = system_korean_fonts() else { return };
+    fonts.font_data.insert("system-ko".into(), regular.clone());
+    let bold_name = if let Some(bold) = bold {
+        fonts.font_data.insert("system-ko-bold".into(), bold.clone());
+        "system-ko-bold"
+    } else {
+        "system-ko"
+    };
+    let ko = lang.starts_with("ko");
+    for (family, stack) in fonts.families.iter_mut() {
+        let name = match family {
+            FontFamily::Name(n) if n.as_ref() == "semibold" || n.as_ref() == "arabic-semibold" => bold_name,
+            _ => "system-ko",
+        };
+        // The app's own faces: everything before the first craft-fonts face.
+        let at = if ko { stack.iter().position(|n| n.starts_with("craft-")).unwrap_or(stack.len()) } else { stack.len() };
+        stack.insert(at, name.to_string());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn system_korean_fonts() -> Option<(Arc<FontData>, Option<Arc<FontData>>)> {
+    static FONTS: std::sync::OnceLock<Option<(Arc<FontData>, Option<Arc<FontData>>)>> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let windows = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\Windows".into()).join("Fonts");
+            // (regular, bold, index of the face in a collection)
+            let candidates: [(std::path::PathBuf, Option<std::path::PathBuf>, u32); 6] = [
+                (windows.join("malgun.ttf"), Some(windows.join("malgunbd.ttf")), 0),
+                ("/System/Library/Fonts/AppleSDGothicNeo.ttc".into(), None, 0),
+                ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf".into(), Some("/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf".into()), 0),
+                ("/usr/share/fonts/nanum/NanumGothic.ttf".into(), Some("/usr/share/fonts/nanum/NanumGothicBold.ttf".into()), 0),
+                (
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into(),
+                    Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc".into()),
+                    1,
+                ),
+                ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc".into(), Some("/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc".into()), 1),
+            ];
+            let load = |path: &std::path::Path, index: u32| -> Option<Arc<FontData>> {
+                let bytes = std::fs::read(path).ok()?;
+                let mut data = FontData::from_owned(bytes);
+                data.index = index;
+                Some(Arc::new(data))
+            };
+            candidates.iter().find_map(|(regular, bold, index)| {
+                let regular = load(regular, *index)?;
+                Some((regular, bold.as_deref().and_then(|b| load(b, *index))))
+            })
+        })
+        .clone()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn system_korean_fonts() -> Option<(Arc<FontData>, Option<Arc<FontData>>)> {
+    None
 }
 
 /// The UI fonts: the app's own, then the craft-fonts faces from `craft` (empty without
@@ -415,6 +481,28 @@ mod japanese_font_tests {
         });
         // And the real installer works with whatever this build has.
         super::install_fonts(&egui::Context::default(), "ja");
+    }
+
+    #[test]
+    fn hangul_ui_glyphs_come_from_the_system_korean_face() {
+        if super::system_korean_fonts().is_none() {
+            eprintln!("skipped: no system Korean font");
+            return;
+        }
+        for lang in ["en", "ko"] {
+            let ctx = egui::Context::default();
+            super::install_fonts(&ctx, lang);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+            ctx.fonts_mut(|fonts| {
+                for family in families() {
+                    let font = egui::FontId::new(13.0, family);
+                    for ch in "한글 문서 단락 스타일".chars().filter(|c| !c.is_whitespace()) {
+                        assert!(fonts.has_glyph(&font, ch), "missing {ch} in {font:?} ({lang})");
+                    }
+                }
+            });
+        }
     }
 }
 
