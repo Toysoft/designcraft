@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
 
+use designcraft_doc::geom::{Affine, Rect};
 use designcraft_doc::{Align, CharAttrs, CharProps, Content, Document, Item, ItemId, ParaProps, SpreadRef, StoryId, Styles, story};
 
 #[derive(Clone, Debug)]
@@ -514,29 +515,41 @@ pub fn reading_order(doc: &Document) -> Vec<Block> {
     let mut seen_stories = Vec::new();
     for (si, sp) in doc.spreads.iter().enumerate() {
         let first = doc.first_page_of_spread(si);
-        let mut items: Vec<&Item> = Vec::new();
-        for top in &sp.items {
-            top.walk(&mut |i| items.push(i));
-        }
-        for it in items {
+        // Preserve traversal order while carrying each group's transform to spread space.
+        // The iterator stack grows with nesting depth, without repeated document lookups.
+        let mut stack = vec![(sp.items.iter(), Affine::IDENTITY)];
+        while let Some((items, parent)) = stack.last_mut() {
+            let Some(it) = items.next() else {
+                stack.pop();
+                continue;
+            };
+            let xf = *parent * it.xf;
+            let children = it.children();
+            if !children.is_empty() {
+                stack.push((children.iter(), xf));
+            }
             if it.hidden {
                 continue;
             }
-            let b = it.bounds();
-            let page = first + sp.page_at_x(b.center().x).unwrap_or(0);
-            let key = (page, (b.y0 * 10.0) as i64, (b.x0 * 10.0) as i64);
-            match &it.content {
+            let block = match &it.content {
                 Content::Text(tf) => {
                     let Some(story) = doc.story(tf.story) else { continue };
                     // A story is placed where its first frame is.
-                    if story.frames.first() == Some(&it.id) && !seen_stories.contains(&tf.story) && !story.text.trim().is_empty() {
-                        seen_stories.push(tf.story);
-                        keyed.push((key, Block::Story(tf.story)));
+                    if story.frames.first() != Some(&it.id) || seen_stories.contains(&tf.story) || story.text.trim().is_empty() {
+                        continue;
                     }
+                    seen_stories.push(tf.story);
+                    Block::Story(tf.story)
                 }
-                Content::Graphic(_) => keyed.push((key, Block::Image(it.id))),
-                _ => {}
-            }
+                Content::Graphic(_) => Block::Image(it.id),
+                _ => continue,
+            };
+            // Transform the path once: rotating a local axis-aligned box again would
+            // enlarge it and give a different top-left from the actual spread geometry.
+            let b = it.path.transformed(xf).bounds().unwrap_or(Rect::ZERO);
+            let page = first + sp.page_at_x(b.center().x).unwrap_or(0);
+            let key = (page, (b.y0 * 10.0) as i64, (b.x0 * 10.0) as i64);
+            keyed.push((key, block));
         }
     }
     let _ = SpreadRef::Doc(0);
