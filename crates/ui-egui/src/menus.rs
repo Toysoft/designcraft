@@ -1519,9 +1519,8 @@ fn download_document(app: &mut DesignApp) -> Result<Value, String> {
     let name = app.session.active().map(|d| format!("{}.designcraft", d.doc.title)).ok_or("no document")?;
     let ser = app.run("file.serialize", json!({}))?;
     let bytes = designcraft_engine::cmd::base64_decode(ser["base64"].as_str().unwrap_or_default());
-    if let Some(download) = app.services.download.as_mut() {
-        download(&name, &bytes);
-    }
+    let download = app.services.download.as_mut().ok_or("no download service")?;
+    download(&name, &bytes).map_err(|e| format!("could not download {name}: {e}"))?;
     // Marks the document saved; on the web the engine doesn't touch a file system.
     app.run("file.saveAs", json!({"path": name}))
 }
@@ -3603,5 +3602,32 @@ mod tests {
         assert!(open, "hovering the visible portion still opens the submenu");
         let (_, Some((_, _, open))) = frame(500.0, vec![]) else { panic!("test menu remains open") };
         assert!(!open, "an open submenu closes when its row becomes fully clipped");
+    }
+
+    /// Web save: a download that couldn't start is an error and leaves the document unsaved; one
+    /// that started marks it saved.
+    #[test]
+    fn web_save_marks_the_document_saved_only_after_the_download_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        // The title names a temporary path: on native, file.saveAs writes where the web build doesn't.
+        let title = dir.path().join("doc").to_string_lossy().to_string();
+        let fails = std::rc::Rc::new(std::cell::Cell::new(true));
+        let f = fails.clone();
+        let services = crate::Services {
+            download: Some(Box::new(move |_: &str, _: &[u8]| if f.get() { Err("blocked".into()) } else { Ok(()) })),
+            ..Default::default()
+        };
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), services);
+        app.run("file.new", json!({"title": title})).unwrap();
+        app.run("frame.create", json!({"rect": [36, 36, 300, 200]})).unwrap();
+        assert!(app.session.active().unwrap().is_dirty());
+
+        let e = app.run("app.save", json!({})).unwrap_err();
+        assert!(e.contains("blocked"), "{e}");
+        assert!(app.session.active().unwrap().is_dirty(), "a failed download leaves the document unsaved");
+
+        fails.set(false);
+        app.run("app.save", json!({})).unwrap();
+        assert!(!app.session.active().unwrap().is_dirty());
     }
 }

@@ -27,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let path = str_param(p, "path").ok_or_else(|| bad("file.saveACopy", "missing `path`"))?.to_string();
             let mut copy = (*s.doc()?.doc).clone();
             super::datamerge::refresh_relative_paths(&mut copy, std::path::Path::new(&path));
-            let bytes = to_bytes(&copy);
+            let bytes = to_bytes(&copy)?;
             #[cfg(not(target_arch = "wasm32"))]
             crate::atomic::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
@@ -49,7 +49,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let st = s.doc()?;
             // Preview fill is session state. Serialize the unfilled template.
             let doc = st.preview_stash.as_deref().unwrap_or(st.doc.as_ref());
-            let bytes = to_bytes(doc);
+            let bytes = to_bytes(doc)?;
             Ok(json!({"base64": base64_encode(&bytes), "bytes": bytes.len()}))
         }),
         cmd!(noundo "file.close", "Close", ["File"], Some("Cmd+W"), "{index?}", has_doc, |s, p| {
@@ -109,8 +109,19 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-pub fn to_bytes(d: &Document) -> Vec<u8> {
-    designcraft_format::save(d).unwrap_or_default()
+#[cfg(test)]
+thread_local! {
+    /// Makes [`to_bytes`] fail on this thread, standing in for writer errors that need gigabytes to reach.
+    pub(crate) static FAIL_TO_BYTES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The document as `.designcraft` bytes, or an error when it can't be written; never an empty file.
+pub fn to_bytes(d: &Document) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    if FAIL_TO_BYTES.with(std::cell::Cell::get) {
+        return Err(EngineError::Other("could not write the document: injected failure".into()));
+    }
+    designcraft_format::save(d).map_err(|e| EngineError::Other(format!("could not write the document: {e}")))
 }
 
 pub fn from_bytes(b: &[u8]) -> Result<Document> {
@@ -244,7 +255,7 @@ fn file_save(s: &mut Session, p: &Value) -> Result<Value> {
     super::datamerge::refresh_relative_paths(&mut saved, std::path::Path::new(&path));
     let paths_changed = saved.data_merge != st.doc.data_merge;
     let saved = if paths_changed { Arc::new(saved) } else { st.doc.clone() };
-    let bytes = to_bytes(&saved);
+    let bytes = to_bytes(&saved)?;
     #[cfg(not(target_arch = "wasm32"))]
     crate::atomic::write_file(&path, &bytes)?;
     if paths_changed {
@@ -513,12 +524,12 @@ fn place_drop(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The selection as `.designcraft` snippet bytes.
 pub(crate) fn snippet_bytes(s: &mut Session) -> Result<Vec<u8>> {
-    Ok(to_bytes(&super::edit::clip_doc(s)?))
+    to_bytes(&super::edit::clip_doc(s)?)
 }
 
 fn snippet_export(s: &mut Session, p: &Value) -> Result<Value> {
     let d = super::edit::clip_doc(s)?;
-    let bytes = to_bytes(&d);
+    let bytes = to_bytes(&d)?;
     match str_param(p, "path") {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -765,6 +776,40 @@ mod save_tests {
         let missing = dir.join("missing").join("doc.designcraft");
         let e = s.execute("file.save", &json!({"path": missing.to_string_lossy()})).unwrap_err();
         assert!(e.to_string().contains("missing"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A document that can't be written is an error: the file on disk, the unsaved state and the
+    /// recovery checkpoint all stay as they were.
+    #[test]
+    fn a_save_that_cannot_write_the_document_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("dc-save-fails-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.designcraft");
+        let recovery = dir.join("recovery");
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        s.execute("file.save", &json!({"path": path.to_string_lossy()})).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Unsaved", "caret": false})).unwrap();
+        s.execute("file.recovery.save", &json!({"dir": recovery.to_string_lossy()})).unwrap();
+        let checkpoint = recovery.join(format!("{}.designcraft", s.doc().unwrap().uid));
+        assert!(checkpoint.exists());
+
+        super::FAIL_TO_BYTES.with(|f| f.set(true));
+        let save = s.execute("file.save", &json!({}));
+        let copy = s.execute("file.saveACopy", &json!({"path": dir.join("copy.designcraft").to_string_lossy()}));
+        let serialized = s.execute("file.serialize", &json!({}));
+        super::FAIL_TO_BYTES.with(|f| f.set(false));
+
+        let e = save.unwrap_err();
+        assert!(e.to_string().contains("could not write the document"), "{e}");
+        assert!(copy.is_err() && serialized.is_err(), "no empty copy and no empty download");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the saved file is untouched");
+        assert!(!dir.join("copy.designcraft").exists());
+        assert!(s.doc().unwrap().is_dirty(), "the document still has unsaved changes");
+        assert!(checkpoint.exists(), "the recovery checkpoint stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

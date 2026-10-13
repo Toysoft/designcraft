@@ -173,7 +173,7 @@ fn sample_document_is_valid_and_composes() {
     let i = s.execute("document.inspect", &json!({})).unwrap();
     assert!(i["stories"].as_array().unwrap().len() >= 8);
     // Save/load round trip.
-    let bytes = cmd::file_bytes(&s.doc().unwrap().doc);
+    let bytes = cmd::file_bytes(&s.doc().unwrap().doc).unwrap();
     let back = cmd::file_from(&bytes).unwrap();
     assert_eq!(back.page_count(), 4);
     assert_eq!(back.assets.len(), s.doc().unwrap().doc.assets.len());
@@ -326,7 +326,7 @@ fn hyperlinks_and_bookmarks_reach_the_pdf() {
     let pdf = hayro_syntax::Pdf::new(bytes).expect("valid pdf");
     assert_eq!(pdf.pages().len(), 4);
     // Round trip through the native format keeps them.
-    let back = cmd::file_from(&cmd::file_bytes(&s.doc().unwrap().doc)).unwrap();
+    let back = cmd::file_from(&cmd::file_bytes(&s.doc().unwrap().doc).unwrap()).unwrap();
     assert_eq!(back.hyperlinks.len(), 2);
     assert_eq!(back.bookmarks.len(), 2);
 }
@@ -338,7 +338,7 @@ fn serialized_document_opens_again() {
     s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Saved on the web"})).unwrap();
     let r = s.execute("file.serialize", &json!({})).unwrap();
     let bytes = cmd::base64_decode(r["base64"].as_str().expect("base64"));
-    assert_eq!(bytes, cmd::to_bytes(&s.doc().unwrap().doc));
+    assert_eq!(bytes, cmd::to_bytes(&s.doc().unwrap().doc).unwrap());
     s.execute("file.openBytes", &json!({"name": "copy", "base64": r["base64"]})).unwrap();
     let d = s.execute("document.inspect", &json!({})).unwrap();
     assert_eq!(d["stories"][0]["preview"], "Saved on the web");

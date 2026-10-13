@@ -52,7 +52,8 @@ pub struct ImportedFile {
     pub bytes: Vec<u8>,
 }
 pub type OpenAsyncFn = Box<dyn FnMut(ImportRequest)>;
-pub type DownloadFn = Box<dyn FnMut(&str, &[u8])>;
+/// Starts a browser download; an error means no file was handed to the user.
+pub type DownloadFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
 /// Files delivered asynchronously with their original operation and document identity.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<ImportedFile>>>;
 
@@ -2173,7 +2174,7 @@ mod browser_import_tests {
         let mut source = Session::new();
         source.execute("file.new", &json!({"title": "source"})).unwrap();
         source.execute("frame.create", &json!({"rect": [10, 10, 50, 50], "content": "text", "text": "placed"})).unwrap();
-        let native = designcraft_engine::cmd::to_bytes(&source.doc().unwrap().doc);
+        let native = designcraft_engine::cmd::to_bytes(&source.doc().unwrap().doc).unwrap();
         let idml = designcraft_idml::export_idml(&source.doc().unwrap().doc);
         for (name, bytes) in [("source.designcraft", native), ("source.idml", idml)] {
             let mut app = app();
@@ -2243,7 +2244,7 @@ mod browser_import_tests {
     #[test]
     fn drop_routing_and_nonlayout_open_remain_compatible() {
         let mut app = app();
-        let native = designcraft_engine::cmd::to_bytes(&app.session.doc().unwrap().doc);
+        let native = designcraft_engine::cmd::to_bytes(&app.session.doc().unwrap().doc).unwrap();
         let request = app.import_request("drop");
         deliver(&mut app, request, "document.designcraft", native);
         assert_eq!(app.session.documents().len(), 2);

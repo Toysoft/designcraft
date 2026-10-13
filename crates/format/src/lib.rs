@@ -46,6 +46,14 @@ fn ext_for(mime: &str) -> &'static str {
 /// Serialize a document to `.designcraft` bytes. The file holds each distinct placed file once
 /// and leaves out assets nothing references; `doc` itself keeps them (undo can bring them back).
 pub fn save(doc: &Document) -> Result<Vec<u8>, FormatError> {
+    save_with_large_entries_from(doc, LARGE_ENTRY)
+}
+
+/// Asset entries this size or larger are written with zip64 sizes. Zip rejects an entry over
+/// 4 GiB written without them; the margin covers deflate output that is larger than its input.
+const LARGE_ENTRY: usize = (u32::MAX as usize).saturating_sub(64 << 20);
+
+fn save_with_large_entries_from(doc: &Document, large_entry: usize) -> Result<Vec<u8>, FormatError> {
     let mut compact = doc.clone();
     compact.compact_assets();
     let doc = &compact;
@@ -69,6 +77,7 @@ pub fn save(doc: &Document) -> Result<Vec<u8>, FormatError> {
             }
             // Already-compressed images are stored as-is.
             let opts = if matches!(a.mime.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp") { stored } else { deflate };
+            let opts = opts.large_file(a.data.len() >= large_entry);
             z.start_file(format!("assets/{}.{}", id.0, ext_for(&a.mime)), opts).map_err(io)?;
             z.write_all(&a.data).map_err(|e| FormatError::Io(e.to_string()))?;
         }
@@ -291,6 +300,20 @@ mod tests {
         assert_eq!(back.page_count(), 3);
         assert_eq!(*back.assets[&aid].data, vec![1, 2, 3, 4]);
         assert_eq!(back.stories, d.stories);
+    }
+
+    /// Assets over the zip size limit are written with zip64 sizes (scaled down here: the real
+    /// threshold is near 4 GiB); smaller ones are written exactly as before.
+    #[test]
+    fn large_assets_are_written_with_zip64_sizes_and_open_again() {
+        let mut d = Document::new(&NewDocument::default());
+        let aid = png_asset(&mut d, &[5; 64]);
+        place(&mut d, aid, 0.0);
+        let normal = save(&d).unwrap();
+        assert_eq!(normal, save_with_large_entries_from(&d, 65).unwrap(), "an asset under the threshold is unchanged");
+        let large = save_with_large_entries_from(&d, 64).unwrap();
+        assert!(large.len() > normal.len(), "the asset entry carries zip64 sizes");
+        assert_eq!(*load(&large).unwrap().assets[&aid].data, vec![5; 64]);
     }
 
     #[test]
