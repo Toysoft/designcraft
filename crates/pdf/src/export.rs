@@ -39,6 +39,33 @@ pub(crate) struct Sheet {
 
 pub(crate) const MARK_LEN: f64 = 18.0;
 
+/// Whether a layer's items go into the PDF.
+pub(crate) fn layer_exported(layer: &designcraft_doc::Layer) -> bool {
+    layer.visible && layer.printable
+}
+
+/// Whether an item and everything inside it go into the PDF, its layer aside.
+pub(crate) fn item_exported(it: &Item) -> bool {
+    !it.hidden && !it.nonprinting
+}
+
+/// Every item of spread `si` that goes into the PDF, with its parent's transform: the items on
+/// exported layers, leaving out hidden and non-printing items with everything inside them.
+pub(crate) fn exported_items(doc: &Document, si: usize) -> Vec<(Affine, &Item)> {
+    let Some(sp) = doc.spreads.get(si) else { return Vec::new() };
+    let mut stack: Vec<(Affine, &Item)> =
+        sp.items.iter().filter(|it| doc.layer(it.layer).is_some_and(layer_exported)).map(|it| (Affine::IDENTITY, &**it)).collect();
+    let mut out = Vec::new();
+    while let Some((xf, it)) = stack.pop() {
+        if !item_exported(it) {
+            continue;
+        }
+        stack.extend(it.shown_children().map(|c| (xf * it.xf, &**c)));
+        out.push((xf, it));
+    }
+    out
+}
+
 fn bleed_lr(side: PageSide, b: [f64; 4]) -> (f64, f64) {
     // Bleed is top, bottom, inside, outside; single-sided pages read inside as left.
     if side == PageSide::Left { (b[3], b[2]) } else { (b[2], b[3]) }
@@ -620,7 +647,7 @@ impl Exporter<'_> {
         let Some(sp) = doc.spreads.get(si) else { return };
         let first = doc.first_page_of_spread(si);
         for layer in doc.layers.iter().rev() {
-            if !layer.visible || !layer.printable {
+            if !layer_exported(layer) {
                 continue;
             }
             for (pi, page) in sp.pages.iter().enumerate() {
@@ -679,7 +706,7 @@ impl Exporter<'_> {
 
     /// A spread or parent item, inside its structure tag when tagging.
     fn top_item(&mut self, s: &mut Surface, it: &Item, parent: Affine, page: Option<usize>, on_parent: bool) {
-        if !self.opts.tagged || it.hidden || it.nonprinting {
+        if !self.opts.tagged || !item_exported(it) {
             return self.item(s, it, parent, page);
         }
         let story = it.text_frame().map(|t| t.story);
@@ -752,7 +779,7 @@ impl Exporter<'_> {
 
     fn item(&mut self, s: &mut Surface, it: &Item, parent: Affine, page: Option<usize>) {
         let gf = &it.effects.gradient_feather;
-        if !gf.on || it.hidden || it.nonprinting {
+        if !gf.on || !item_exported(it) {
             return self.item_inner(s, it, parent, page);
         }
         // Gradient feather: a luminosity mask (white = opaque) over the object.
@@ -808,7 +835,7 @@ impl Exporter<'_> {
     }
 
     fn item_inner(&mut self, s: &mut Surface, it: &Item, parent: Affine, page: Option<usize>) {
-        if it.hidden || it.nonprinting {
+        if !item_exported(it) {
             return;
         }
         let ds = &it.effects.drop_shadow;

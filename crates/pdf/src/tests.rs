@@ -446,3 +446,69 @@ fn column_rules_are_drawn() {
     assert!((xs[0] - 214.0).abs() < 0.01 && (xs[1] - 398.0).abs() < 0.01, "{xs:?}");
     assert!(rules(false).is_empty());
 }
+
+/// Form fields and buttons that don't print stay out of the PDF: inside a hidden group, on a
+/// hidden or non-printing layer, or non-printing themselves (#726).
+#[test]
+fn only_printed_fields_and_buttons_export() {
+    use designcraft_doc::{ButtonAction, Content, FieldKind, FormField, LayerId, Shape};
+    use designcraft_geom::shapes::rectangle;
+    fn control(d: &mut Document, layer: LayerId, y: f64, name: &str, button: bool) -> Item {
+        let r = Rect::new(if button { 300.0 } else { 72.0 }, y, if button { 400.0 } else { 250.0 }, y + 24.0);
+        let mut it = Item::new(ItemId(d.alloc()), layer, Shape::Rectangle, rectangle(r));
+        if button {
+            it.button = Some(ButtonAction::GoToUrl { url: format!("https://example.com/{name}") });
+        } else {
+            it.form_field = Some(FormField {
+                kind: FieldKind::TextField,
+                name: name.into(),
+                value: String::new(),
+                options: Vec::new(),
+                multiline: false,
+                required: false,
+                font_size: 0.0,
+            });
+        }
+        it
+    }
+    let export = |unprinted: bool| {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        for b in [false, true] {
+            let it = control(&mut d, lid, 72.0, "shown", b);
+            d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+        }
+        if unprinted {
+            let mut layers = Vec::new();
+            for (visible, printable) in [(false, true), (true, false)] {
+                let mut l = d.layers[0].clone();
+                l.id = LayerId(d.alloc());
+                l.visible = visible;
+                l.printable = printable;
+                d.layers.push(l.clone());
+                layers.push(l.id);
+            }
+            for (i, layer) in layers.into_iter().enumerate() {
+                for b in [false, true] {
+                    let it = control(&mut d, layer, 120.0 + 48.0 * i as f64, &format!("unprinted-layer-{i}"), b);
+                    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+                }
+            }
+            for b in [false, true] {
+                let mut it = control(&mut d, lid, 240.0, "unprinted-item", b);
+                it.nonprinting = true;
+                d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+            }
+            let children: Vec<_> = [false, true].map(|b| std::sync::Arc::new(control(&mut d, lid, 288.0, "unprinted-group", b))).into();
+            let mut group = Item::new(ItemId(d.alloc()), lid, Shape::Group, rectangle(Rect::new(72.0, 288.0, 400.0, 312.0)));
+            group.content = Content::Group { items: children };
+            group.hidden = true;
+            d.insert_item(SpreadRef::Doc(0), group, None).unwrap();
+        }
+        uncompressed(&d, PdfOptions::default())
+    };
+    let (shown, all) = (export(false), export(true));
+    assert_eq!(all.matches("/Subtype/Widget").count(), 1, "one field");
+    assert!(all.contains("(shown)") && !all.contains("unprinted"), "only the shown field and button");
+    assert_eq!(all.matches("/Link").count(), shown.matches("/Link").count(), "only the shown button");
+}
