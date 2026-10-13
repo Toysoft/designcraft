@@ -269,6 +269,7 @@ pub fn specs() -> Vec<CommandSpec> {
             break_link
         ),
         cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection, and its start as `selectedText` (one line, up to 60 characters)", has_doc, selection_attrs),
+        cmd!(query "type.openTypeFeatures", "OpenType Features", [], None, "{} → the OpenType features and stylistic sets that the fonts of the selected text (or of the selected text frames) offer, merged over those fonts", has_doc, open_type_features),
         cmd!(
             "text.fitFrame",
             "Fit Frame to Text",
@@ -1217,6 +1218,48 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let selected = selected_text_preview(story.text.get(r.start..r.end).unwrap_or_default().chars());
     Ok(json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
         "paraOverrides": pf.para.count(), "charOverrides": cf.over.count(), "selectedText": selected.trim()}))
+}
+
+/// The OpenType features the fonts in the selection offer, merged: a feature any of them has is
+/// listed. The fonts are those of the runs the selection (or a caret, or the selected frames' text)
+/// covers; with none, the document's base font.
+fn open_type_features(s: &mut Session, _p: &Value) -> Result<Value> {
+    let st = s.doc()?;
+    let mut faces: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for Target { story: sid, cell, range: r } in format_targets(s) {
+        let Some(story) = st.doc.text_story(sid, cell) else { continue };
+        let mut covered: Vec<(usize, designcraft_doc::story::CharFormat)> = Vec::new();
+        if r.is_empty() {
+            covered.push((r.start, story.format_after(r.start).clone()));
+        } else {
+            covered.extend(story.runs().filter(|(run, _)| run.start < r.end && run.end > r.start).map(|(run, f)| (run.start, f.clone())));
+        }
+        for (pos, cf) in covered {
+            let Some(para) = story.paras.get(story.para_at(pos)) else { continue };
+            let (_, base) = st.doc.styles.resolve_para(para);
+            let cp = st.doc.styles.resolve_char(&base, &cf);
+            faces.insert((cp.font_family, cp.font_style));
+        }
+    }
+    if faces.is_empty() {
+        let (_, base) = st.doc.styles.resolve_para_style(designcraft_doc::story::BASIC_PARAGRAPH);
+        let cp = st.doc.styles.resolve_char(&base, &designcraft_doc::story::CharFormat::default());
+        faces.insert((cp.font_family, cp.font_style));
+    }
+    let db = designcraft_fonts::FontDb::global();
+    let mut tags = std::collections::BTreeSet::new();
+    let mut sets: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut used = Vec::new();
+    for (family, style) in &faces {
+        let features = designcraft_fonts::font_features(&db.face(family, style));
+        tags.extend(features.tags);
+        for (set, name) in features.stylistic_sets {
+            sets.entry(set).or_insert(name);
+        }
+        used.push(json!({"family": family, "style": style}));
+    }
+    let sets: Vec<Value> = sets.into_iter().map(|(set, name)| json!({"set": set, "name": name})).collect();
+    Ok(json!({"fonts": used, "features": tags, "stylisticSets": sets}))
 }
 
 /// Our own filler text (not Adobe's).
@@ -2354,5 +2397,24 @@ mod fit_frame_tests {
         let mut s = Session::new();
         let id = frame(&mut s, "Hi");
         assert!(s.execute("text.fitFrame", &json!({"frame": id, "axes": "diagonal"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod open_type_features_tests {
+    use serde_json::{Value, json};
+
+    use crate::Session;
+
+    #[test]
+    fn the_selected_fonts_features_are_listed() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "Hello fi"})).unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 8})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(v["fonts"][0]["family"], "Source Serif 4", "{v}");
+        let features: Vec<&str> = v["features"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(features.contains(&"liga") && features.contains(&"kern"), "{features:?}");
     }
 }

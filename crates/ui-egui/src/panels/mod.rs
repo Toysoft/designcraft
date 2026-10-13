@@ -12,6 +12,7 @@ pub mod properties;
 pub mod styles;
 pub mod swatches;
 pub mod table;
+pub mod typography;
 
 use designcraft_doc::{Content, StrokeAlign, WrapMode};
 use designcraft_geom::Rect;
