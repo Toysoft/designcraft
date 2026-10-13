@@ -1775,11 +1775,16 @@ fn parse_entries(entries: &[&str]) -> Vec<Item> {
             i += 1;
             out.push(Item::Sub(name.to_string(), sub));
         } else if e == "ui:window.panel" {
-            let items = crate::dock::DOCK_TABS
+            let mut items: Vec<Item> = crate::dock::DOCK_TABS
                 .iter()
                 .chain(crate::dock::ICON_PANELS)
                 .map(|(id, label, _)| Item::Cmd { label: label.to_string(), id: "window.panel".into(), params: json!({"panel": id}), shortcut: None })
                 .collect();
+            // Alphabetical by name, ignoring case.
+            items.sort_by_key(|item| match item {
+                Item::Cmd { label, .. } => label.to_lowercase(),
+                _ => String::new(),
+            });
             out.push(Item::Sub("Panels".into(), items));
         } else if e == "ui:window.brightness" {
             let items = crate::theme::Brightness::ALL
@@ -3652,5 +3657,23 @@ mod tests {
         assert!(open, "hovering the visible portion still opens the submenu");
         let (_, Some((_, _, open))) = frame(500.0, vec![]) else { panic!("test menu remains open") };
         assert!(!open, "an open submenu closes when its row becomes fully clipped");
+    }
+}
+
+#[cfg(test)]
+mod panels_menu_order_tests {
+    use super::*;
+
+    #[test]
+    fn window_panels_are_listed_alphabetically() {
+        let items = parse_entries(&["ui:window.panel"]);
+        let Some(Item::Sub(name, panels)) = items.first() else { panic!("no Panels submenu") };
+        assert_eq!(name, "Panels");
+        let labels: Vec<String> =
+            panels.iter().filter_map(|i| if let Item::Cmd { label, .. } = i { Some(label.to_lowercase()) } else { None }).collect();
+        assert!(labels.len() > 10, "{labels:?}");
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted);
     }
 }
