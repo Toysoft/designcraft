@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 designcraft-engine = { workspace = true }
 designcraft-ui-egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "links"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "wayland", "x11", "links"] }
 egui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +25,15 @@ winresource = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = { workspace = true }
+
+# AccessKit everywhere but macOS. There its adapter changes the window view's class at runtime
+# (`object_setClass`), which breaks AppKit's key-value observation of the view: the Touch Bar's
+# responder observer then aborts the app (`NSRangeException`: "Cannot remove an observer
+# <_NSTouchBarFinderObservation> for the key path nextResponder from <WinitView>") on MacBooks with
+# a Touch Bar, about one launch in four. Without it, 0 of 24 launches crashed. Restore it on macOS
+# once the adapter no longer subclasses the view.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { workspace = true, features = ["accesskit"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # The same winit eframe uses: to pick the X11 backend (file drag-and-drop) in main.rs.
