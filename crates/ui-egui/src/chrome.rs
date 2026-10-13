@@ -676,7 +676,7 @@ pub fn start_screen(app: &mut DesignApp, ui: &mut egui::Ui) {
                     .add(
                         egui::Button::new(crate::rtl::widget(
                             ui,
-                            egui::RichText::new(crate::i18n::tr(&app.ui.language, "  New file  ")).size(14.0).color(Color32::WHITE),
+                            egui::RichText::new(crate::i18n::tr(&app.ui.language, "  New file  ")).size(14.0).color(t.on_accent),
                         ))
                         .fill(t.accent_strong)
                         .corner_radius(16.0)

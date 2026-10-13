@@ -296,7 +296,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
-            brightness: theme::Brightness::MediumDark,
+            brightness: theme::Brightness::Dark,
             screen_mode: ScreenMode::Normal,
             frame_edges: true,
             rulers: true,

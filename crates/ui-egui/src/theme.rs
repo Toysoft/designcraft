@@ -45,6 +45,7 @@ impl Brightness {
 #[derive(Clone, Copy, Debug)]
 pub struct Tokens {
     pub dark: bool,
+    pub standard_dark: bool,
     pub app_bar: Color32,
     pub panel: Color32,
     pub panel_darker: Color32,
@@ -60,6 +61,7 @@ pub struct Tokens {
     pub tool_active: Color32,
     pub accent: Color32,
     pub accent_strong: Color32,
+    pub on_accent: Color32,
     pub row_selected: Color32,
     pub pasteboard: Color32,
     pub ruler: Color32,
@@ -93,6 +95,7 @@ impl Tokens {
     pub fn for_brightness(b: Brightness) -> Self {
         let dark = Tokens {
             dark: true,
+            standard_dark: false,
             app_bar: hex(0x262626),
             panel: hex(0x323232),
             panel_darker: hex(0x282828),
@@ -108,6 +111,7 @@ impl Tokens {
             tool_active: hex(0x1b1b1b),
             accent: hex(0x378ef0),
             accent_strong: hex(0x1473e6),
+            on_accent: Color32::WHITE,
             row_selected: hex(0x2d4f7c),
             pasteboard: hex(0x232323),
             ruler: hex(0x2e2e2e),
@@ -127,7 +131,37 @@ impl Tokens {
             measure_text: Color32::WHITE,
         };
         match b {
-            Brightness::Dark => dark,
+            // ArtCraft's first-party dark UI roles. The measured Medium Dark and
+            // accessibility palettes continue to inherit the original base.
+            Brightness::Dark => Tokens {
+                standard_dark: true,
+                app_bar: hex(0x0a0a0c),
+                panel: hex(0x101014),
+                panel_darker: hex(0x121316),
+                input: hex(0x060607),
+                input_border: hex(0x36373a),
+                divider: hex(0x36373a),
+                text: hex(0xf2f1ee),
+                text_strong: hex(0xffffff),
+                text_dim: hex(0xa6a6a8),
+                text_disabled: hex(0x717176),
+                icon: hex(0xf2f1ee),
+                hover: hex(0x323337),
+                tool_active: hex(0x414246),
+                accent: hex(0x2d81ff),
+                accent_strong: hex(0x59a7ff),
+                on_accent: hex(0x060607),
+                row_selected: hex(0x203b65),
+                tab_inactive: hex(0x0a0a0c),
+                button: hex(0x1e1f22),
+                border: hex(0x36373a),
+                field_border: hex(0x77787c),
+                well: hex(0x1e1f22),
+                well_rim: hex(0x36373a),
+                section_divider: hex(0x36373a),
+                tab_strip: hex(0x0a0a0c),
+                ..dark
+            },
             // Measured from InDesign 2026 (plan/indesign/11-observed-ui.md §1).
             Brightness::MediumDark => Tokens {
                 app_bar: hex(0x535353),
@@ -328,7 +362,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.window_stroke = Stroke::new(1.0, t.divider);
     v.window_corner_radius = CornerRadius::same(4);
     v.menu_corner_radius = CornerRadius::same(4);
-    v.selection.bg_fill = t.accent_strong;
+    v.selection.bg_fill = if t.standard_dark { t.row_selected } else { t.accent_strong };
     v.selection.stroke = Stroke::new(1.0, t.text_strong);
     v.hyperlink_color = t.accent;
     v.override_text_color = Some(t.text);
@@ -340,7 +374,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.divider);
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.field_border);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.field_border);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, t.field_border);
+    v.widgets.active.bg_stroke = Stroke::new(1.0, if t.standard_dark { hex(0x74aaff) } else { t.field_border });
     // InDesign buttons are outline-only.
     v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = t.input;
@@ -360,6 +394,32 @@ impl Tokens {
     /// Tokens stored by [`apply`].
     pub fn get(ctx: &egui::Context) -> Tokens {
         ctx.data(|d| d.get_temp::<Tokens>(egui::Id::NULL)).unwrap_or_else(|| Tokens::for_brightness(Brightness::Dark))
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn standard_dark_roles_preserve_medium_and_high_contrast() {
+        let dark = Tokens::for_brightness(Brightness::Dark);
+        assert_eq!(dark.app_bar, hex(0x0a0a0c));
+        assert_eq!(dark.panel, hex(0x101014));
+        assert_eq!(dark.input, hex(0x060607));
+        assert_eq!(dark.text, hex(0xf2f1ee));
+        assert_eq!(dark.accent, hex(0x2d81ff));
+        assert_eq!(dark.on_accent, hex(0x060607));
+        assert!(dark.standard_dark);
+        assert_eq!(dark.row_selected, hex(0x203b65));
+        assert_eq!(Tokens::for_brightness(Brightness::MediumDark).panel, hex(0x535353));
+        assert!(!Tokens::for_brightness(Brightness::MediumDark).standard_dark);
+        let high = Tokens::for_brightness(Brightness::HighContrast);
+        assert_eq!(high.panel, Color32::BLACK);
+        assert_eq!(high.accent, hex(0xffeb3b));
+        assert_eq!(high.input_border, Color32::WHITE);
+        assert!(!high.standard_dark);
+        assert_eq!(crate::UiState::default().brightness, Brightness::Dark);
     }
 }
 
