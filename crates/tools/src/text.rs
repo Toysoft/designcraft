@@ -50,19 +50,21 @@ impl Tool for TypeTool {
                     && !matches!(it.content, designcraft_doc::Content::Graphic(_) | designcraft_doc::Content::Group { .. })
                 {
                     let sp = cx.layout.spread_at(ev.pos).map(|(_, p)| p).unwrap_or(ev.pos);
+                    // Clicks in a row select a word, a sentence, a paragraph, then the whole story.
+                    let unit = match (ev.kind, ev.clicks) {
+                        (PointerKind::DoubleClick, _) => Some("text.selectWord"),
+                        (_, 3) => Some("text.selectSentence"),
+                        (_, 4) => Some("text.selectParagraph"),
+                        (_, 5..) => Some("text.selectStory"),
+                        _ => None,
+                    };
                     // Whole rows/columns selected: wait to see whether this is a drag.
-                    if ev.kind == PointerKind::Down && !ev.mods.shift && whole_rows_or_cols(cx) {
+                    if unit.is_none() && !ev.mods.shift && whole_rows_or_cols(cx) {
                         self.cell_drag = Some((id.0, sp));
                         return vec![];
                     }
                     self.selecting = Some(id.0);
-                    let cmd = if ev.kind == PointerKind::DoubleClick {
-                        "text.selectWord"
-                    } else if ev.mods.shift {
-                        "text.extendTo"
-                    } else {
-                        "text.placeCaret"
-                    };
+                    let cmd = unit.unwrap_or(if ev.mods.shift { "text.extendTo" } else { "text.placeCaret" });
                     return vec![Action::Exec(cmd.into(), json!({"frame": id.0, "point": [sp.x, sp.y]}))];
                 }
                 vec![]

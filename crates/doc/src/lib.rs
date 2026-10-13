@@ -12,6 +12,7 @@
 pub mod anchored;
 pub mod arabic;
 pub mod arrow;
+pub mod assets;
 pub mod attrs;
 pub mod build;
 pub mod cjk;
@@ -36,6 +37,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub use anchored::{AnchorPosition, AnchoredObject, OBJECT_MARK};
+pub use assets::{find_same_asset, insert_asset, remap_story_assets, story_asset_refs};
 pub use attrs::*;
 pub use datamerge::{
     DataField, DataFieldKind, DataMerge, DataSource, Delimiter, Fingerprint, MergeOptions, Placeholder, PlaceholderAnchor, PlaceholderRole,
@@ -448,6 +450,16 @@ pub struct Asset {
     /// The page shown from a multi-page PDF (0-based; Image Import Options).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub page: u32,
+}
+
+impl Asset {
+    /// A raster image (PNG, JPEG, GIF, WebP, TIFF, BMP, PSD), as opposed to a PDF, EPS or SVG.
+    pub fn is_raster(&self) -> bool {
+        matches!(
+            self.mime.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/bmp" | "image/vnd.adobe.photoshop"
+        )
+    }
 }
 
 fn is_zero(v: &u32) -> bool {

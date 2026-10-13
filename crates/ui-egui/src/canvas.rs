@@ -352,7 +352,8 @@ fn cursor_icon(c: Cursor) -> egui::CursorIcon {
         Cursor::ResizeNwSe => C::ResizeNwSe,
         Cursor::ResizeNeSw => C::ResizeNeSw,
         Cursor::Rotate => C::Alias,
-        Cursor::Pen => C::Crosshair,
+        Cursor::Pen | Cursor::PenContinue => C::Crosshair,
+        Cursor::PathBracket => C::ResizeColumn,
         Cursor::Text => C::Text,
         Cursor::Hand => C::Grab,
         Cursor::HandGrab => C::Grabbing,
@@ -978,6 +979,28 @@ fn draw_text_selection(
         if range.is_empty() {
             continue;
         }
+        // Type on a path: the highlight bends with the text.
+        if let Some(map) = compose::PathTextMap::new(it, ft) {
+            for l in &ft.lines {
+                let (s, e) = (range.start.max(l.range.start), range.end.min(l.range.end));
+                if s >= e {
+                    continue;
+                }
+                for q in compose::highlight_quads(l, s, e, false) {
+                    let (x0, x1) = (q[0].x.min(q[1].x), q[0].x.max(q[1].x));
+                    let (y0, y1) = (q[0].y.min(q[2].y), q[0].y.max(q[2].y));
+                    // Short slices, each turned with the path.
+                    let n = ((x1 - x0) / 2.0).ceil().clamp(1.0, 2000.0) as usize;
+                    for k in 0..n {
+                        let (a, b) = (x0 + (x1 - x0) * k as f64 / n as f64, x0 + (x1 - x0) * (k + 1) as f64 / n as f64);
+                        let poly =
+                            [Point::new(a, y0), Point::new(b, y0), Point::new(b, y1), Point::new(a, y1)].map(|p| xf.to_screen(m * map.to_path(p)));
+                        painter.add(egui::Shape::convex_polygon(poly.to_vec(), Color32::from_rgba_unmultiplied(80, 140, 255, 110), Stroke::NONE));
+                    }
+                }
+            }
+            continue;
+        }
         let mut quads = Vec::new();
         let mut glyphs = Vec::new();
         for (li, l) in ft.lines.iter().enumerate() {
@@ -1009,8 +1032,10 @@ fn draw_text_selection(
         let m = a * doc.text_xf(it);
         let blink = (painter.ctx().input(|i| i.time) * 1.6) as i64 % 2 == 0;
         if blink {
-            let p0 = xf.to_screen(m * Point::new(x, bl - asc));
-            let p1 = xf.to_screen(m * Point::new(x, bl + desc));
+            // Type on a path: the caret stands across the path where it is along it.
+            let on = |p: Point| compose::PathTextMap::new(it, ft).map_or(p, |map| map.to_path(p));
+            let p0 = xf.to_screen(m * on(Point::new(x, bl - asc)));
+            let p1 = xf.to_screen(m * on(Point::new(x, bl + desc)));
             painter.line_segment([p0, p1], Stroke::new(1.0, Color32::BLACK));
         }
         painter.ctx().request_repaint_after(std::time::Duration::from_millis(330));
@@ -1341,6 +1366,19 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
+/// Presses in a row, this one included: each within egui's double-click delay and distance of the
+/// one before. Counted on the press, as text selection wants (egui counts releases, up to three).
+fn count_click(ui: &egui::Ui, id: egui::Id, at: Pos2, now: f64) -> u8 {
+    let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
+    let last: Option<(f64, Pos2, u8)> = ui.data(|d| d.get_temp(id));
+    let n = match last {
+        Some((t, p, n)) if now - t < delay && p.distance(at) < dist => n.saturating_add(1),
+        _ => 1,
+    };
+    ui.data_mut(|d| d.insert_temp(id, (now, at, n)));
+    n
+}
+
 fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
     let Some(v) = app.view().copied() else { return };
     let xf = Xf::new(rect, &v);
@@ -1383,20 +1421,15 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     let mut events: Vec<PointerEvent> = Vec::new();
     let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
     let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
-    let (pressed, released, origin, latest, dbl) = ui.input(|i| {
-        (
-            i.pointer.primary_pressed(),
-            i.pointer.primary_released(),
-            i.pointer.press_origin(),
-            i.pointer.latest_pos(),
-            i.pointer.button_double_clicked(egui::PointerButton::Primary),
-        )
-    });
+    let (pressed, released, origin, latest, now) =
+        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos(), i.time));
     if pressed
         && !space
         && let Some(o) = origin.filter(|o| (if xf.rot == 0 { rect.contains(*o) } else { resp.rect.contains(*o) }) && resp.hovered())
     {
-        events.push(PointerEvent { kind: if dbl { PointerKind::DoubleClick } else { PointerKind::Down }, pos: pos(o), mods: m });
+        let clicks = count_click(ui, egui::Id::new(("canvas_clicks", app.pane)), o, now);
+        let kind = if clicks == 2 { PointerKind::DoubleClick } else { PointerKind::Down };
+        events.push(PointerEvent { kind, pos: pos(o), mods: m, clicks });
         down = true;
     }
     if down
@@ -1404,7 +1437,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         && resp.drag_delta() != egui::Vec2::ZERO
         && let Some(p) = latest
     {
-        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m });
+        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m, clicks: 0 });
     }
     // Power Zoom: holding the Hand tool still for half a second turns the press into one.
     let hold_id = egui::Id::new(("canvas_hold", app.pane));
@@ -1414,8 +1447,8 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         let still = origin_pos.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
         if !fired && still && now - start >= 0.5 {
             let p = pos(latest.unwrap_or(rect.center()));
-            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m });
-            events.push(PointerEvent { kind: PointerKind::Down, pos: p, mods: Mods { alt: true, ..m } });
+            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m, clicks: 0 });
+            events.push(PointerEvent { kind: PointerKind::Down, pos: p, mods: Mods { alt: true, ..m }, clicks: 1 });
             ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
         } else {
             ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
@@ -1428,10 +1461,10 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     }
     if down && released {
         let p = latest.unwrap_or(rect.center());
-        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m });
+        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m, clicks: 0 });
         down = false;
     } else if !down && let Some(p) = resp.hover_pos() {
-        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m });
+        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m, clicks: 0 });
     }
     ui.data_mut(|d| d.insert_temp(down_id, down));
     for e in events {
@@ -1443,8 +1476,8 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     if resp.clicked() || resp.drag_started() {
         resp.request_focus();
     }
-    // Keyboard for the active tool.
-    if ui.ctx().text_edit_focused() && !resp.has_focus() {
+    // Both split panes show the same document, but only the focused pane dispatches its keys.
+    if app.pane != app.focus_pane || (ui.ctx().text_edit_focused() && !resp.has_focus()) {
         return;
     }
     let evs = ui.input(|i| i.events.clone());
@@ -1796,6 +1829,86 @@ mod tests {
             right_click(&mut h, p);
             assert!(h.query_by_label("   Points").is_none());
         }
+    }
+
+    /// A text frame holding `text`, the Type tool, and a harness stepping at 60 fps (clicks in a
+    /// row must land within the double-click delay).
+    fn typing(text: &str) -> (Harness<'static, DesignApp>, u64) {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let r = app.run("frame.create", json!({"rect": [72, 72, 400, 400], "content": "text", "text": text})).unwrap();
+        let id = r["id"].as_u64().unwrap();
+        app.run("tool.select", json!({"tool": "type"})).unwrap();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(4);
+        (h, id)
+    }
+
+    /// The screen point over the first line of frame `id` where a click puts the caret at a byte
+    /// in `bytes`.
+    fn screen_at(h: &mut Harness<'_, DesignApp>, id: u64, bytes: std::ops::Range<usize>) -> Pos2 {
+        let mut x = 74.0;
+        let p = loop {
+            assert!(x < 400.0, "no point on the first line hits {bytes:?}");
+            h.state_mut().run("text.placeCaret", json!({"frame": id, "point": [x, 80.0]})).unwrap();
+            if h.state().session.doc().unwrap().selection.text.is_some_and(|t| bytes.contains(&t.focus)) {
+                break Point::new(x, 80.0);
+            }
+            x += 1.0;
+        };
+        h.state_mut().run("edit.deselectAll", json!({})).unwrap();
+        let app = h.state();
+        let c = app.session.layout().to_canvas(SpreadRef::Doc(0), p);
+        Xf::new(app.canvas_rect.unwrap(), app.view().unwrap()).to_screen(c)
+    }
+
+    fn click(h: &mut Harness<'_, DesignApp>, p: Pos2) {
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+    }
+
+    fn selected(h: &Harness<'_, DesignApp>) -> std::ops::Range<usize> {
+        h.state().session.doc().unwrap().selection.text.map(|t| t.range()).unwrap_or_default()
+    }
+
+    #[test]
+    fn clicks_in_a_row_select_word_sentence_paragraph_and_story() {
+        let text = "One two. Three four! Five six.\nSecond para here.";
+        let (mut h, id) = typing(text);
+        // Inside "Three", the second sentence: its start is not the paragraph's.
+        let p = screen_at(&mut h, id, 10..14);
+        h.hover_at(p);
+        h.step();
+        let mut got = vec![];
+        for _ in 0..5 {
+            click(&mut h, p);
+            let r = selected(&h);
+            got.push(text[r].to_string());
+        }
+        assert_eq!(got[1..], ["Three", "Three four! ", "One two. Three four! Five six.", text], "{got:?}");
+        assert!(got[0].is_empty(), "one click places the caret: {got:?}");
+    }
+
+    #[test]
+    fn slow_clicks_do_not_add_up() {
+        let (mut h, id) = typing("One two. Three four!");
+        let p = screen_at(&mut h, id, 10..14);
+        h.hover_at(p);
+        h.step();
+        for _ in 0..3 {
+            click(&mut h, p);
+            h.run_steps(30);
+        }
+        assert!(selected(&h).is_empty(), "three clicks half a second apart leave a caret: {:?}", selected(&h));
     }
 
     #[test]

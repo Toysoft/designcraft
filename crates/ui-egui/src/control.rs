@@ -147,7 +147,7 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
                     designcraft_geom::Point::new(x, y)
                 };
                 let mods = e.get("mods").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or(base_mods);
-                if let Err(e) = app.session.pointer(&PointerEvent { kind, pos, mods }, view) {
+                if let Err(e) = app.session.pointer(&PointerEvent { kind, pos, mods, clicks: 0 }, view) {
                     return err(e);
                 }
                 app.after_engine();
@@ -278,7 +278,7 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
                 app.ui.control_bar = v;
             }
             if p.get("closePanel").is_some() {
-                app.ui.open_panel = None;
+                r = crate::panel_docking::close_visible(app).map(|_| Value::Null);
             }
             if let Some(v) = p.get("dockExpanded").and_then(Value::as_bool) {
                 app.ui.dock_expanded = v;
@@ -302,8 +302,7 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
         }
         "ui.dialog.confirm" => wrap(crate::dialogs::confirm(app)),
         "ui.dialog.cancel" => {
-            app.cancel_pdf_import();
-            app.ui.dialog = None;
+            crate::dialogs::cancel(app);
             ok(Value::Null)
         }
         "ui.resize" => {
@@ -353,6 +352,8 @@ pub fn handle(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest) ->
         "app.save" => wrap(app.run("file.save", json!({"path": s("path")}))),
         "app.export" => wrap(app.run("app.exportPng", p.clone())),
         "app.quit" => {
+            // Automation must not wait on a prompt: quit without asking about unsaved changes.
+            app.quit_without_asking = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             ok(Value::Null)
         }

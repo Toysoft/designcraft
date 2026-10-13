@@ -209,9 +209,8 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         return;
     };
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
-    let stroke_id = egui::Id::new("color_panel_stroke");
     let mode_id = egui::Id::new("color_panel_mode");
-    let mut stroke: bool = ui.data(|d| d.get_temp(stroke_id)).unwrap_or(false);
+    let mut stroke = app.ui.stroke_front;
     let default_mode = if doc.settings.intent == designcraft_doc::Intent::Print { ColorMode::Cmyk } else { ColorMode::Rgb };
     let mut mode: ColorMode = ui.data(|d| d.get_temp(mode_id)).unwrap_or(default_mode);
     let target = if stroke { "stroke" } else { "fill" };
@@ -253,10 +252,8 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
                 });
         });
     });
-    ui.data_mut(|d| {
-        d.insert_temp(stroke_id, stroke);
-        d.insert_temp(mode_id, mode);
-    });
+    app.ui.stroke_front = stroke;
+    ui.data_mut(|d| d.insert_temp(mode_id, mode));
     let sw = doc.swatch(&name).cloned();
     let Some(c) = doc.resolve_color(&name, 1.0) else {
         ui.label(crate::rtl::widget(

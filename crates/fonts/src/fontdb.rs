@@ -121,6 +121,8 @@ pub struct FontFace {
     em: std::sync::OnceLock<(f64, f64)>,
     /// The font menu group and native family name, read on first use.
     group: std::sync::OnceLock<(FontGroup, Option<String>)>,
+    /// Format, class and PANOSE numbers (the font menus), read on first use.
+    kind: std::sync::OnceLock<crate::kind::FaceKind>,
 }
 
 /// A cheap `Copy` handle to a face. Faces are never unloaded, so the handle lives for the rest of
@@ -187,6 +189,32 @@ impl FontFace {
     }
     pub fn skrifa(&self) -> Option<skrifa::FontRef<'_>> {
         skrifa::FontRef::from_index(self.data(), self.index).ok()
+    }
+    /// The face's format, class and PANOSE numbers, as the font menus show and filter them.
+    pub fn kind(&self) -> crate::kind::FaceKind {
+        *self.kind.get_or_init(|| {
+            let mut kind = self.skrifa().map(|f| crate::kind::read_kind(&f, &self.family)).unwrap_or_default();
+            // Nothing in the tables or the name: look at the letters.
+            if kind.class == crate::kind::FontClass::Other
+                && let Some(serifs) = has_serifs(self)
+            {
+                kind.class = if serifs { crate::kind::FontClass::Serif } else { crate::kind::FontClass::SansSerif };
+            }
+            kind
+        })
+    }
+    /// When the font file was added (created, else last modified): the font menus' Show Recently
+    /// Added. `None` for fonts without a file.
+    pub fn added(&self) -> Option<std::time::SystemTime> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let meta = std::fs::metadata(self.source.path()?).ok()?;
+            meta.created().or_else(|_| meta.modified()).ok()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
     pub fn hb(&self) -> Option<harfrust::FontRef<'_>> {
         harfrust::FontRef::from_index(self.data(), self.index).ok()
@@ -434,6 +462,29 @@ const KOREAN_FALLBACKS: &[&str] = &[
     "Noto Sans CJK KR",
     "Source Han Sans K",
 ];
+
+/// Fonts made for Malayalam (macOS, Windows, Noto, Linux). A font that only maps the characters
+/// (Arial Unicode MS, first by path on macOS) sets them without conjuncts or vowel signs.
+const MALAYALAM_FALLBACKS: &[&str] = &[
+    "Malayalam Sangam MN",
+    "Malayalam MN",
+    "Nirmala UI",
+    "Kartika",
+    "Noto Sans Malayalam",
+    "Noto Serif Malayalam",
+    "Manjari",
+    "Rachana",
+    "Meera",
+    "Lohit Malayalam",
+];
+
+/// The fallback chain of a script that only fonts made for it set well, whatever the language.
+fn script_chain(c: char) -> Option<&'static [&'static str]> {
+    match c as u32 {
+        0x0D00..=0x0D7F => Some(MALAYALAM_FALLBACKS),
+        _ => None,
+    }
+}
 
 /// The Japanese fallback chain: the craft-fonts Japanese faces' families in document order
 /// (Mincho first; none without craft-fonts), then [`JAPANESE_FALLBACKS`].
@@ -709,6 +760,7 @@ fn make_face(bytes: FontBytes, source: FontSource, index: u32, family: String, s
         bmp: std::sync::OnceLock::new(),
         em: std::sync::OnceLock::new(),
         group: std::sync::OnceLock::new(),
+        kind: std::sync::OnceLock::new(),
     })
 }
 
@@ -1277,6 +1329,43 @@ impl ScopedFonts<'_> {
         None
     }
 
+    /// `family`'s kind (format, class, PANOSE) and when its file was added, read from its Regular
+    /// face (else its first), for the font menus' filters, which look at every family. A face
+    /// already loaded is asked; an installed family that isn't loaded is read from its file, which
+    /// is then let go rather than kept loaded. None for an unknown family or an unreadable file.
+    pub fn family_kind(&self, family: &str) -> Option<(crate::kind::FaceKind, Option<std::time::SystemTime>)> {
+        let styles = self.styles(family);
+        let style = styles.iter().find(|s| *s == "Regular").or(styles.first())?.clone();
+        if self.own().iter().chain(self.db.read_faces().iter()).any(|f| f.family.eq_ignore_ascii_case(family)) {
+            let f = self.find(family, &style)?;
+            return Some((f.kind(), f.added()));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = {
+                let cat = self.db.read_catalog();
+                let of_family = |c: &&CatalogEntry| c.family.eq_ignore_ascii_case(family);
+                let entry = cat.iter().filter(of_family).find(|c| norm(&c.style) == norm(&style)).or_else(|| cat.iter().find(of_family));
+                entry.map(|c| c.path.clone())?
+            };
+            if std::fs::metadata(&path).ok()?.len() > MAX_DOCUMENT_FONT_BYTES {
+                return None;
+            }
+            let data = Arc::new(std::fs::read(&path).ok()?);
+            let found = enumerate_faces(&data);
+            let pick = found
+                .iter()
+                .find(|(_, f, st, _)| f.eq_ignore_ascii_case(family) && norm(st) == norm(&style))
+                .or_else(|| found.iter().find(|(_, f, _, _)| f.eq_ignore_ascii_case(family)))?
+                .clone();
+            let (index, fam, st, coords) = pick;
+            let face = make_face(FontBytes::Owned(data.clone()), FontSource::Installed(path), index, fam, st, coords)?;
+            Some((face.kind(), face.added()))
+        }
+        #[cfg(target_arch = "wasm32")]
+        None
+    }
+
     /// Is `family` available (the document's, loaded, or installed on the system), as named or
     /// without a format suffix (see [`ScopedFonts::face`])?
     pub fn has_family(&self, family: &str) -> bool {
@@ -1375,12 +1464,12 @@ impl ScopedFonts<'_> {
     }
 
     /// A face other than `exclude` that covers `c` in `language` (a BCP 47 tag, `None` when
-    /// unknown). CJK characters try their language's chain first (see [`cjk_chain`]); then the
-    /// first face (fallback family first, then load order, the document's fonts last) that covers
-    /// `c`. On native, system fonts are cataloged and loaded lazily the first time no loaded face
-    /// covers a character.
+    /// unknown). CJK characters try their language's chain first (see [`cjk_chain`]), Malayalam
+    /// the fonts made for it (see [`script_chain`]); then the first face (fallback family first,
+    /// then load order, the document's fonts last) that covers `c`. On native, system fonts are
+    /// cataloged and loaded lazily the first time no loaded face covers a character.
     pub fn fallback_for(&self, c: char, exclude: u32, language: Option<&str>) -> Option<Arc<FontFace>> {
-        if let Some(chain) = cjk_chain(c, language)
+        if let Some(chain) = cjk_chain(c, language).or_else(|| script_chain(c))
             && let Some(f) = chain.iter().find_map(|family| self.chain_face(family, c, exclude))
         {
             return Some(f);
@@ -1430,6 +1519,53 @@ fn too_large() -> String {
 #[cfg(not(target_arch = "wasm32"))]
 fn over_total() -> String {
     format!("over the {} MB the folder's fonts may take in all", MAX_DOCUMENT_FONTS_TOTAL >> 20)
+}
+
+/// Does the face's "l" (else "I") have serifs: much wider at its foot than mid-stem? `None` when
+/// it has neither letter.
+fn has_serifs(face: &FontFace) -> Option<bool> {
+    let gid = ['l', 'I'].into_iter().map(|c| face.glyph_for(c)).find(|g| *g != 0)?;
+    let path = font_outline(face, gid);
+    let bbox = kurbo::Shape::bounding_box(&path);
+    // An empty or degenerate outline (NaN included) says nothing.
+    if bbox.height().is_nan() || bbox.height() <= 1.0 {
+        return None;
+    }
+    let mut edges = Vec::new();
+    let mut last = None;
+    let mut start = None;
+    kurbo::flatten(&path, 1.0, |el| match el {
+        kurbo::PathEl::MoveTo(p) => {
+            last = Some(p);
+            start = Some(p);
+        }
+        kurbo::PathEl::LineTo(p) => {
+            if let Some(a) = last {
+                edges.push((a, p));
+            }
+            last = Some(p);
+        }
+        kurbo::PathEl::ClosePath => {
+            if let (Some(a), Some(b)) = (last, start) {
+                edges.push((a, b));
+            }
+            last = start;
+        }
+        _ => {}
+    });
+    // The outline is y-down: the foot is near bbox.y1 (the baseline).
+    let width_at = |y: f64| {
+        let xs: Vec<f64> = edges
+            .iter()
+            .filter(|(a, b)| (a.y <= y && y < b.y) || (b.y <= y && y < a.y))
+            .map(|(a, b)| a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y))
+            .collect();
+        let (lo, hi) = xs.iter().fold((f64::MAX, f64::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+        (hi > lo).then_some(hi - lo)
+    };
+    let foot = width_at(bbox.y1 - bbox.height() * 0.02)?;
+    let stem = width_at(bbox.y0 + bbox.height() * 0.5)?;
+    Some(foot > stem * 1.6)
 }
 
 /// Glyph `gid`'s outline as the font draws it, in font units, y-down (flipped).

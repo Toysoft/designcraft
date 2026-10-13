@@ -7,7 +7,9 @@ use designcraft_geom::{Rect, shapes};
 
 use super::*;
 
+mod assets;
 mod decorations;
+mod index_sort;
 
 fn zip_files(files: &[(&str, &str)]) -> Vec<u8> {
     use zip::write::SimpleFileOptions;
@@ -425,6 +427,60 @@ fn imports_scalar_insets_in_object_style_without_replacing_frame_override() {
     let d = inset_fixture(r#"<TextFramePreference InsetSpacing="3"/>"#, styles);
     assert_eq!(d.styles.object.iter().find(|s| s.name == "Padded").unwrap().text_frame.as_ref().unwrap().inset, [9.0; 4]);
     assert_eq!(frame_inset(&d), [3.0; 4]);
+}
+
+/// A one-page spread part `Self` with one rectangle.
+fn one_frame_spread(id: &str) -> String {
+    format!(
+        r#"<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+          <Spread Self="{id}">
+            <Page Self="{id}p" GeometricBounds="0 0 100 100" ItemTransform="1 0 0 1 0 0"/>
+            <Rectangle Self="{id}r" ItemTransform="1 0 0 1 0 0">
+              <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+                <PathPointType Anchor="10 10"/><PathPointType Anchor="10 50"/>
+                <PathPointType Anchor="50 50"/><PathPointType Anchor="50 10"/>
+              </PathPointArray></GeometryPathType></PathGeometry></Properties>
+            </Rectangle>
+          </Spread>
+        </idPkg:Spread>"#
+    )
+}
+
+/// Writers differ in how a designmap `src` spells its part: percent-encoded, another case,
+/// backslashes, a leading `./`. Those resolve; a part absent from the package is a warning that
+/// names it, not silently dropped objects.
+#[test]
+fn designmap_parts_match_leniently_and_missing_ones_are_reported() {
+    let designmap = r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d">
+          <idPkg:Spread src="Spreads/Spread_u1a%20b.xml"/>
+          <idPkg:Spread src="./spreads\SPREAD_u2.xml"/>
+          <idPkg:Spread src="Spreads/Spread_gone.xml"/>
+        </Document>"#;
+    let zip = zip_files(&[
+        ("designmap.xml", designmap),
+        ("Spreads/Spread_u1a b.xml", &one_frame_spread("u1")),
+        ("Spreads/Spread_u2.xml", &one_frame_spread("u2")),
+    ]);
+    let r = import_idml_report(&zip, &|_| None).unwrap();
+    assert_eq!(r.document.spreads.len(), 2, "both lenient spellings resolve");
+    assert!(r.document.spreads.iter().all(|sp| sp.items.len() == 1), "the spreads keep their frames");
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    assert!(r.warnings[0].contains("Spreads/Spread_gone.xml"), "{:?}", r.warnings);
+
+    // With every spread part missing the import fails, and the error names the part.
+    let only_missing = r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d">
+          <idPkg:Spread src="Spreads/Spread_gone.xml"/>
+        </Document>"#;
+    let err = import_idml(&zip_files(&[("designmap.xml", only_missing)])).unwrap_err();
+    assert!(err.to_string().contains("Spreads/Spread_gone.xml"), "{err}");
+}
+
+#[test]
+fn percent_decode_keeps_malformed_escapes() {
+    assert_eq!(import::percent_decode("a%20b%2"), "a b%2");
+    assert_eq!(import::percent_decode("%é%zz"), "%é%zz");
+    assert_eq!(import::uri_to_path("file:///C:/a%20b"), "C:/a b");
+    assert_eq!(import::uri_to_path("file:/a%bé"), "/a%bé");
 }
 
 #[test]
@@ -1398,4 +1454,28 @@ fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
     let d = import_idml(&bytes).unwrap();
     check(&d);
     check(&import_idml(&export_idml(&d)).unwrap());
+}
+
+#[test]
+fn type_on_a_path_keeps_its_start_and_end_brackets() {
+    use designcraft_geom::{Anchor, PathData, Point, SubPath};
+    for end in [Some(250.0), None] {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let id = designcraft_doc::ItemId(d.alloc());
+        let line = PathData::single(SubPath::new(vec![Anchor::corner(Point::new(100.0, 300.0)), Anchor::corner(Point::new(500.0, 300.0))], false));
+        let mut it = designcraft_doc::Item::new(id, lid, Shape::GraphicLine, line);
+        let sid = designcraft_doc::StoryId(d.alloc());
+        let mut tf = designcraft_doc::TextFrame { story: sid, options: Default::default() };
+        tf.options.path = Some(designcraft_doc::PathType { start: 30.0, end, ..Default::default() });
+        it.content = designcraft_doc::Content::Text(tf);
+        let mut story = designcraft_doc::Story::with_text(sid, "Along", Default::default());
+        story.frames = vec![id];
+        d.stories.insert(sid, std::sync::Arc::new(story));
+        d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+        let back = import_idml(&export_idml(&d)).unwrap();
+        let pt = back.spreads[0].items[0].text_frame().unwrap().options.path.clone().unwrap();
+        assert!((pt.start - 30.0).abs() < 1e-6, "{pt:?}");
+        assert_eq!(pt.end.map(|e| e.round()), end, "an end bracket at the path's end is no end bracket");
+    }
 }

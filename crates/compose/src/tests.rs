@@ -288,11 +288,16 @@ fn hyphenation_zone_limits_ragged_hyphens() {
         let cs = compose_story(&d, sid, &ComposeOptions::default());
         all_lines(&cs).iter().filter(|l| l.hyphenated).count()
     };
-    for c in [designcraft_doc::Composer::Paragraph, designcraft_doc::Composer::SingleLine] {
-        let (free, zoned, huge) = (count(0.0, c), count(36.0, c), count(1000.0, c));
-        // A huge zone leaves only words that start a line (no space to break at) hyphenable.
-        assert!(free > 0 && zoned <= free && huge * 4 <= free, "{c:?}: {free} {zoned} {huge}");
-    }
+    // Single-line Composer: a huge zone leaves only words that start a line (no space to break
+    // at) hyphenable.
+    let c = designcraft_doc::Composer::SingleLine;
+    let (free, zoned, huge) = (count(0.0, c), count(36.0, c), count(1000.0, c));
+    assert!(free > 0 && zoned <= free && huge * 4 <= free, "{c:?}: {free} {zoned} {huge}");
+    // The zone is the Single-line Composer's only (InDesign): the Paragraph Composer hyphenates
+    // the same whatever it is.
+    let c = designcraft_doc::Composer::Paragraph;
+    let (free, zoned, huge) = (count(0.0, c), count(36.0, c), count(1000.0, c));
+    assert!(free > 0 && zoned == free && huge == free, "{c:?}: {free} {zoned} {huge}");
 }
 
 #[test]
@@ -787,6 +792,125 @@ fn tab_leaders_fill_the_gap() {
     let last_dot = dots.iter().map(|g| g.x).fold(0.0, f64::max);
     let num_x = line.glyphs.iter().find(|g| g.byte == 6).unwrap().x;
     assert!(last_dot < num_x, "leaders stop before the page number");
+}
+
+#[test]
+fn right_indent_tab_leaders_follow_stop_precedence_without_moving_text() {
+    let text = "Intro\u{e006}12";
+    let cases = [
+        ("last interior", 0.0, vec![(200.0, "."), (80.0, "-")], Some('.')),
+        ("first exterior", 0.0, vec![(380.0, "+"), (200.0, "-"), (320.0, ".")], Some('.')),
+        ("at the margin", 0.0, vec![(300.0, "."), (80.0, "-")], Some('.')),
+        ("no stops", 0.0, vec![], None),
+        ("empty exterior", 0.0, vec![(200.0, "."), (320.0, ""), (350.0, "+")], None),
+        ("empty interior", 0.0, vec![(80.0, "."), (200.0, "")], None),
+        ("indented margin", 36.0, vec![(260.0, "-"), (280.0, "."), (340.0, "+")], Some('.')),
+    ];
+    for (name, right_indent, stops, expected) in cases {
+        let tabs = stops
+            .into_iter()
+            .map(|(position, leader)| designcraft_doc::TabStop { position, align: TabAlign::Right, leader: leader.into(), align_on: String::new() })
+            .collect();
+        let para = ParaAttrs { tabs: Some(tabs), left_indent: Some(12.0), right_indent: Some(right_indent), ..Default::default() };
+        // Translation and left/right indents distinguish the tab origin from line/absolute x.
+        let (mut d, sid, _) = doc_with(text, Rect::new(72.0, 36.0, 372.0, 136.0), para);
+        let cs = compose_story(&d, sid, &Default::default());
+        assert!(!cs.is_overset(), "{name}");
+        assert_eq!(cs.frames[0].lines.len(), 1, "{name}");
+        let line = &cs.frames[0].lines[0];
+        let tab = line.glyphs.iter().find(|g| g.byte == 5 && g.len > 0).unwrap();
+        let leaders: Vec<_> = line.glyphs.iter().filter(|g| g.visible && g.len == 0).collect();
+        assert_eq!(!leaders.is_empty(), expected.is_some(), "{name}");
+        for g in leaders {
+            assert_eq!(g.gid, g.face.get().glyph_for(expected.unwrap()), "{name}");
+            let width = g.face.get().advance(g.gid) * g.sx;
+            assert!(g.x >= tab.x - 0.01 && g.x + width <= tab.x + tab.adv + 0.01, "{name}: leader outside tab gap");
+            assert_eq!(g.byte, tab.byte, "{name}");
+        }
+        assert!((line.end_x - (372.0 - right_indent)).abs() < 0.01, "{name}: number stays at the right margin");
+        // Removing only the leaders must leave every source glyph and the line itself unchanged.
+        for t in d.story_mut(sid).unwrap().paras[0].para.tabs.as_mut().unwrap() {
+            t.leader.clear();
+        }
+        let plain = compose_story(&d, sid, &Default::default());
+        assert_eq!(plain.frames[0].lines.len(), 1, "{name}");
+        let plain_line = &plain.frames[0].lines[0];
+        assert_eq!((&line.range, line.baseline, line.end_x), (&plain_line.range, plain_line.baseline, plain_line.end_x), "{name}");
+        let source_positions = |l: &Line| {
+            l.glyphs.iter().filter(|g| g.len > 0).map(|g| (g.byte, g.len, g.gid, g.x, g.y, g.adv, g.sx, g.sy, g.style)).collect::<Vec<_>>()
+        };
+        assert_eq!(source_positions(line), source_positions(plain_line), "{name}");
+        assert_eq!(d.stories[&sid].text, text, "{name}: source text is not expanded");
+    }
+}
+
+#[test]
+fn right_indent_tab_leaders_use_the_tab_format_and_regular_tab_drawing() {
+    let mut rendered = Vec::new();
+    for ch in [story::RIGHT_INDENT_TAB, '\t'] {
+        let text = format!("Intro{ch}12");
+        let para = ParaAttrs {
+            tabs: Some(vec![designcraft_doc::TabStop { position: 300.0, align: TabAlign::Right, leader: ".-".into(), align_on: String::new() }]),
+            ..Default::default()
+        };
+        let (mut d, sid, _) = doc_with(&text, Rect::new(72.0, 36.0, 372.0, 136.0), para);
+        d.story_mut(sid).unwrap().format_chars(5..5 + ch.len_utf8(), |f| {
+            f.over.font_family = Some("Inter".into());
+            f.over.size = Some(18.0);
+            f.over.h_scale = Some(1.3);
+            f.over.v_scale = Some(0.8);
+            f.over.baseline_shift = Some(4.0);
+            f.over.fill_tint = Some(0.4);
+        });
+        let cs = compose_story(&d, sid, &Default::default());
+        assert!(!cs.is_overset());
+        assert_eq!(cs.frames[0].lines.len(), 1);
+        let line = &cs.frames[0].lines[0];
+        let tab = line.glyphs.iter().find(|g| g.byte == 5 && g.len > 0).unwrap();
+        let prefix = &line.glyphs[0];
+        assert_ne!(tab.face.id(), prefix.face.id(), "tab uses its own font");
+        assert_ne!(tab.style, prefix.style, "tab uses its own character formatting");
+        assert_eq!(cs.styles[tab.style as usize].size, 18.0);
+        assert_eq!(cs.styles[tab.style as usize].fill_tint, 0.4);
+        let leaders: Vec<_> = line.glyphs.iter().filter(|g| g.visible && g.len == 0).collect();
+        assert!(leaders.len() > 10);
+        assert_eq!(leaders.len() % 2, 0, "only complete patterns are drawn");
+        for (i, g) in leaders.iter().enumerate() {
+            assert_eq!(g.gid, tab.face.get().glyph_for(if i % 2 == 0 { '.' } else { '-' }));
+            assert_eq!(g.face.id(), tab.face.id());
+            assert_eq!((g.sx, g.sy, g.y, g.style, g.byte), (tab.sx, tab.sy, -4.0, tab.style, tab.byte));
+            let width = g.face.get().advance(g.gid) * g.sx;
+            assert!(g.x >= tab.x - 0.01 && g.x + width <= tab.x + tab.adv + 0.01);
+        }
+        rendered.push(leaders.iter().map(|g| (g.gid, g.x, g.y, g.sx, g.sy, g.style)).collect::<Vec<_>>());
+    }
+    assert_eq!(rendered[0], rendered[1], "right-indent and equivalent regular right tabs use the same leader drawing");
+}
+
+#[test]
+fn right_indent_tab_leaders_do_not_draw_when_the_gap_cannot_fit_a_pattern() {
+    let text = "A\u{e006}B";
+    let (d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs::default());
+    let cs = compose_story(&d, sid, &Default::default());
+    let line = &cs.frames[0].lines[0];
+    let natural: f64 = line.glyphs.iter().filter(|g| g.visible).map(|g| g.adv).sum();
+    let first = &line.glyphs[0];
+    let pattern_width = first.face.get().advance(first.face.get().glyph_for('-')) * first.sx;
+    assert!(pattern_width > 0.01);
+    for gap in [0.0, pattern_width / 2.0] {
+        let para = ParaAttrs {
+            tabs: Some(vec![designcraft_doc::TabStop { position: 1.0, align: TabAlign::Left, leader: "-".into(), align_on: String::new() }]),
+            ..Default::default()
+        };
+        let (d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, natural + gap, 100.0), para);
+        let cs = compose_story(&d, sid, &Default::default());
+        assert!(!cs.is_overset());
+        assert_eq!(cs.frames[0].lines.len(), 1);
+        let line = &cs.frames[0].lines[0];
+        let tab = line.glyphs.iter().find(|g| g.byte == 1 && g.len > 0).unwrap();
+        assert!((tab.adv - gap).abs() < 1e-6);
+        assert!(line.glyphs.iter().all(|g| g.len > 0 || !g.visible), "a partial leader pattern must not overlap adjacent text");
+    }
 }
 
 #[test]
@@ -1372,6 +1496,23 @@ fn spanish_text_gets_spanish_hyphenation() {
 }
 
 #[test]
+fn portuguese_text_gets_portuguese_hyphenation() {
+    let text = "matemática matemática matemática matemática matemática matemática";
+    let (mut d, sid, _) = doc_with(text, Rect::new(36.0, 36.0, 76.0, 700.0), ParaAttrs::default());
+    let st = d.story_mut(sid).unwrap();
+    let n = st.len();
+    st.format_chars(0..n, |f| f.over.language = Some("Portuguese: Brazilian".into()));
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let breaks: Vec<&str> = all_lines(&cs).into_iter().filter(|l| l.hyphenated).map(|l| text[l.range.clone()].trim_end()).collect();
+    assert!(!breaks.is_empty(), "Portuguese text is hyphenated");
+    // Portuguese syllables: ma-te-má-tica.
+    for b in breaks {
+        let tail = b.rsplit(' ').next().unwrap_or(b);
+        assert!(["ma", "mate", "matemá"].contains(&tail), "{b:?}");
+    }
+}
+
+#[test]
 fn cjk_aki_adds_space_without_scaling_outlines() {
     let (mut d, sid, _) = doc_with("AB", Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs::default());
     let old = compose_story(&d, sid, &ComposeOptions::default());
@@ -1816,6 +1957,23 @@ fn cjk_fallback_follows_the_language() {
     // Without a CJK language, the language-blind search.
     let (primary, han) = faces_of("English: USA");
     assert_eq!(Some(han.family.clone()), db.fallback_for('直', primary.id(), None).map(|f| f.family.clone()));
+}
+
+#[test]
+fn malayalam_falls_back_to_a_font_that_forms_its_conjuncts() {
+    // Run against the installed fonts: on macOS the first file mapping Malayalam is Arial
+    // Unicode MS, which leaves ക്ഷ as three glyphs.
+    let db = designcraft_fonts::FontDb::global();
+    if !["Malayalam Sangam MN", "Malayalam MN", "Nirmala UI", "Noto Sans Malayalam"].iter().any(|f| db.has_family(f)) {
+        return;
+    }
+    let text = "ക്ഷ";
+    let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs::default());
+    d.settings.glyph_fallback = true;
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let glyphs: Vec<_> = all_lines(&cs).iter().flat_map(|l| l.glyphs.iter()).map(|g| (g.face.family.clone(), g.gid)).collect();
+    assert_eq!(glyphs.len(), 1, "one conjunct: {glyphs:?}");
+    assert_ne!(glyphs[0].1, 0);
 }
 
 #[test]

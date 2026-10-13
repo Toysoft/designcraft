@@ -38,6 +38,11 @@ enum Drag {
         start: Point,
         cur: Point,
     },
+    /// Dragging a type-on-a-path bracket along its path (`end`: the end bracket).
+    Bracket {
+        id: ItemId,
+        end: bool,
+    },
     Anchor {
         id: u64,
         si: usize,
@@ -49,6 +54,50 @@ enum Drag {
         /// previous preview, so the snap must not read the anchor from it again.
         at: Option<(SpreadRef, Point)>,
     },
+}
+
+/// Half the length of a path-type bracket, in screen pixels.
+const BRACKET_PX: f64 = 9.0;
+
+/// A selected type-on-a-path item's path (inner space), its inner → canvas transform and its
+/// brackets' arc lengths (start, end).
+fn path_type_of(cx: &ToolContext, id: ItemId) -> Option<(designcraft_geom::warp::PathWarp, designcraft_geom::Affine, f64, f64)> {
+    let it = cx.doc.item(id)?;
+    let pt = it.text_frame()?.options.path.as_ref()?;
+    let warp = designcraft_geom::warp::PathWarp::new(&it.path.to_bezpath(), pt.flip);
+    let end = pt.end.unwrap_or(warp.length()).min(warp.length());
+    Some((warp, cx.item_canvas_xf(id)? * it.xf, pt.start, end))
+}
+
+/// The bracket line at arc length `s`: across the path, `BRACKET_PX` either side (canvas).
+fn bracket_line(cx: &ToolContext, warp: &designcraft_geom::warp::PathWarp, xf: designcraft_geom::Affine, s: f64) -> Option<(Point, Point)> {
+    let (p, a) = warp.at(s)?;
+    let c = xf * p;
+    let t = xf * (p + designcraft_geom::Vec2::new(a.cos(), a.sin())) - c;
+    let n = designcraft_geom::Vec2::new(-t.y, t.x);
+    let n = n / n.hypot().max(1e-9) * cx.tol(BRACKET_PX);
+    Some((c - n, c + n))
+}
+
+/// The bracket of a selected type-on-a-path item under `p` (canvas): (item, whether it is the end
+/// bracket).
+fn bracket_at(cx: &ToolContext, p: Point) -> Option<(ItemId, bool)> {
+    let tol = cx.tol(BRACKET_PX);
+    cx.selection.items.iter().find_map(|id| {
+        let (warp, xf, start, end) = path_type_of(cx, *id)?;
+        if cx.doc.item(*id).is_some_and(|it| it.locked) {
+            return None;
+        }
+        let near = |s: f64| warp.at(s).is_some_and(|(q, _)| (xf * q - p).hypot() <= tol);
+        // The end bracket first: with both brackets at one point, it can still be pulled back.
+        if near(end) {
+            Some((*id, true))
+        } else if near(start) {
+            Some((*id, false))
+        } else {
+            None
+        }
+    })
 }
 
 /// Anchor or handle of a selected item under `p` (canvas): (item, subpath, anchor, handle).
@@ -378,6 +427,13 @@ impl Tool for SelectionTool {
             }
             PointerKind::Down => {
                 self.shift_release = None;
+                // Type on a path: a bracket moves where the text starts or ends.
+                if !ev.mods.shift
+                    && let Some((id, end)) = bracket_at(cx, p)
+                {
+                    self.drag = Drag::Bracket { id, end };
+                    return vec![Action::Begin("Move Bracket".into())];
+                }
                 if self.direct
                     && let Some((id, si, ai, handle)) = anchor_at(cx, p)
                 {
@@ -437,6 +493,14 @@ impl Tool for SelectionTool {
                 }
             }
             PointerKind::Drag => match self.drag.clone() {
+                Drag::Bracket { id, end } => {
+                    let Some((warp, xf, _, _)) = path_type_of(cx, id) else { return vec![] };
+                    if xf.determinant().abs() < 1e-12 {
+                        return vec![];
+                    }
+                    let s = warp.nearest(xf.inverse() * p);
+                    vec![Action::Preview("type.pathOptions".into(), json!({"id": id.0, if end { "end" } else { "start" }: s}))]
+                }
                 Drag::Pending { start, hit } => {
                     if (p - start).hypot() < cx.tol(3.0) {
                         return vec![];
@@ -682,7 +746,9 @@ impl Tool for SelectionTool {
                 let release = self.shift_release.take();
                 let d = std::mem::replace(&mut self.drag, Drag::None);
                 match d {
-                    Drag::Move { .. } | Drag::Resize { .. } | Drag::Anchor { .. } | Drag::Rotate { .. } => vec![Action::Commit],
+                    Drag::Move { .. } | Drag::Resize { .. } | Drag::Anchor { .. } | Drag::Rotate { .. } | Drag::Bracket { .. } => {
+                        vec![Action::Commit]
+                    }
                     Drag::Pending { .. } => match release {
                         Some(id) => vec![Action::Exec("selection.toggle".into(), json!({"id": id}))],
                         None => vec![],
@@ -739,15 +805,19 @@ impl Tool for SelectionTool {
         }
     }
 
-    fn overlays(&self, _cx: &ToolContext) -> Vec<Overlay> {
+    fn overlays(&self, cx: &ToolContext) -> Vec<Overlay> {
         match &self.drag {
             Drag::Marquee { start, cur } => vec![Overlay::Marquee(Rect::from_points(*start, *cur))],
             Drag::Move { .. } | Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Anchor { .. } => self.guides.clone(),
+            Drag::None | Drag::Bracket { .. } => brackets(cx),
             _ => vec![],
         }
     }
 
     fn cursor(&self, cx: &ToolContext, p: Point, _m: Mods) -> Cursor {
+        if matches!(self.drag, Drag::Bracket { .. }) || (matches!(self.drag, Drag::None) && bracket_at(cx, p).is_some()) {
+            return Cursor::PathBracket;
+        }
         if self.direct {
             return Cursor::ArrowHollow;
         }
@@ -767,6 +837,27 @@ impl Tool for SelectionTool {
     fn busy(&self) -> bool {
         !matches!(self.drag, Drag::None)
     }
+}
+
+/// The start and end brackets of the selected type-on-a-path items, in the selection colour: a
+/// line across the path with a short tick pointing at the text between them.
+fn brackets(cx: &ToolContext) -> Vec<Overlay> {
+    let mut out = Vec::new();
+    for id in &cx.selection.items {
+        let Some((warp, xf, start, end)) = path_type_of(cx, *id) else { continue };
+        let color = cx.doc.item(*id).and_then(|it| cx.doc.layer(it.layer)).map_or([43, 155, 255], |l| l.color);
+        for (s, towards) in [(start, end.max(start + 1.0)), (end, start.min(end - 1.0))] {
+            let Some((a, b)) = bracket_line(cx, &warp, xf, s) else { continue };
+            out.push(Overlay::Line { a, b, color, dashed: false });
+            // The tick at the outer end points along the path towards the text.
+            if let (Some((p0, _)), Some((p1, _))) = (warp.at(s), warp.at(towards)) {
+                let dir = xf * p1 - xf * p0;
+                let dir = dir / dir.hypot().max(1e-9) * cx.tol(BRACKET_PX * 0.6);
+                out.push(Overlay::Line { a: b, b: b + dir, color, dashed: false });
+            }
+        }
+    }
+    out
 }
 
 fn handle_cursor(h: usize) -> Cursor {

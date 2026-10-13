@@ -117,8 +117,8 @@ fn union(r: Option<Rect>, b: Rect) -> Option<Rect> {
 
 fn build_line(db: &FontDb, cs: &ComposedStory, l: &Line, vertical: bool) -> LineGlyphs {
     let mut runs: Vec<(u32, BezPath)> = Vec::new();
-    let mut underlines = Vec::new();
-    let mut strikes = Vec::new();
+    let mut underlines: Vec<(String, f32, Rect)> = Vec::new();
+    let mut strikes: Vec<(String, f32, Rect)> = Vec::new();
     let mut glyphs = 0;
     for g in &l.glyphs {
         if !g.visible {
@@ -127,7 +127,21 @@ fn build_line(db: &FontDb, cs: &ComposedStory, l: &Line, vertical: bool) -> Line
         let style = &cs.styles[g.style as usize];
         for (on, rule, bars) in [(style.underline, &style.underline_rule, &mut underlines), (style.strikethrough, &style.strike_rule, &mut strikes)] {
             if on {
-                bars.push((rule.color.clone(), rule.tint, rule.rect(g.x, g.x + g.adv, designcraft_compose::rule_baseline(style, l, g))));
+                let r = rule.rect(g.x, g.x + g.adv, designcraft_compose::rule_baseline(style, l, g));
+                // One bar per stretch, as the PDF export draws them: a bar per glyph left
+                // anti-aliased seams between the letters.
+                match bars.last_mut() {
+                    Some((color, tint, last))
+                        if *color == rule.color
+                            && *tint == rule.tint
+                            && (last.y0 - r.y0).abs() < 1e-6
+                            && (last.y1 - r.y1).abs() < 1e-6
+                            && (r.x0 - last.x1).abs() < 0.5 =>
+                    {
+                        last.x1 = last.x1.max(r.x1);
+                    }
+                    _ => bars.push((rule.color.clone(), rule.tint, r)),
+                }
             }
         }
         let outline = db.outline(&g.face, g.gid);

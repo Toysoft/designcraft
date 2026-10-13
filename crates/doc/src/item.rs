@@ -345,8 +345,12 @@ pub struct TextFrameOptions {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PathType {
-    /// Where the text starts, as a distance along the path.
+    /// Where the text starts, as a distance along the path (the start bracket).
     pub start: f64,
+    /// Where the text ends, as a distance along the path (the end bracket); `None` is the path's
+    /// end. Text past it is overset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
     /// Run the other way (the text sits on the other side).
     pub flip: bool,
     pub align: PathAlign,

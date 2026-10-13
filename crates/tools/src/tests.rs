@@ -705,3 +705,174 @@ fn pen_click_snaps_to_a_guide() {
     let x = p["anchors"][0]["p"][0].as_f64().unwrap();
     assert!((x - 100.0).abs() < 1e-6, "anchor x {x}");
 }
+
+#[test]
+fn pen_continues_an_open_path_from_either_end_point() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let id = ItemId(d.alloc());
+    let anchors = vec![
+        designcraft_geom::Anchor::corner(Point::new(100.0, 100.0)),
+        designcraft_geom::Anchor {
+            p: Point::new(200.0, 100.0),
+            h_in: Point::new(170.0, 80.0),
+            h_out: Point::new(230.0, 120.0),
+            kind: designcraft_geom::AnchorKind::Smooth,
+        },
+    ];
+    let mut it = Item::new(id, lid, Shape::Path, designcraft_geom::PathData::single(designcraft_geom::SubPath::new(anchors, false)));
+    it.stroke = Stroke::default();
+    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let at = |x: f64, y: f64| (x + off.x, y + off.y);
+    let ev = |k: PointerKind, (x, y): (f64, f64)| PointerEvent::new(k, x, y);
+    let mut t = create("pen");
+    // The cursor says the end point continues the path; elsewhere it's the plain pen.
+    assert_eq!(t.cursor(&cx, Point::new(at(200.0, 100.0).0, at(200.0, 100.0).1), Mods::default()), Cursor::PenContinue);
+    assert_eq!(t.cursor(&cx, Point::new(at(150.0, 300.0).0, at(150.0, 300.0).1), Mods::default()), Cursor::Pen);
+    // Clicking the last anchor adds nothing yet; the next click appends to that path.
+    assert!(t.pointer(&cx, &ev(PointerKind::Down, at(200.0, 100.0))).is_empty());
+    assert!(t.pointer(&cx, &ev(PointerKind::Up, at(200.0, 100.0))).is_empty(), "a click on the end point changes nothing");
+    t.pointer(&cx, &ev(PointerKind::Down, at(300.0, 200.0)));
+    let a = t.pointer(&cx, &ev(PointerKind::Up, at(300.0, 200.0)));
+    let [Action::Exec(cmd, p)] = a.as_slice() else { panic!("{a:?}") };
+    assert_eq!((cmd.as_str(), p["id"].as_u64(), p["subpath"].as_u64()), ("path.appendAnchor", Some(id.0), Some(0)));
+    assert_eq!((p["anchor"]["p"][0].as_f64(), p["anchor"]["p"][1].as_f64()), (Some(300.0), Some(200.0)));
+    // Clicking the first anchor of the other end closes it.
+    let a = t.pointer(&cx, &ev(PointerKind::Down, at(100.0, 100.0)));
+    assert_eq!(a, vec![Action::Exec("path.close".into(), serde_json::json!({"id": id.0, "subpath": 0}))]);
+    assert!(t.pointer(&cx, &ev(PointerKind::Up, at(100.0, 100.0))).is_empty());
+    // From the first anchor, the path is reversed first; a drag there sets its direction lines.
+    let mut t = create("pen");
+    let a = t.pointer(&cx, &ev(PointerKind::Down, at(100.0, 100.0)));
+    assert_eq!(a, vec![Action::Exec("path.reverse".into(), serde_json::json!({"ids": [id.0], "subpath": 0}))]);
+    t.pointer(&cx, &ev(PointerKind::Drag, at(80.0, 140.0)));
+    let a = t.pointer(&cx, &ev(PointerKind::Up, at(80.0, 140.0)));
+    assert_eq!(
+        a,
+        vec![Action::Exec(
+            "path.setAnchor".into(),
+            serde_json::json!({"id": id.0, "subpath": 0, "anchor": "last", "in": [120.0, 60.0], "out": [80.0, 140.0]})
+        )]
+    );
+    // Closed paths and locked paths aren't continued.
+    let mut d2 = d.clone();
+    d2.item_mut(id).unwrap().locked = true;
+    let cx = ctx(&d2, &s, &c, &l);
+    let t = create("pen");
+    assert_eq!(t.cursor(&cx, Point::new(at(200.0, 100.0).0, at(200.0, 100.0).1), Mods::default()), Cursor::Pen);
+}
+
+#[test]
+fn the_selection_tool_drags_a_path_type_bracket_along_its_path() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let id = ItemId(d.alloc());
+    let line = designcraft_geom::PathData::single(designcraft_geom::SubPath::new(
+        vec![designcraft_geom::Anchor::corner(Point::new(100.0, 300.0)), designcraft_geom::Anchor::corner(Point::new(500.0, 300.0))],
+        false,
+    ));
+    let mut it = Item::new(id, lid, Shape::GraphicLine, line);
+    let sid = designcraft_doc::StoryId(d.alloc());
+    let mut tf = designcraft_doc::TextFrame { story: sid, options: Default::default() };
+    tf.options.path = Some(designcraft_doc::PathType { start: 40.0, end: Some(300.0), ..Default::default() });
+    it.content = designcraft_doc::Content::Text(tf);
+    let mut st = designcraft_doc::Story::with_text(sid, "On the line", Default::default());
+    st.frames = vec![id];
+    d.stories.insert(sid, Arc::new(st));
+    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let at = |x: f64, y: f64| Point::new(x + off.x, y + off.y);
+    let ev = |k: PointerKind, p: Point| PointerEvent::new(k, p.x, p.y);
+    // Not selected: no brackets.
+    let none = Selection::default();
+    assert!(create("selection").overlays(&ctx(&d, &none, &c, &l)).is_empty());
+    let s = Selection { items: vec![id], ..Default::default() };
+    let cx = ctx(&d, &s, &c, &l);
+    let mut t = create("selection");
+    // Both brackets drawn across the path at 140 and 400 (a line and a tick each).
+    let o = t.overlays(&cx);
+    let xs: Vec<f64> = o.iter().filter_map(|o| if let Overlay::Line { a, b, .. } = o { (a.x == b.x).then_some(a.x - off.x) } else { None }).collect();
+    assert_eq!(xs, [140.0, 400.0], "{o:?}");
+    assert_eq!(t.cursor(&cx, at(140.0, 300.0), Mods::default()), Cursor::PathBracket);
+    assert_ne!(t.cursor(&cx, at(250.0, 300.0), Mods::default()), Cursor::PathBracket);
+    // Drag the start bracket: its distance along the path follows the pointer, off the path too.
+    assert_eq!(t.pointer(&cx, &ev(PointerKind::Down, at(140.0, 301.0))), vec![Action::Begin("Move Bracket".into())]);
+    let a = t.pointer(&cx, &ev(PointerKind::Drag, at(220.0, 330.0)));
+    let [Action::Preview(cmd, p)] = a.as_slice() else { panic!("{a:?}") };
+    assert_eq!((cmd.as_str(), p["id"].as_u64()), ("type.pathOptions", Some(id.0)));
+    assert!((p["start"].as_f64().unwrap() - 120.0).abs() < 1e-6, "{p}");
+    assert_eq!(t.pointer(&cx, &ev(PointerKind::Up, at(220.0, 330.0))), vec![Action::Commit]);
+    // The end bracket.
+    t.pointer(&cx, &ev(PointerKind::Down, at(400.0, 300.0)));
+    let a = t.pointer(&cx, &ev(PointerKind::Drag, at(450.0, 290.0)));
+    let [Action::Preview(_, p)] = a.as_slice() else { panic!("{a:?}") };
+    assert!((p["end"].as_f64().unwrap() - 350.0).abs() < 1e-6, "{p}");
+}
+
+#[test]
+fn eyedropper_samples_a_placed_image_and_matches_other_objects() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let photo = ItemId(d.alloc());
+    let mut it = Item::new(photo, lid, Shape::Rectangle, shapes::rectangle(Rect::new(100.0, 100.0, 200.0, 200.0)));
+    it.content = designcraft_doc::Content::Graphic(designcraft_doc::Graphic {
+        asset: designcraft_doc::AssetId(1),
+        size: (100.0, 100.0),
+        xf: designcraft_geom::Affine::translate((0.0, 0.0)),
+        auto_fit: Default::default(),
+        fit_align: 4,
+        crop: [0.0; 4],
+    });
+    d.assets.insert(
+        designcraft_doc::AssetId(1),
+        std::sync::Arc::new(designcraft_doc::Asset {
+            id: designcraft_doc::AssetId(1),
+            name: "photo.png".into(),
+            mime: "image/png".into(),
+            link: None,
+            data: std::sync::Arc::new(vec![]),
+            pixels: Some((100, 100)),
+            page: 0,
+        }),
+    );
+    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    // An unfilled text frame over part of the photo lets it show through.
+    d.add_text_frame(SpreadRef::Doc(0), Rect::new(150.0, 150.0, 250.0, 250.0), lid, "x", ParaFormat::default()).unwrap();
+    let swatch = add_rect(&mut d, Rect::new(300.0, 100.0, 350.0, 150.0));
+    d.item_mut(swatch).unwrap().fill.swatch = "[Black]".into();
+    let target = add_rect(&mut d, Rect::new(400.0, 100.0, 450.0, 150.0));
+    // The photo's layer is locked: sampling it still works.
+    d.layers.iter_mut().for_each(|l| l.locked = true);
+    let s = Selection { items: vec![target], ..Default::default() };
+    let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let cx = ctx(&d, &s, &c, &l);
+    let mut t = create("eyedropper");
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 130.0 + off.y));
+    let sample = |x: f64, y: f64| Action::Exec("color.sample".into(), serde_json::json!({"at": [x, y], "spread": {"kind": "doc", "index": 0}}));
+    assert_eq!(a, vec![sample(120.0, 130.0)]);
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 180.0 + off.x, 180.0 + off.y));
+    assert_eq!(a, vec![sample(180.0, 180.0)], "through the text frame");
+    // A filled object is matched as before (here on a locked layer: not reachable, so nothing).
+    assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 320.0 + off.x, 120.0 + off.y)).is_empty());
+    let mut d2 = d.clone();
+    d2.layers.iter_mut().for_each(|l| l.locked = false);
+    let cx = ctx(&d2, &s, &c, &l);
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 320.0 + off.x, 120.0 + off.y));
+    assert_eq!(a, vec![Action::Exec("object.matchAttributes".into(), serde_json::json!({"from": swatch.0}))]);
+    // Vector graphics and missing assets must retain the ordinary attribute-matching path.
+    for mime in ["application/pdf", "application/postscript", "image/svg+xml", "application/octet-stream"] {
+        std::sync::Arc::make_mut(d2.assets.get_mut(&designcraft_doc::AssetId(1)).unwrap()).mime = mime.into();
+        let cx = ctx(&d2, &s, &c, &l);
+        let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 130.0 + off.y));
+        assert_eq!(a, vec![Action::Exec("object.matchAttributes".into(), serde_json::json!({"from": photo.0}))], "{mime}");
+    }
+    d2.assets.clear();
+    let cx = ctx(&d2, &s, &c, &l);
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 130.0 + off.y));
+    assert_eq!(a, vec![Action::Exec("object.matchAttributes".into(), serde_json::json!({"from": photo.0}))]);
+}

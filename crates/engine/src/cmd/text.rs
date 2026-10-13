@@ -31,6 +31,15 @@ pub fn specs() -> Vec<CommandSpec> {
             st.selection.text = Some(TextSel { anchor: a, focus: b, ..t });
             ok()
         }),
+        cmd!(noundo "text.selectSentence", "Select Sentence", [], None, "{frame, point} — the sentence under the point (triple click)", has_doc, |s, p| {
+            select_around(s, p, "text.selectSentence", sentence_bounds)
+        }),
+        cmd!(noundo "text.selectParagraph", "Select Paragraph", [], None, "{frame, point} — the paragraph under the point (quadruple click)", has_doc, |s, p| {
+            select_around(s, p, "text.selectParagraph", para_bounds)
+        }),
+        cmd!(noundo "text.selectStory", "Select Story", [], None, "{frame, point} — all the text of the story under the point, threaded frames included (quintuple click)", has_doc, |s, p| {
+            select_around(s, p, "text.selectStory", |t, _| (0, t.len()))
+        }),
         cmd!(noundo "text.select", "Select Text", [], None, "{story, anchor, focus} (UTF-8 byte offsets into the story text, as find.find reports them: á or — counts 2 or 3)", has_doc, |s, p| {
             let sid = StoryId(p.get("story").and_then(Value::as_u64).unwrap_or(0));
             let st = s.doc_mut()?;
@@ -76,7 +85,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("story.setText", "Set Story Text", [], None, "{story, text} — replace a story's whole text", has_doc, |s, p| {
             let sid = StoryId(p.get("story").and_then(Value::as_u64).ok_or_else(|| bad("story.setText", "missing story"))?);
-            let text = str_param(p, "text").unwrap_or("").to_string();
+            let text = super::text_param(p, "text");
             s.edit(|d, sel| {
                 d.set_story_text(sid, &text)?;
                 if let Some(t) = sel.text.as_mut().filter(|t| t.story == sid) {
@@ -97,7 +106,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let sid = StoryId(p.get("story").and_then(Value::as_u64).ok_or_else(|| bad("story.replaceRange", "missing story"))?);
                 let a = p.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let b = p.get("end").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(a);
-                let text = str_param(p, "text").unwrap_or("").to_string();
+                let text = super::text_param(p, "text");
                 s.edit(|d, sel| {
                     let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
                     let (a, b) = (a.min(st.len()), b.min(st.len()).max(a.min(st.len())));
@@ -253,7 +262,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_text_or_frames,
             break_link
         ),
-        cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection", has_doc, selection_attrs),
+        cmd!(query "type.selectionAttrs", "Selection Attributes", [], None, "{} → resolved character/paragraph attributes at the text selection, and its start as `selectedText` (one line, up to 60 characters)", has_doc, selection_attrs),
     ]
 }
 
@@ -279,6 +288,8 @@ fn hit_byte(s: &Session, frame: ItemId, pt: Point) -> Option<(StoryId, usize, Op
     let inner = xf.inverse() * pt;
     let cs = s.cache.get(&st.doc, sid, None);
     let fi = cs.frames.iter().position(|f| f.frame == frame)?;
+    // Type on a path: the click lands on the line where it is along the path.
+    let inner = cs.frames.get(fi).and_then(|ft| compose::PathTextMap::new(it, ft)).map_or(inner, |m| m.to_line(inner));
     if let Some((table, row, col, b)) = compose::hit_cell(&cs, fi, inner) {
         return Some((sid, b, Some(CellAddr { table, row, col })));
     }
@@ -627,6 +638,62 @@ fn word_bounds(s: &str, i: usize) -> (usize, usize) {
     (a, b)
 }
 
+/// Selects `bounds(text, byte)` around the byte under `point` in `frame`. Unlike a caret
+/// placement, a press inside the current selection is no start of a text drag here: it is the
+/// third or later click of a row, which lands in the word or sentence just selected.
+fn select_around(s: &mut Session, p: &Value, id: &str, bounds: fn(&str, usize) -> (usize, usize)) -> Result<Value> {
+    let frame = id_param(p, "frame").ok_or_else(|| bad(id, "missing frame"))?;
+    let pt = point_param(p, "point").unwrap_or(Point::ZERO);
+    let (sid, b, cell) = hit_byte(s, frame, pt).ok_or_else(|| bad(id, "not a text frame"))?;
+    let st = s.doc_mut()?;
+    let text = st.doc.text_story(sid, cell).map(|x| x.text.clone()).unwrap_or_default();
+    let (anchor, focus) = bounds(&text, floor_char_boundary(&text, b));
+    st.selection = Selection::text(TextSel { story: sid, anchor, focus, frame: Some(frame), cell });
+    st.revision += 1;
+    Ok(json!({"story": sid.0, "anchor": anchor, "focus": focus}))
+}
+
+/// The paragraph around byte `i`, without its `\n`.
+fn para_bounds(s: &str, i: usize) -> (usize, usize) {
+    let i = i.min(s.len());
+    let a = s.get(..i).and_then(|t| t.rfind('\n')).map_or(0, |k| k + 1);
+    let b = s.get(i..).and_then(|t| t.find('\n')).map_or(s.len(), |k| i + k);
+    (a, b)
+}
+
+/// The sentence around byte `i`, within its paragraph: it ends after `.`, `!`, `?` or `…` (and
+/// any closing quotes or brackets) followed by a space or the paragraph end, or after a CJK full
+/// stop, and takes the spaces after it, as deleting a sentence should leave none behind.
+fn sentence_bounds(s: &str, i: usize) -> (usize, usize) {
+    let (pa, pb) = para_bounds(s, i);
+    let para = s.get(pa..pb).unwrap_or("");
+    let mut start = 0;
+    let mut it = para.char_indices().peekable();
+    while let Some((_, c)) = it.next() {
+        let cjk = matches!(c, '。' | '！' | '？');
+        if !cjk && !matches!(c, '.' | '!' | '?' | '…') {
+            continue;
+        }
+        while it.peek().is_some_and(|&(_, c)| {
+            matches!(c, '.' | '!' | '?' | '…' | '。' | '！' | '？' | '"' | '\'' | '”' | '’' | '»' | '›' | ')' | ']' | '」' | '』' | '）')
+        }) {
+            it.next();
+        }
+        if !cjk && it.peek().is_some_and(|&(_, c)| !c.is_whitespace()) {
+            continue;
+        }
+        while it.peek().is_some_and(|&(_, c)| c.is_whitespace()) {
+            it.next();
+        }
+        let end = it.peek().map_or(para.len(), |&(k, _)| k);
+        if pa + end > i || end == para.len() {
+            return (pa + start, pa + end);
+        }
+        start = end;
+    }
+    (pa + start, pb)
+}
+
 /// Type ▸ Story Direction.
 fn story_direction(s: &mut Session, p: &Value) -> Result<Value> {
     let vertical = p.get("vertical").and_then(Value::as_bool).ok_or_else(|| bad("type.storyDirection", "missing vertical"))?;
@@ -819,6 +886,18 @@ fn warichu_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     format_chars(s, &Value::Object(body))
 }
 
+pub(crate) fn validate_char_fill(document: &designcraft_doc::Document, attrs: &CharAttrs, command_id: &str) -> Result<()> {
+    if let Some(fill) = &attrs.fill
+        && document.swatch(fill).is_none()
+    {
+        return Err(bad(
+            command_id,
+            format!("unknown character fill `{fill}`; create a swatch with `swatch.create` and use its returned name as `fill`"),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
     let mut a = CharAttrs::default();
     if let Some(o) = attrs.as_object() {
@@ -826,6 +905,7 @@ pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
             a.set_json(k, v).map_err(|e| bad("type.char", e))?;
         }
     }
+    validate_char_fill(&s.doc()?.doc, &a, "type.char")?;
     let cleared: Vec<String> = attrs.as_object().map(|o| o.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k.clone()).collect()).unwrap_or_default();
     let targets = format_targets(s);
     s.edit(|d, _| {
@@ -957,6 +1037,17 @@ fn open_type(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"features": list, "figures": otf::figures(&list)}))
 }
 
+/// How much of the selected text `type.selectionAttrs` reports.
+const SELECTED_TEXT_CHARS: usize = 60;
+
+fn selected_text_preview(chars: impl Iterator<Item = char>) -> String {
+    chars
+        .map(|c| if c.is_control() || c == designcraft_doc::OBJECT_MARK { ' ' } else { c })
+        .skip_while(|c| c.is_whitespace())
+        .take(SELECTED_TEXT_CHARS)
+        .collect()
+}
+
 fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let targets = format_targets(s);
@@ -967,8 +1058,10 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let (pp, base) = st.doc.styles.resolve_para(pf);
     let cf = if r.is_empty() { story.char_format_at(r.start) } else { story.format_after(r.start) };
     let cp = st.doc.styles.resolve_char(&base, cf);
+    // The selected text (its start, on one line), for previews such as the font menu's.
+    let selected = selected_text_preview(story.text.get(r.start..r.end).unwrap_or_default().chars());
     Ok(json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
-        "paraOverrides": pf.para.count(), "charOverrides": cf.over.count()}))
+        "paraOverrides": pf.para.count(), "charOverrides": cf.over.count(), "selectedText": selected.trim()}))
 }
 
 /// Our own filler text (not Adobe's).
@@ -1139,6 +1232,37 @@ mod open_type_tests {
         assert_eq!(text, "字🙂x");
         assert!(text.is_char_boundary(t.anchor) && text.is_char_boundary(t.focus), "caret {t:?} in {text:?}");
         s.execute("text.move", &json!({"dir": "right"})).unwrap();
+    }
+
+    #[test]
+    fn selected_text_preview_stops_at_its_character_budget() {
+        let read = std::cell::Cell::new(0usize);
+        let prefix = ['\t', '\u{2003}', designcraft_doc::OBJECT_MARK];
+        let chars = prefix.into_iter().chain(std::iter::repeat_n('字', 100_000)).inspect(|_| read.set(read.get() + 1));
+        let preview = super::selected_text_preview(chars);
+        assert_eq!(preview, "字".repeat(super::SELECTED_TEXT_CHARS));
+        assert_eq!(read.get(), prefix.len() + super::SELECTED_TEXT_CHARS, "the rest of a large selection is never copied or scanned");
+        assert_eq!(super::selected_text_preview("A\nB".chars()), "A B");
+    }
+
+    #[test]
+    fn selection_attrs_report_the_selected_text() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s
+            .execute(
+                "frame.create",
+                &json!({"rect": [72, 72, 300, 200], "content": "text", "text": "Spring issue
+What's new in typography this season, and why it matters to every designer"}),
+            )
+            .unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 13})).unwrap();
+        assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["selectedText"], "Spring issue", "on one line, trimmed");
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 13, "focus": 200})).unwrap();
+        let long = s.execute("type.selectionAttrs", &json!({})).unwrap()["selectedText"].as_str().unwrap().to_string();
+        assert!(long.starts_with("What's new") && (55..=60).contains(&long.chars().count()), "the line break skipped, capped: {long}");
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 3, "focus": 3})).unwrap();
+        assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["selectedText"], "", "a caret selects nothing");
     }
 
     #[test]
@@ -1881,5 +2005,46 @@ mod story_query_contract_tests {
         assert_eq!(s.execute("story.get", &json!({"frame":f["id"]})).unwrap()["text"], "");
         s.execute("text.select", &json!({"story":f["story"],"anchor":0})).unwrap();
         assert_eq!(s.execute("story.get", &json!({})).unwrap()["text"], "");
+    }
+}
+
+#[cfg(test)]
+mod multi_click_tests {
+    use super::{para_bounds, sentence_bounds};
+
+    fn sentence(s: &str, at: &str) -> String {
+        let i = s.find(at).unwrap();
+        let (a, b) = sentence_bounds(s, i);
+        s[a..b].to_string()
+    }
+
+    #[test]
+    fn sentences_end_at_a_stop_before_a_space_or_the_paragraph_end() {
+        let s = "It costs 3.5 euros. \u{201C}Really?\u{201D} (Twice!) Yes\u{2026} fine.\nNext one. Last";
+        assert_eq!(sentence(s, "costs"), "It costs 3.5 euros. ");
+        assert_eq!(sentence(s, "Really"), "\u{201C}Really?\u{201D} ");
+        assert_eq!(sentence(s, "Twice"), "(Twice!) ");
+        assert_eq!(sentence(s, "Yes"), "Yes\u{2026} ");
+        assert_eq!(sentence(s, "fine"), "fine.");
+        assert_eq!(sentence(s, "one"), "Next one. ");
+        assert_eq!(sentence(s, "Last"), "Last");
+        // The caret at the very end of a paragraph is in its last sentence.
+        let end = s.find('\n').unwrap();
+        assert_eq!(sentence_bounds(s, end), (s.find("fine").unwrap(), end));
+    }
+
+    #[test]
+    fn cjk_full_stops_end_sentences_without_a_space() {
+        let s = "これは文です。次の文！最後";
+        assert_eq!(sentence(s, "次"), "次の文！");
+        assert_eq!(sentence(s, "最後"), "最後");
+    }
+
+    #[test]
+    fn paragraphs_stop_at_returns() {
+        let s = "One.\nTwo two.\n";
+        assert_eq!(para_bounds(s, 6), (5, 13));
+        assert_eq!(para_bounds(s, 0), (0, 4));
+        assert_eq!(para_bounds(s, s.len()), (s.len(), s.len()));
     }
 }

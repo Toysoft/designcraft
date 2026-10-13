@@ -416,5 +416,11 @@ pub fn item_hit(it: &Item, p: Point, tol: f64) -> bool {
     if area && it.path.is_closed() && designcraft_geom::hit::fill_contains(&bp, designcraft_geom::FillRule::NonZero, inner) {
         return true;
     }
-    designcraft_geom::hit::stroke_contains(&bp, it.stroke.weight.max(1.0), tol, inner)
+    // Type on a path: the letters stand over the path, so a click on them hits it too.
+    let reach = if it.text_frame().is_some_and(|t| t.options.path.is_some()) { PATH_TYPE_REACH } else { 0.0 };
+    designcraft_geom::hit::stroke_contains(&bp, it.stroke.weight.max(1.0), tol + reach, inner)
 }
+
+/// How far from its path type on a path is hit (points): about a cap height of 12–18 pt type,
+/// either side (the type may sit on or under the path).
+const PATH_TYPE_REACH: f64 = 12.0;
