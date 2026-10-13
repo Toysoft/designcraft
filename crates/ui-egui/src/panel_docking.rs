@@ -311,7 +311,7 @@ pub(crate) fn show(app: &mut DesignApp, ui: &mut egui::Ui) -> bool {
     let mut blocked = Vec::new();
     if app.ui.dialog.is_some() || app.ui.about || app.ui.palette.is_some() || egui::Popup::is_any_open(ui.ctx()) {
         blocked.push(ui.ctx().content_rect());
-    } else if app.story_editor.is_some() {
+    } else if crate::story_editor::visible(app) {
         // The editor is rendered after the dock; block its unmeasured first frame conservatively.
         let rect = ui.ctx().memory(|m| m.area_rect(egui::Id::new("story_editor"))).unwrap_or_else(|| ui.ctx().content_rect());
         blocked.push(rect);

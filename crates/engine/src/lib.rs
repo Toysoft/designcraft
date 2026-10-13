@@ -418,7 +418,7 @@ impl Session {
         if id != "data.preview" && (spec.undoable || spec.journal) {
             self.stop_data_preview();
         }
-        let before = self.active().map(|d| (d.uid, d.doc.clone()));
+        let before = self.active().map(|d| (d.uid, d.doc.clone(), d.selection.clone()));
         let r = (spec.run)(self, params)?;
         // Undo, redo or deleting layers can take the active layer away: new objects would land on
         // a layer that isn't there (invisible, not exported). Fall back to the top layer.
@@ -443,13 +443,13 @@ impl Session {
             }
         }
         // Record undo if the document changed (and we're not previewing an interaction).
-        if let (Some((uid, old)), Some(st)) = (before, self.active_mut())
+        if let (Some((uid, old, selection)), Some(st)) = (before, self.active_mut())
             && st.uid == uid
             && !Arc::ptr_eq(&old, &st.doc)
             && st.interaction.is_none()
             && spec.undoable
         {
-            let entry = HistoryEntry { label: spec.label.to_string(), doc: old, selection: st.selection.clone() };
+            let entry = HistoryEntry { label: spec.label.to_string(), doc: old, selection };
             push_undo(st, entry);
         }
         if spec.journal {

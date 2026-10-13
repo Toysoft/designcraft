@@ -26,6 +26,20 @@ fn create_frame_type_and_undo() {
 }
 
 #[test]
+fn undo_restores_the_selection_from_before_the_command() {
+    let mut s = session();
+    let a = s.execute("frame.create", &json!({"rect": [36, 36, 100, 100]})).unwrap()["id"].as_u64().unwrap();
+    s.execute("selection.set", &json!({"ids": [a]})).unwrap();
+    let b = s.execute("frame.create", &json!({"rect": [200, 36, 300, 100]})).unwrap()["id"].as_u64().unwrap();
+    let sel = |s: &Session| s.doc().unwrap().selection.items.iter().map(|i| i.0).collect::<Vec<_>>();
+    assert_eq!(sel(&s), vec![b]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(sel(&s), vec![a]);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(sel(&s), vec![b]);
+}
+
+#[test]
 fn smart_quotes_and_formatting() {
     let mut s = session();
     s.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text"})).unwrap();

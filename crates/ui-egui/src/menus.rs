@@ -944,13 +944,18 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             }
         }
         "app.storyEditor" => {
-            let sid = p.get("story").and_then(Value::as_u64).map(designcraft_doc::StoryId).or_else(|| {
-                let st = app.session.active()?;
-                st.selection.text.map(|t| t.story).or_else(|| st.selection.items.iter().find_map(|i| st.doc.item(*i)?.text_frame().map(|t| t.story)))
+            let target = app.session.active().and_then(|st| {
+                let story = p.get("story").and_then(Value::as_u64).map(designcraft_doc::StoryId).or_else(|| {
+                    st.selection
+                        .text
+                        .map(|t| t.story)
+                        .or_else(|| st.selection.items.iter().find_map(|i| st.doc.item(*i)?.text_frame().map(|t| t.story)))
+                })?;
+                Some(crate::story_editor::Target { doc: st.uid, story })
             });
-            match sid {
-                Some(s) => {
-                    app.story_editor = if app.story_editor == Some(s) { None } else { Some(s) };
+            match target {
+                Some(t) => {
+                    app.story_editor = if app.story_editor == Some(t) { None } else { Some(t) };
                     Ok(Value::Null)
                 }
                 None => Err("select a text frame or place the cursor in text".into()),

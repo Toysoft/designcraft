@@ -497,7 +497,7 @@ pub struct DesignApp {
     pub perf: Perf,
     pub synthetic: Vec<egui::Event>,
     /// Story open in the Story Editor.
-    pub story_editor: Option<designcraft_doc::StoryId>,
+    pub story_editor: Option<story_editor::Target>,
     control_rx: Option<Receiver<ControlRequest>>,
     pending_shots: Vec<(u64, Option<String>, Sender<ControlResponse>, f64)>,
     queued_shots: Vec<(u64, f64, u32)>,
