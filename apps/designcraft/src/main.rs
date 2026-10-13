@@ -334,6 +334,9 @@ fn main() -> eframe::Result {
                 app.status(format!("Recovered {n} unsaved document{} from the last session.", if n == 1 { "" } else { "s" }));
             }
             load_prefs(&mut app);
+            // Start with the Hand tool: a document opened to look at can't be changed by a stray
+            // click or drag (the Selection tool would move what it lands on).
+            let _ = app.run("tool.select", serde_json::json!({"tool": "hand"}));
             app.integrated_titlebar = cfg!(target_os = "macos");
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());

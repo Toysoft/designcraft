@@ -1,4 +1,4 @@
-//! The tool catalogue: ids, labels, shortcuts and Tools-panel groups (InDesign's order).
+//! The tool catalogue: ids, labels, shortcuts and Tools-panel groups (InDesign's order, Hand first).
 
 use serde::Serialize;
 
@@ -17,6 +17,9 @@ const fn t(id: &'static str, label: &'static str, shortcut: Option<&'static str>
 /// Tools-panel groups in order (the first tool of each group shows by default). A `None` group
 /// marks a separator.
 pub const TOOL_GROUPS: &[&[ToolInfo]] = &[
+    // The Hand tool first: the app starts with it, so opening a document to look at it can't move
+    // anything by accident.
+    &[t("hand", "Hand Tool", Some("H"), "tool-hand")],
     &[t("selection", "Selection Tool", Some("V"), "tool-selection")],
     &[t("directSelection", "Direct Selection Tool", Some("A"), "tool-direct")],
     &[t("page", "Page Tool", Some("Shift+P"), "tool-page")],
@@ -73,7 +76,6 @@ pub const TOOL_GROUPS: &[&[ToolInfo]] = &[
         t("eyedropper", "Eyedropper Tool", Some("I"), "tool-eyedropper"),
         t("measure", "Measure Tool", Some("K"), "tool-measure"),
     ],
-    &[t("hand", "Hand Tool", Some("H"), "tool-hand")],
     &[t("zoom", "Zoom Tool", Some("Z"), "tool-zoom")],
 ];
 

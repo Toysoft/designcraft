@@ -876,3 +876,10 @@ fn eyedropper_samples_a_placed_image_and_matches_other_objects() {
     let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 120.0 + off.x, 130.0 + off.y));
     assert_eq!(a, vec![Action::Exec("object.matchAttributes".into(), serde_json::json!({"from": photo.0}))]);
 }
+
+#[test]
+fn the_tools_panel_starts_with_the_hand_then_the_selection_tool() {
+    let first: Vec<&str> = crate::catalog::TOOL_GROUPS.iter().filter(|g| !g.is_empty()).take(2).map(|g| g[0].id).collect();
+    assert_eq!(first, ["hand", "selection"]);
+    assert_eq!(crate::catalog::TOOL_GROUPS.iter().flat_map(|g| g.iter()).filter(|t| t.id == "hand").count(), 1, "listed once");
+}
