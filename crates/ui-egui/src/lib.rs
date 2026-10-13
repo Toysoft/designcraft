@@ -165,6 +165,8 @@ impl Default for PdfExportSettings {
 pub struct UiState {
     pub brightness: theme::Brightness,
     pub screen_mode: ScreenMode,
+    /// The screen mode leaving Presentation returns to: the one it was entered from.
+    pub presentation_return: ScreenMode,
     pub frame_edges: bool,
     pub rulers: bool,
     pub guides: bool,
@@ -294,6 +296,7 @@ impl Default for UiState {
         UiState {
             brightness: theme::Brightness::MediumDark,
             screen_mode: ScreenMode::Normal,
+            presentation_return: ScreenMode::Normal,
             frame_edges: true,
             rulers: true,
             guides: true,

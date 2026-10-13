@@ -676,6 +676,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Text Anchors", "テキストアンカー"),
     ("Text Variables", "テキスト変数"),
     ("Toggle Normal/Preview", "通常表示・プレビューを切り替え"),
+    ("Toggle Presentation", "プレゼンテーションを切り替え"),
     ("Toggle Selection", "選択範囲への追加・解除"),
     ("Tools: Double Column", "ツール: 2列"),
     ("Transform Again", "変形を再適用"),

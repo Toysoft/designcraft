@@ -1234,6 +1234,16 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Text Anchors", ["Text Anchors", "Text Anchors", "Text Anchors", "Text Anchors", "文本锚点"]),
     ("Text Variables", ["Text Variables", "Text Variables", "Text Variables", "Text Variables", "文本变量"]),
     ("Toggle Normal/Preview", ["Toggle Normal/Preview", "Toggle Normal/Preview", "Toggle Normal/Preview", "Toggle Normal/Preview", "切换正常/预览"]),
+    (
+        "Toggle Presentation",
+        [
+            "Präsentation ein/aus",
+            "Activer/désactiver la présentation",
+            "Activar/desactivar presentación",
+            "プレゼンテーションを切り替え",
+            "切换演示模式",
+        ],
+    ),
     ("Toggle Selection", ["Toggle Selection", "Toggle Selection", "Toggle Selection", "Toggle Selection", "切换选择"]),
     ("Tools: Double Column", ["Tools: Double Column", "Tools: Double Column", "Tools: Double Column", "Tools: Double Column", "工具: 双列"]),
     ("Transform Again", ["Transform Again", "Transform Again", "Transform Again", "Transform Again", "再次变换"]),

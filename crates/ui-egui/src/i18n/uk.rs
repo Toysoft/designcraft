@@ -677,6 +677,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Text Anchors", "Текстові прив’язки"),
     ("Text Variables", "Текстові змінні"),
     ("Toggle Normal/Preview", "Перемкнути звичайний режим / перегляд"),
+    ("Toggle Presentation", "Перемкнути режим презентації"),
     ("Toggle Selection", "Переключити виділення"),
     ("Tools: Double Column", "Інструменти: дві колонки"),
     ("Transform Again", "Трансформувати знову"),

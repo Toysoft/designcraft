@@ -674,6 +674,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Text Anchors", "Ancoraggi testo"),
     ("Text Variables", "Variabili di testo"),
     ("Toggle Normal/Preview", "Alterna Normale/Anteprima"),
+    ("Toggle Presentation", "Attiva/disattiva presentazione"),
     ("Toggle Selection", "Alterna selezione"),
     ("Tools: Double Column", "Strumenti: doppia colonna"),
     ("Transform Again", "Ripeti trasformazione"),

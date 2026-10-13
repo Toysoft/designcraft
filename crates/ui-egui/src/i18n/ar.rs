@@ -1333,6 +1333,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Text Anchors", "نقاط ارتساء النص"),
     ("Text Variables", "متغيرات النص"),
     ("Toggle Normal/Preview", "تبديل العرض العادي/المعاينة"),
+    ("Toggle Presentation", "تبديل وضع العرض التقديمي"),
     ("Toggle Selection", "تبديل التحديد"),
     ("Tools: Double Column", "الأدوات: عمودان"),
     ("Transform Panel", "لوحة التحويل"),

@@ -86,6 +86,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.zoom", "Zoom To", None, "{zoom: 1.0 = 100%}"),
     ("view.screenMode", "Screen Mode", None, "{mode: normal|preview|bleed|slug|presentation}"),
     ("view.togglePreview", "Toggle Normal/Preview", Some("W"), "{}"),
+    (
+        "view.togglePresentation",
+        "Toggle Presentation",
+        Some("Shift+W"),
+        "{} — enters Presentation, or returns to the mode it was entered from; Esc also leaves it",
+    ),
     ("view.frameEdges", "Show/Hide Frame Edges", Some("Cmd+H"), "{}"),
     ("view.rulers", "Show/Hide Rulers", Some("Cmd+R"), "{}"),
     ("view.guides", "Show/Hide Guides", Some("Cmd+;"), "{}"),
@@ -630,6 +636,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "-",
             "ui:view.overprintPreview",
             "ui:view.togglePreview",
+            "ui:view.togglePresentation",
             ">Display Performance",
             "ui:view.fastDisplay",
             "ui:view.typicalDisplay",
@@ -1101,17 +1108,29 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             Ok(Value::Null)
         }
         "view.screenMode" => {
-            app.ui.screen_mode = match p.get("mode").and_then(Value::as_str).unwrap_or("normal") {
+            let mode = match p.get("mode").and_then(Value::as_str).unwrap_or("normal") {
                 "preview" => ScreenMode::Preview,
                 "bleed" => ScreenMode::Bleed,
                 "slug" => ScreenMode::Slug,
                 "presentation" => ScreenMode::Presentation,
                 _ => ScreenMode::Normal,
             };
+            set_screen_mode(app, mode);
             Ok(Value::Null)
         }
         "view.togglePreview" => {
-            app.ui.screen_mode = if app.ui.screen_mode == ScreenMode::Normal { ScreenMode::Preview } else { ScreenMode::Normal };
+            let mode = if app.ui.screen_mode == ScreenMode::Normal { ScreenMode::Preview } else { ScreenMode::Normal };
+            set_screen_mode(app, mode);
+            Ok(Value::Null)
+        }
+        "view.togglePresentation" => {
+            let mode = match (app.ui.screen_mode, app.ui.presentation_return) {
+                // A settings file can hold Presentation as the return mode; leaving must still leave.
+                (ScreenMode::Presentation, ScreenMode::Presentation) => ScreenMode::Normal,
+                (ScreenMode::Presentation, back) => back,
+                _ => ScreenMode::Presentation,
+            };
+            set_screen_mode(app, mode);
             Ok(Value::Null)
         }
         "view.frameEdges" => flag(&mut app.ui.frame_edges),
@@ -1483,6 +1502,14 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
 }
 
 /// Save by handing the serialized document to the host as a download (web).
+/// Switch screen modes; entering Presentation remembers the mode to return to.
+fn set_screen_mode(app: &mut DesignApp, mode: ScreenMode) {
+    if mode == ScreenMode::Presentation && app.ui.screen_mode != ScreenMode::Presentation {
+        app.ui.presentation_return = app.ui.screen_mode;
+    }
+    app.ui.screen_mode = mode;
+}
+
 fn download_document(app: &mut DesignApp) -> Result<Value, String> {
     let name = app.session.active().map(|d| format!("{}.designcraft", d.doc.title)).ok_or("no document")?;
     let ser = app.run("file.serialize", json!({}))?;
@@ -1797,6 +1824,7 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
         "window.taskBarPin" => app.ui.task_bar_pin.is_some(),
         "window.toolsDoubleColumn" => app.ui.tools_double_column,
         "view.togglePreview" => app.ui.screen_mode == crate::ScreenMode::Preview,
+        "view.togglePresentation" => app.ui.screen_mode == crate::ScreenMode::Presentation,
         "window.brightness" => params.get("brightness").and_then(Value::as_str) == Some(app.ui.brightness.id()),
         "type.storyDirection" => {
             let st = app.session.active()?;
@@ -2123,6 +2151,13 @@ pub fn shortcuts(app: &mut DesignApp, ctx: &egui::Context) {
     let events = ctx.input(|i| i.events.clone());
     for e in events {
         let egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } = e else { continue };
+        // Presentation hides every control, so Esc always leaves it, and only that: the canvas must
+        // not also see the press and switch tools or deselect.
+        if key == egui::Key::Escape && app.ui.screen_mode == ScreenMode::Presentation {
+            ctx.input_mut(|i| i.consume_key(modifiers, key));
+            let _ = app.run("view.togglePresentation", json!({}));
+            continue;
+        }
         // Command shortcuts.
         let mut fired: Option<String> = None;
         let all = effective_shortcuts(app);
@@ -2951,6 +2986,60 @@ mod tests {
         assert_eq!(app.session.tool_id(), "selection", "V switches tools straight after drawing");
         frame(&mut app, key(egui::Key::F));
         assert_eq!(app.session.tool_id(), "rectangleFrame");
+    }
+
+    #[test]
+    fn escape_and_shift_w_leave_presentation_for_the_previous_mode() {
+        // Presentation hides every control, so the keyboard must get out of it (#493).
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        app.session.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "graphic"})).unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut crate::DesignApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+        };
+        let key = |k: egui::Key, modifiers: egui::Modifiers| {
+            vec![
+                egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers },
+                egui::Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers },
+            ]
+        };
+        let selected = |app: &crate::DesignApp| app.session.active().map(|d| d.selection.items.len()).unwrap_or(0);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        app.run("view.screenMode", json!({"mode": "preview"})).unwrap();
+        app.select_tool("rectangleFrame");
+        assert_eq!(selected(&app), 1, "the new frame is selected");
+
+        frame(&mut app, key(egui::Key::W, egui::Modifiers::SHIFT));
+        assert_eq!(app.ui.screen_mode, ScreenMode::Presentation, "Shift+W enters Presentation");
+        assert_eq!(app.session.tool_id(), "rectangleFrame", "Shift+W is not a tool shortcut");
+        frame(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+        assert_eq!(app.ui.screen_mode, ScreenMode::Preview, "Esc returns to the mode Presentation was entered from");
+        assert_eq!(app.session.tool_id(), "rectangleFrame", "Esc only left Presentation");
+        assert_eq!(selected(&app), 1, "Esc only left Presentation");
+
+        frame(&mut app, key(egui::Key::W, egui::Modifiers::SHIFT));
+        frame(&mut app, key(egui::Key::W, egui::Modifiers::SHIFT));
+        assert_eq!(app.ui.screen_mode, ScreenMode::Preview, "Shift+W leaves Presentation for the previous mode");
+
+        app.run("view.screenMode", json!({"mode": "presentation"})).unwrap();
+        frame(&mut app, key(egui::Key::W, egui::Modifiers::NONE));
+        assert_eq!(app.ui.screen_mode, ScreenMode::Normal, "W from any mode but Normal goes to Normal");
+
+        // Outside Presentation, Esc keeps its usual meaning.
+        frame(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+        assert_eq!(app.ui.screen_mode, ScreenMode::Normal);
+        assert_eq!(app.session.tool_id(), "selection");
     }
 
     #[test]

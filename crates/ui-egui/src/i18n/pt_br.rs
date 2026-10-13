@@ -114,6 +114,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Fit Spread in Window", "Ajustar página dupla na janela"),
     ("Actual Size", "Tamanho real"),
     ("Screen Mode", "Modo de tela"),
+    ("Toggle Presentation", "Alternar apresentação"),
     ("Normal", "Normal"),
     ("Preview", "Visualização"),
     ("Rulers", "Réguas"),
