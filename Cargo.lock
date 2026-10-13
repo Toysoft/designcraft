@@ -1046,6 +1046,7 @@ dependencies = [
  "designcraft-compose",
  "designcraft-doc",
  "designcraft-geom",
+ "log",
  "quick-xml 0.38.4",
  "thiserror 2.0.21",
  "zip",

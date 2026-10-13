@@ -537,31 +537,9 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Wrap",
             ["Window"],
             Some("Cmd+Alt+W"),
-            "{mode: none|boundingBox|contour|jumpObject|jumpToNextColumn, offset?: number|[t,l,b,r], invert?: bool, ids?}",
+            "{mode?: none|boundingBox|contour|jumpObject|jumpToNextColumn (boundingBox when absent, unless side or contour is given: then unchanged), offset?: number|[t,l,b,r], invert?: bool, side?: bothSides|leftSide|rightSide|towardsSpine|awayFromSpine|largestArea, contour?: boundingBox|graphicFrame|sameAsClipping, ids?}; offset or contour drops an imported custom wrap boundary",
             has_selection,
-            |s, p| {
-                let mode = p.get("mode").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or(designcraft_doc::WrapMode::BoundingBox);
-                let off = match p.get("offset") {
-                    Some(Value::Number(n)) => Some([n.as_f64().unwrap_or(0.0); 4]),
-                    Some(v) => serde_json::from_value(v.clone()).ok(),
-                    None => None,
-                };
-                let invert = p.get("invert").and_then(Value::as_bool);
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        i.wrap.mode = mode;
-                        if let Some(o) = off {
-                            i.wrap.offsets = o;
-                        }
-                        if let Some(v) = invert {
-                            i.wrap.invert = v;
-                        }
-                    },
-                    false,
-                )
-            }
+            text_wrap
         ),
         cmd!(
             "object.fit",
@@ -1062,6 +1040,9 @@ fn union_bounds(d: &Document, ids: &[ItemId]) -> Rect {
 /// Transform an item's geometry in its own space: the path and the gradient vector with it.
 pub(crate) fn bake(it: &mut Item, inner: Affine) {
     it.path.transform(inner);
+    if let Some(w) = &mut it.wrap.path {
+        w.transform(inner);
+    }
     if let Some([x0, y0, x1, y1]) = it.fill.gradient_vector {
         let (a, b) = (inner * Point::new(x0, y0), inner * Point::new(x1, y1));
         it.fill.gradient_vector = Some([a.x, a.y, b.x, b.y]);
@@ -1387,6 +1368,59 @@ fn ungroup(s: &mut Session, p: &Value) -> Result<Value> {
         *sel = Selection::items(out);
         ok()
     })
+}
+
+fn text_wrap(s: &mut Session, p: &Value) -> Result<Value> {
+    use designcraft_doc::{ContourType, WrapMode, WrapSide};
+    let side: Option<WrapSide> = match p.get("side") {
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|_| bad("object.textWrap", "unknown side"))?),
+        None => None,
+    };
+    // Detected edges, alpha channels and image paths need the image's pixels or paths, which
+    // composition doesn't read; those types aren't offered.
+    let contour = match p.get("contour").map(|v| serde_json::from_value::<ContourType>(v.clone())) {
+        Some(Ok(c @ (ContourType::BoundingBox | ContourType::GraphicFrame | ContourType::SameAsClipping))) => Some(c),
+        Some(_) => return Err(bad("object.textWrap", "unsupported contour type")),
+        None => None,
+    };
+    let mode: Option<WrapMode> = match p.get("mode") {
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|_| bad("object.textWrap", "unknown mode"))?),
+        None if side.is_some() || contour.is_some() => None,
+        None => Some(WrapMode::BoundingBox),
+    };
+    let off = match p.get("offset") {
+        Some(Value::Number(n)) => Some([n.as_f64().unwrap_or(0.0); 4]),
+        Some(v) => serde_json::from_value(v.clone()).ok(),
+        None => None,
+    };
+    let invert = p.get("invert").and_then(Value::as_bool);
+    set_flag(
+        s,
+        p,
+        move |i| {
+            if let Some(m) = mode {
+                i.wrap.mode = m;
+            }
+            if let Some(o) = off {
+                i.wrap.offsets = o;
+            }
+            if let Some(v) = invert {
+                i.wrap.invert = v;
+            }
+            if let Some(v) = side {
+                i.wrap.side = v;
+            }
+            if let Some(c) = contour {
+                i.wrap.contour = c;
+            }
+            // A custom boundary has the offsets built in and replaces the contour, so setting
+            // either one rebuilds the wrap from the frame.
+            if off.is_some() || contour.is_some() {
+                i.wrap.path = None;
+            }
+        },
+        false,
+    )
 }
 
 fn set_flag(s: &mut Session, p: &Value, f: impl Fn(&mut Item), deselect: bool) -> Result<Value> {

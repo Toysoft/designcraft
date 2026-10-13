@@ -519,6 +519,51 @@ fn object_set_flags_and_wrap_invert() {
     s.execute("selection.set", &json!({"ids": [id]})).unwrap();
     s.execute("object.textWrap", &json!({"mode": "boundingBox", "invert": true})).unwrap();
     assert!(item(&s).wrap.invert);
+    // Side and contour type keep the mode; contour types that need the image aren't accepted.
+    s.execute("object.textWrap", &json!({"mode": "contour"})).unwrap();
+    s.execute("object.textWrap", &json!({"side": "largestArea", "contour": "graphicFrame"})).unwrap();
+    let w = item(&s).wrap;
+    assert_eq!(
+        (w.mode, w.side, w.contour),
+        (designcraft_doc::WrapMode::Contour, designcraft_doc::WrapSide::LargestArea, designcraft_doc::ContourType::GraphicFrame)
+    );
+    assert!(s.execute("object.textWrap", &json!({"contour": "detectEdges"})).is_err());
+    assert!(s.execute("object.textWrap", &json!({"side": "middle"})).is_err());
+}
+
+#[test]
+fn custom_wrap_path_follows_resize_and_yields_to_offsets() {
+    let mut s = session();
+    let r = s.execute("frame.create", &json!({"rect": [0, 0, 100, 100]})).unwrap();
+    let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+    s.execute("selection.set", &json!({"ids": [id.0]})).unwrap();
+    s.execute("object.textWrap", &json!({"mode": "boundingBox"})).unwrap();
+    let inner = s.doc().unwrap().doc.item(id).unwrap().path.clone();
+    let custom = designcraft_geom::PathData::single(designcraft_geom::SubPath::polyline(
+        &[designcraft_geom::Point::new(0.0, 0.0), designcraft_geom::Point::new(40.0, 0.0), designcraft_geom::Point::new(0.0, 100.0)],
+        true,
+    ));
+    s.edit(|d, _| {
+        if let Some(it) = d.item_mut(id) {
+            it.wrap.path = Some(custom.clone());
+        }
+        Ok(())
+    })
+    .unwrap();
+    let wrap_path = |s: &Session| s.doc().unwrap().doc.item(id).unwrap().wrap.path.clone();
+    // Side and mode keep the boundary.
+    s.execute("object.textWrap", &json!({"side": "rightSide"})).unwrap();
+    s.execute("object.textWrap", &json!({"mode": "contour"})).unwrap();
+    assert_eq!(wrap_path(&s), Some(custom.clone()));
+    // Resizing scales it with the frame's path.
+    let b = inner.bounds().unwrap();
+    let to = [b.x0, b.y0, b.x0 + 2.0 * b.width(), b.y1];
+    s.execute("transform.resize", &json!({"from": [b.x0, b.y0, b.x1, b.y1], "to": to})).unwrap();
+    let w = wrap_path(&s).unwrap().bounds().unwrap();
+    assert!((w.width() - 80.0).abs() < 1e-6 && (w.height() - 100.0).abs() < 1e-6, "{w:?}");
+    // An offset rebuilds the wrap from the frame.
+    s.execute("object.textWrap", &json!({"offset": 6})).unwrap();
+    assert_eq!(wrap_path(&s), None);
 }
 
 #[test]
