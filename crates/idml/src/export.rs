@@ -2055,7 +2055,8 @@ impl<'a> Ex<'a> {
                                     .attr("VerticalReferencePoint", names::anchor_rel_out(*y_relative, true))
                                     .attr("HorizontalAlignment", ["LeftAlign", "CenterAlign", "RightAlign"][(*ref_point % 3) as usize])
                                     .attr("VerticalAlignment", ["TopAlign", "CenterAlign", "BottomAlign"][(*ref_point / 3).min(2) as usize])
-                                    .attr("AnchorXoffset", num(*x_offset))
+                                    // IDML measures a left-aligned object's X offset leftwards.
+                                    .attr("AnchorXoffset", num(if *ref_point % 3 == 0 { 0.0 - *x_offset } else { *x_offset }))
                                     .attr("AnchorYoffset", num(*y_offset))
                                     .attr("PinPosition", bool_s(*keep_within_column)),
                             };

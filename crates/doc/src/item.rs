@@ -1123,17 +1123,20 @@ impl Item {
     }
 
     pub fn bounds(&self) -> Rect {
+        self.bounds_under(Affine::IDENTITY).unwrap_or(Rect::ZERO)
+    }
+
+    /// Bounds of the outline under `outer` (then this item's own transform). A group's are its
+    /// children's outlines transformed by the full transform, which a rotated group's box of its
+    /// children's boxes would overstate.
+    fn bounds_under(&self, outer: Affine) -> Option<Rect> {
+        let xf = outer * self.xf;
         if self.shape == Shape::Group
             && let Content::Group { items } = &self.content
         {
-            let mut r: Option<Rect> = None;
-            for c in items {
-                let b = self.xf.transform_rect_bbox(c.bounds());
-                r = Some(r.map_or(b, |r| r.union(b)));
-            }
-            return r.unwrap_or(Rect::ZERO);
+            return items.iter().filter_map(|c| c.bounds_under(xf)).reduce(|a, b| a.union(b));
         }
-        self.path.transformed(self.xf).bounds().unwrap_or(Rect::ZERO)
+        self.path.transformed(xf).bounds()
     }
 
     /// Visible bounds including stroke weight (approximate for inside/outside alignment).
@@ -1213,6 +1216,34 @@ mod tests {
         let mut n = 0;
         g.walk(&mut |_| n += 1);
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn rotated_group_bounds_follow_the_children_outlines() {
+        let rects = [Rect::new(0.0, 0.0, 120.0, 20.0), Rect::new(10.0, 40.0, 200.0, 70.0)];
+        let child_xf = Affine::rotate(-20f64.to_radians());
+        let items = rects
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let mut c = Item::new(ItemId(i as u64 + 1), LayerId(1), Shape::Rectangle, shapes::rectangle(*r));
+                c.xf = child_xf;
+                Arc::new(c)
+            })
+            .collect();
+        let mut g = Item::new(ItemId(9), LayerId(1), Shape::Group, PathData::default());
+        g.content = Content::Group { items };
+        g.xf = Affine::translate((50.0, 60.0)) * Affine::rotate(30f64.to_radians());
+        let full = g.xf * child_xf;
+        let corners = rects.iter().flat_map(|r| [(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)]).map(|(x, y)| full * Point::new(x, y));
+        let want = corners.fold(None::<Rect>, |acc, p| Some(acc.map_or(Rect::from_points(p, p), |r| r.union_pt(p)))).unwrap();
+        let got = g.bounds();
+        for (a, b) in [(got.x0, want.x0), (got.y0, want.y0), (got.x1, want.x1), (got.y1, want.y1)] {
+            assert!((a - b).abs() < 1e-9, "{got:?} != {want:?}");
+        }
+        // The box of the children's rotated boxes is larger.
+        let boxes = rects.iter().map(|r| g.xf.transform_rect_bbox(child_xf.transform_rect_bbox(*r))).reduce(|a, b| a.union(b)).unwrap();
+        assert!(boxes.height() > got.height() + 1.0);
     }
 
     #[test]

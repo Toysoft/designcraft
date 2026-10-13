@@ -775,6 +775,112 @@ fn round_trips_anchored_objects() {
     assert_eq!(s.objects[1].position, AnchorPosition::AboveLine { align: AnchorAlign::Center, space_before: 3.0, space_after: 4.0 });
 }
 
+/// Anchored settings an item leaves unset come from its object style chain, attribute by attribute.
+#[test]
+fn anchored_objects_take_unset_settings_from_object_styles() {
+    use designcraft_doc::{AnchorPosition, anchored::AnchorRelative as R};
+    let styles = STYLES.replace(
+        r#"<ObjectStyle Self="ObjectStyle/$ID/[None]" Name="$ID/[None]"/>"#,
+        r#"<ObjectStyle Self="ObjectStyle/$ID/[None]" Name="$ID/[None]">
+          <AnchoredObjectSetting AnchoredPosition="InlinePosition" SpineRelative="false" LockPosition="false" PinPosition="true"
+            AnchorPoint="BottomRightAnchor" HorizontalAlignment="LeftAlign" HorizontalReferencePoint="TextFrame"
+            VerticalAlignment="BottomAlign" VerticalReferencePoint="LineBaseline" AnchorXoffset="0" AnchorYoffset="0" AnchorSpaceAbove="0"/>
+        </ObjectStyle>
+        <ObjectStyle Self="ObjectStyle/Side" Name="Side"><AnchoredObjectSetting HorizontalReferencePoint="PageMargins" PinPosition="false"/></ObjectStyle>
+        <ObjectStyle Self="ObjectStyle/Note" Name="Note"><Properties><BasedOn type="object">ObjectStyle/Side</BasedOn></Properties></ObjectStyle>"#,
+    );
+    let rect = |style: &str, setting: &str| {
+        format!(
+            r#"<Rectangle Self="r{style}" AppliedObjectStyle="ObjectStyle/{style}" ItemTransform="1 0 0 1 0 0">
+              <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+                <PathPointType Anchor="0 0"/><PathPointType Anchor="0 10"/><PathPointType Anchor="10 10"/><PathPointType Anchor="10 0"/>
+              </PathPointArray></GeometryPathType></PathGeometry></Properties>
+              <AnchoredObjectSetting AnchoredPosition="Anchored" {setting}/>
+            </Rectangle>"#
+        )
+    };
+    let story = format!(
+        r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+          <ParagraphStyleRange><CharacterStyleRange><Content>a</Content>{}{}{}</CharacterStyleRange></ParagraphStyleRange>
+        </Story></idPkg:Story>"#,
+        rect("$ID/[None]", r#"AnchorXoffset="5" AnchorYoffset="-3""#),
+        rect("$ID/[None]", r#"AnchorPoint="TopLeftAnchor" VerticalReferencePoint="PageEdge""#),
+        rect("Note", r#"AnchorXoffset="2""#),
+    );
+    let d = import_idml(&fixture_with_table_styles(&styles, &story)).unwrap();
+    let s = d.stories.values().find(|s| !s.objects.is_empty()).unwrap();
+    let custom = |x_relative, y_relative, x_offset, y_offset, object_point, keep_within_column| AnchorPosition::Custom {
+        x_relative,
+        y_relative,
+        x_offset,
+        y_offset,
+        object_point,
+        ref_point: 6,
+        keep_within_column,
+    };
+    let positions: Vec<_> = s.objects.iter().map(|o| o.position.clone()).collect();
+    assert_eq!(
+        positions,
+        [
+            custom(R::TextFrame, R::Anchor, -5.0, -3.0, 8, true),
+            custom(R::TextFrame, R::PageEdge, 0.0, 0.0, 0, true),
+            custom(R::PageMargin, R::Anchor, -2.0, 0.0, 8, false),
+        ]
+    );
+}
+
+/// IDML measures a left-aligned anchored object's X offset leftwards; the document model and
+/// composition measure every X offset rightwards.
+#[test]
+fn left_aligned_anchored_x_offsets_flip_at_the_idml_boundary() {
+    use designcraft_doc::AnchorPosition;
+    let rect = |id: &str, align: &str, x: &str| {
+        format!(
+            r#"<Rectangle Self="{id}" ItemTransform="1 0 0 1 0 0">
+              <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+                <PathPointType Anchor="0 0"/><PathPointType Anchor="0 10"/><PathPointType Anchor="10 10"/><PathPointType Anchor="10 0"/>
+              </PathPointArray></GeometryPathType></PathGeometry></Properties>
+              <AnchoredObjectSetting AnchoredPosition="Anchored" AnchorPoint="TopLeftAnchor" HorizontalReferencePoint="TextFrame"
+                HorizontalAlignment="{align}" VerticalAlignment="TopAlign" VerticalReferencePoint="PageEdge" AnchorXoffset="{x}" AnchorYoffset="0"/>
+            </Rectangle>"#
+        )
+    };
+    let story = format!(
+        r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+          <ParagraphStyleRange><CharacterStyleRange><Content>a</Content>{}{}{}</CharacterStyleRange></ParagraphStyleRange>
+        </Story></idPkg:Story>"#,
+        rect("left", "LeftAlign", "-108"),
+        rect("zero", "LeftAlign", "0"),
+        rect("center", "CenterAlign", "116"),
+    );
+    let d = import_idml(&fixture_with_story(&story)).unwrap();
+    let x_offsets = |d: &Document| -> Vec<f64> {
+        let s = d.stories.values().find(|s| !s.objects.is_empty()).unwrap();
+        s.objects.iter().map(|o| if let AnchorPosition::Custom { x_offset, .. } = o.position { x_offset } else { f64::NAN }).collect()
+    };
+    assert_eq!(x_offsets(&d), [108.0, 0.0, 116.0]);
+    // The left-aligned object lands 108 pt right of the reference point.
+    let sid = d.stories.iter().find(|(_, s)| !s.objects.is_empty()).map(|(id, _)| *id).unwrap();
+    let cs = designcraft_compose::compose_story(&d, sid, &Default::default());
+    let placed: Vec<_> = cs.frames.iter().flat_map(|f| &f.objects).collect();
+    let x = |i: usize| placed.iter().find(|o| o.index == i).unwrap().origin.x;
+    assert!((x(0) - x(1) - 108.0).abs() < 1e-6, "{} {}", x(0), x(1));
+    // Export writes the original IDML values back.
+    let bytes = export_idml(&d);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut stories = String::new();
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i).unwrap();
+        if f.name().starts_with("Stories/") {
+            std::io::Read::read_to_string(&mut f, &mut stories).unwrap();
+        }
+    }
+    for v in [r#"AnchorXoffset="-108""#, r#"AnchorXoffset="0""#, r#"AnchorXoffset="116""#] {
+        assert!(stories.contains(v), "{v} missing");
+    }
+    assert_eq!(x_offsets(&import_idml(&export_idml(&d)).unwrap()), [108.0, 0.0, 116.0]);
+}
+
 #[test]
 fn round_trips_frames_with_pasted_in_items() {
     let mut d = Document::new(&NewDocument::default());

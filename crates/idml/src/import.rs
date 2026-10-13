@@ -1835,20 +1835,34 @@ impl<'r> Importer<'r> {
                         let has_text = c.find_all("TextFrame").next().is_some();
                         if !has_text && let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY) {
                             use designcraft_doc::anchored::AnchorAlign as A;
-                            let set = c.find("AnchoredObjectSetting");
-                            let get = |k: &str| set.and_then(|s| s.num(k)).unwrap_or(0.0);
-                            let position = match set.and_then(|s| s.get("AnchoredPosition")) {
-                                Some("AboveLine") => designcraft_doc::AnchorPosition::AboveLine {
-                                    align: match set.and_then(|s| s.get("HorizontalAlignment")) {
-                                        Some("CenterAlign") => A::Center,
-                                        Some("RightAlign") => A::Right,
+                            // Each setting the item leaves unset comes from its object style chain,
+                            // then from the IDML defaults.
+                            let levels: Vec<&El> = std::iter::once(c).chain(self.object_style_chain(c)).collect();
+                            let s = |k: &str| {
+                                let set = levels.iter().filter_map(|l| l.find("AnchoredObjectSetting")).find_map(|x| x.get(k));
+                                set.unwrap_or(match k {
+                                    "AnchoredPosition" => "InlinePosition",
+                                    "AnchorPoint" => "BottomRightAnchor",
+                                    "HorizontalAlignment" => "LeftAlign",
+                                    "HorizontalReferencePoint" => "TextFrame",
+                                    "VerticalAlignment" => "BottomAlign",
+                                    "VerticalReferencePoint" => "LineBaseline",
+                                    "PinPosition" => "true",
+                                    _ => "",
+                                })
+                            };
+                            let get = |k: &str| s(k).trim().parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(0.0);
+                            let position = match s("AnchoredPosition") {
+                                "AboveLine" => designcraft_doc::AnchorPosition::AboveLine {
+                                    align: match s("HorizontalAlignment") {
+                                        "CenterAlign" => A::Center,
+                                        "RightAlign" => A::Right,
                                         _ => A::Left,
                                     },
                                     space_before: get("AnchorSpaceAbove"),
                                     space_after: get("AnchorYoffset"),
                                 },
-                                Some("Anchored") => {
-                                    let s = |k: &str| set.and_then(|x| x.get(k)).unwrap_or("");
+                                "Anchored" => {
                                     let col = match s("HorizontalAlignment") {
                                         "CenterAlign" => 1,
                                         "RightAlign" => 2,
@@ -1862,7 +1876,8 @@ impl<'r> Importer<'r> {
                                     designcraft_doc::AnchorPosition::Custom {
                                         x_relative: names::anchor_rel_in(s("HorizontalReferencePoint")),
                                         y_relative: names::anchor_rel_in(s("VerticalReferencePoint")),
-                                        x_offset: get("AnchorXoffset"),
+                                        // IDML measures a left-aligned object's X offset leftwards.
+                                        x_offset: if col == 0 { 0.0 - get("AnchorXoffset") } else { get("AnchorXoffset") },
                                         y_offset: get("AnchorYoffset"),
                                         object_point: names::anchor_in(s("AnchorPoint")),
                                         ref_point: row * 3 + col,
@@ -1987,25 +2002,33 @@ impl<'r> Importer<'r> {
         })
     }
 
-    /// Resolve an item attribute, falling back to its object style chain.
-    fn attr_or_style(&self, e: &El, k: &str) -> Option<String> {
-        if let Some(v) = e.get(k) {
-            return Some(v.to_string());
-        }
+    /// An item's object style chain: its applied style, the styles that one is based on, then
+    /// `[None]` (cycle-safe).
+    fn object_style_chain(&self, e: &El) -> Vec<&El> {
+        let mut chain: Vec<&El> = Vec::new();
         let mut os = e.get("AppliedObjectStyle").map(str::to_string);
-        let mut depth = 0;
         while let Some(id) = os {
-            depth += 1;
-            if depth > 16 {
+            let Some(s) = self.object_els.get(&id) else { break };
+            if chain.len() >= 16 || chain.iter().any(|c| std::ptr::eq(*c, s)) {
                 break;
             }
-            let Some(s) = self.object_els.get(&id) else { break };
-            if let Some(v) = s.get(k) {
-                return Some(v.to_string());
-            }
-            os = s.prop("BasedOn").map(|b| if b.starts_with("ObjectStyle/") { b } else { format!("ObjectStyle/{}", names::escape_id(&b)) });
+            chain.push(s);
+            os = s.prop("BasedOn").map(|b| {
+                let b = b.trim();
+                if b.starts_with("ObjectStyle/") { b.to_string() } else { format!("ObjectStyle/{}", names::escape_id(b)) }
+            });
         }
-        None
+        if let Some(none) = self.object_els.get("ObjectStyle/$ID/[None]")
+            && !chain.iter().any(|c| std::ptr::eq(*c, none))
+        {
+            chain.push(none);
+        }
+        chain
+    }
+
+    /// Resolve an item attribute, falling back to its object style chain.
+    fn attr_or_style(&self, e: &El, k: &str) -> Option<String> {
+        e.get(k).or_else(|| self.object_style_chain(e).into_iter().find_map(|s| s.get(k))).map(str::to_string)
     }
 
     fn stroke_from(&mut self, e: &El, item: Option<&El>) -> Stroke {
