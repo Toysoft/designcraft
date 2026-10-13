@@ -472,6 +472,11 @@ pub struct Perf {
     pub fps: f64,
 }
 
+/// The system clipboard's text, if it holds any (an image or an empty clipboard gives none).
+fn read_system_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok().filter(|t| !t.is_empty())
+}
+
 pub struct DesignApp {
     pending_pdf: Option<ImportedFile>,
     pub session: Session,
@@ -496,12 +501,9 @@ pub struct DesignApp {
     pub color_applied: bool,
     pub perf: Perf,
     pub synthetic: Vec<egui::Event>,
-    /// Paste chosen from a menu while typing: `(without formatting, system clipboard asked)`.
-    /// The system clipboard's text arrives as a later frame's `Event::Paste` (pasted by the
-    /// canvas); without one (an empty clipboard, no windowing) DesignCraft's own clipboard pastes.
-    pub paste_request: Option<(bool, bool)>,
-    /// The `Event::Paste` the canvas is about to take answers a Paste without Formatting.
-    pub paste_plain: bool,
+    /// The system clipboard's text, read when a paste is chosen (see `menus::activate`). A function
+    /// pointer, so tests can stand in for the clipboard.
+    pub system_clipboard_text: fn() -> Option<String>,
     /// Formatting affects text (`Some(true)`) or the container (`Some(false)`), as chosen in the
     /// Tools panel or with J; `None` follows the selection (text while typing).
     pub format_text: Option<bool>,
@@ -561,8 +563,7 @@ impl DesignApp {
             color_applied: false,
             perf: Perf::default(),
             synthetic: vec![],
-            paste_request: None,
-            paste_plain: false,
+            system_clipboard_text: read_system_clipboard,
             format_text: None,
             format_text_editing: false,
             story_editor: None,
@@ -618,27 +619,6 @@ impl DesignApp {
 
     pub fn status(&mut self, s: impl Into<String>) {
         self.ui.status = s.into();
-    }
-
-    /// Carry out a [`DesignApp::paste_request`]: ask the system clipboard first, then (when its
-    /// text didn't arrive) paste DesignCraft's own clipboard.
-    fn menu_paste(&mut self, ctx: &egui::Context) {
-        let Some((plain, asked)) = self.paste_request else { return };
-        if !asked {
-            self.paste_request = Some((plain, true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-            ctx.request_repaint();
-            return;
-        }
-        self.paste_request = None;
-        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))) {
-            self.paste_plain = plain;
-        } else {
-            let id = if plain { "edit.pasteWithoutFormatting" } else { "edit.paste" };
-            if let Err(e) = self.run(id, json!({})) {
-                self.status(e);
-            }
-        }
     }
 
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
@@ -797,7 +777,6 @@ impl DesignApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
-        self.menu_paste(ctx);
         if !self.color_applied {
             self.color_applied = true;
             if let Some(cs) = self.ui.color_settings.clone() {

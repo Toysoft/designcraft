@@ -1915,7 +1915,15 @@ pub fn activate(app: &mut DesignApp, id: &str, params: &Value) {
             "edit.copy" => return app.synthetic.push(egui::Event::Copy),
             "edit.cut" => return app.synthetic.push(egui::Event::Cut),
             "edit.paste" | "edit.pasteWithoutFormatting" => {
-                app.paste_request = Some((id == "edit.pasteWithoutFormatting", false));
+                // Read the system clipboard now and paste once: its text, formatted only when it is
+                // what was copied here. Without text, DesignCraft's own clipboard pastes.
+                let params = match (app.system_clipboard_text)() {
+                    Some(text) => json!({"text": text}),
+                    None => json!({}),
+                };
+                if let Err(e) = app.run(id, params) {
+                    app.status(e);
+                }
                 return;
             }
             _ => {}

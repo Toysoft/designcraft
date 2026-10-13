@@ -1490,8 +1490,8 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             }
             egui::Event::Paste(t) if wants_text => {
                 // Formatted when the system clipboard still holds what was copied here;
-                // Shift (⇧⌘V) or Paste without Formatting pastes plain text.
-                let plain = ui.input(|i| i.modifiers.shift) || std::mem::take(&mut app.paste_plain);
+                // Shift (⇧⌘V) pastes plain text.
+                let plain = ui.input(|i| i.modifiers.shift);
                 let id = if plain { "edit.pasteWithoutFormatting" } else { "edit.paste" };
                 if let Err(e) = app.run(id, json!({"text": t})) {
                     app.status(e);
@@ -2094,19 +2094,28 @@ mod text_editing_tests {
         t.step(vec![], egui::Modifiers::NONE, Some("edit.copy"));
         let out = t.step(vec![], egui::Modifiers::NONE, None);
         assert!(out.platform_output.commands.contains(&egui::OutputCommand::CopyText("two".into())), "{:?}", out.platform_output.commands);
-        // Paste asks for the system clipboard's text and pastes what arrives.
+        // Text copied from elsewhere pastes once, as it is.
         t.select(TEXT.len(), TEXT.len());
-        // (A native menu item is chosen before `logic`, which asks in the same frame.)
-        let out = t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
-        assert!(out.viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::RequestPaste));
-        t.step(vec![egui::Event::Paste(" from elsewhere".into())], egui::Modifiers::NONE, None);
-        assert_eq!(t.text(), "one two three from elsewhere");
-        // Nothing arrives (an empty system clipboard): DesignCraft's own clipboard pastes.
+        t.app.system_clipboard_text = || Some(" from elsewhere".into());
         t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
-        for _ in 0..3 {
-            t.step(vec![], egui::Modifiers::NONE, None);
-        }
+        assert_eq!(t.text(), "one two three from elsewhere");
+        // An empty system clipboard: DesignCraft's own clipboard pastes, once.
+        t.app.system_clipboard_text = || None;
+        t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
         assert_eq!(t.text(), "one two three from elsewheretwo");
+    }
+
+    #[test]
+    fn pasting_what_was_copied_here_pastes_it_once() {
+        let mut t = App::new();
+        t.app.select_tool("type");
+        t.select(4, 7);
+        t.step(vec![], egui::Modifiers::NONE, Some("edit.copy"));
+        // The system clipboard holds the same text: one paste, not two.
+        t.app.system_clipboard_text = || Some("two".into());
+        t.select(TEXT.len(), TEXT.len());
+        t.step(vec![], egui::Modifiers::NONE, Some("edit.paste"));
+        assert_eq!(t.text(), "one two threetwo");
     }
 
     #[test]
