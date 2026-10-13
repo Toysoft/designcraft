@@ -1443,6 +1443,11 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     if resp.clicked() || resp.drag_started() {
         resp.request_focus();
     }
+    // Arrow keys, Tab and Escape belong to the canvas (caret, nudge, tab character, deselect).
+    // Without the lock egui moves focus to a neighbouring widget, and the next Space or Return
+    // clicks it while typing still reaches the text.
+    let lock = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+    ui.memory_mut(|m| m.set_focus_lock_filter(resp.id, lock));
     // Both split panes show the same document, but only the focused pane dispatches its keys.
     if app.pane != app.focus_pane || (ui.ctx().text_edit_focused() && !resp.has_focus()) {
         return;
@@ -1796,6 +1801,46 @@ mod tests {
             right_click(&mut h, p);
             assert!(h.query_by_label("   Points").is_none());
         }
+    }
+
+    /// egui moves keyboard focus on a plain arrow key or Tab, and Space/Return then clicks the
+    /// focused widget (e.g. the status bar's spread buttons) while typing still reaches the text.
+    #[test]
+    fn arrow_keys_and_tab_keep_keyboard_focus_on_the_canvas() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 3})).unwrap();
+        let f = app.run("frame.create", json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Hello"})).unwrap();
+        app.select_tool("type");
+        let mut h = harness(app);
+        let p = {
+            let app = h.state();
+            let st = app.session.active().unwrap();
+            let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+            let xf = Xf::new(app.canvas_rect.unwrap(), app.view().unwrap());
+            xf.to_screen(layout.xf(SpreadRef::Doc(0)) * Point::new(100.0, 60.0))
+        };
+        h.hover_at(p);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(2);
+        let focus = h.ctx.memory(|m| m.focused());
+        assert!(focus.is_some(), "a click on the canvas takes keyboard focus");
+        let view = *h.state().view().unwrap();
+        for key in [egui::Key::ArrowDown, egui::Key::Space, egui::Key::ArrowRight, egui::Key::Enter, egui::Key::Tab, egui::Key::Escape] {
+            h.key_press(key);
+            if key == egui::Key::Space {
+                h.event(egui::Event::Text(" ".into()));
+            }
+            h.run_steps(2);
+            assert_eq!(h.ctx.memory(|m| m.focused()), focus, "{key:?} keeps keyboard focus on the canvas");
+        }
+        let v = *h.state().view().unwrap();
+        assert_eq!((v.origin, v.zoom), (view.origin, view.zoom), "the view stays where it was");
+        let text = h.state_mut().session.execute("story.get", &json!({"story": f["story"]})).unwrap()["text"].clone();
+        assert_eq!(text, "Hello \n\t", "Space, Return and Tab reach the text");
     }
 
     #[test]
