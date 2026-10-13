@@ -159,6 +159,9 @@ struct ItemCtx {
 
 struct Importer<'r> {
     read_link: &'r dyn Fn(&str) -> Option<Vec<u8>>,
+    /// The document uses a Japanese composer somewhere. Only those apply the Japanese leading
+    /// model and character alignment, which InDesign also stores (as defaults) in Western documents.
+    japanese_composer: bool,
     next_id: u64,
     settings: DocSettings,
     default_margins: Option<(Margins, Columns)>,
@@ -184,6 +187,8 @@ struct Importer<'r> {
     table_names: HashMap<String, String>,
     /// Object style Self → element (attribute fallback for page items).
     object_els: HashMap<String, El>,
+    /// Paragraph style Self → element (attribute fallback for partly overridden settings).
+    para_els: HashMap<String, El>,
     layers: Vec<Layer>,
     layer_ids: HashMap<String, LayerId>,
     stories: BTreeMap<StoryId, Story>,
@@ -237,6 +242,32 @@ fn lab_to_color(l: f32, a: f32, b: f32) -> Color {
     Color::rgb(rgb[0], rgb[1], rgb[2])
 }
 
+/// InDesign's Japanese composers: `HL Composer J` (paragraph) and `HL Single J` (single-line).
+fn is_japanese_composer(name: &str) -> bool {
+    let n = name.trim_start_matches("$ID/");
+    n.ends_with(" J") || n.contains("Japanese")
+}
+
+/// Chinese, Japanese or Korean script (kana, ideographs, Hangul, CJK punctuation and full-width forms).
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
+}
+
+/// Whether the Japanese leading model and character alignment apply: some element in `top`
+/// (styles, stories, …) names a Japanese composer, or the text has CJK characters. InDesign also
+/// stores those attributes, as defaults, in Western documents, where its composers ignore them.
+/// Iterative, so deeply nested markup can't overflow the stack.
+fn uses_japanese_composer(top: &[El]) -> bool {
+    let mut stack: Vec<&El> = top.iter().collect();
+    while let Some(e) = stack.pop() {
+        if e.get("Composer").is_some_and(is_japanese_composer) || (e.local() == "Content" && e.text_content().chars().any(is_cjk)) {
+            return true;
+        }
+        stack.extend(e.elements());
+    }
+    false
+}
+
 fn nums(s: &str) -> Vec<f64> {
     s.split_whitespace().filter_map(|v| v.parse().ok()).collect()
 }
@@ -271,6 +302,7 @@ impl<'r> Importer<'r> {
         styles.paragraph.iter_mut().for_each(|s| s.based_on = None);
         Importer {
             read_link,
+            japanese_composer: false,
             next_id: 0,
             settings: DocSettings::default(),
             default_margins: None,
@@ -292,6 +324,7 @@ impl<'r> Importer<'r> {
             cell_names: HashMap::new(),
             table_names: HashMap::new(),
             object_els: HashMap::new(),
+            para_els: HashMap::new(),
             layers: Vec::new(),
             layer_ids: HashMap::new(),
             stories: BTreeMap::new(),
@@ -321,6 +354,7 @@ impl<'r> Importer<'r> {
     }
 
     fn run(&mut self, _root: &El, top: &[El]) -> Result<()> {
+        self.japanese_composer = uses_japanese_composer(top);
         // Preferences first (page size, facing pages).
         for e in top {
             match e.local() {
@@ -892,6 +926,9 @@ impl<'r> Importer<'r> {
             self.object_names.insert(id.clone(), n);
             self.object_els.insert(id.clone(), e.clone());
         }
+        for (id, e) in &paras {
+            self.para_els.insert(id.clone(), e.clone());
+        }
         for (_, e) in &paras {
             let name = names::style_name_in(PARA_BUILTINS, e.get("Name").unwrap_or(""));
             let based_on = if name == designcraft_doc::NO_PARA_STYLE { None } else { self.based_on(e, true) };
@@ -1143,6 +1180,13 @@ impl<'r> Importer<'r> {
     fn para_style_ref(&self, r: &str) -> String {
         self.para_names.get(r).cloned().unwrap_or_else(|| names::style_name_in(PARA_BUILTINS, &unescape_id(r.trim_start_matches("ParagraphStyle/"))))
     }
+    /// A character style reference written as an element's text (nested, line and GREP styles).
+    /// A style name may end in a space, so the reference is used as written when it names a
+    /// style; only otherwise is surrounding whitespace dropped.
+    fn listed_char_style_ref(&self, r: &str) -> String {
+        if self.char_names.contains_key(r) { self.char_style_ref(r) } else { self.char_style_ref(r.trim()) }
+    }
+
     fn char_style_ref(&self, r: &str) -> String {
         self.char_names.get(r).cloned().unwrap_or_else(|| names::style_name_in(CHAR_BUILTINS, &unescape_id(r.trim_start_matches("CharacterStyle/"))))
     }
@@ -1176,8 +1220,10 @@ impl<'r> Importer<'r> {
         a.trailing_aki = e.num("TrailingAki").map(|v| (v >= 0.0).then_some(v));
         a.tsume = e.num("Tsume").map(|v| (v / 100.0).clamp(0.0, 1.0));
         a.jidori = e.num("Jidori").map(|v| v.clamp(0.0, 10000.0) as u32);
-        a.leading_model = e.prop("LeadingModel").and_then(|v| crate::cjk::leading_in(&v));
-        a.character_alignment = e.prop("CharacterAlignment").and_then(|v| crate::cjk::alignment_in(&v));
+        if self.japanese_composer {
+            a.leading_model = e.prop("LeadingModel").and_then(|v| crate::cjk::leading_in(&v));
+            a.character_alignment = e.prop("CharacterAlignment").and_then(|v| crate::cjk::alignment_in(&v));
+        }
         a.h_scale = e.num("HorizontalScale").map(|v| v / 100.0);
         a.v_scale = e.num("VerticalScale").map(|v| v / 100.0);
         a.baseline_shift = e.num("BaselineShift");
@@ -1329,7 +1375,7 @@ impl<'r> Importer<'r> {
                     let t = |k: &str| it.find(k).map(|x| x.text_content()).unwrap_or_default();
                     let d = it.find("Delimiter");
                     designcraft_doc::NestedStyle {
-                        style: self.char_style_ref(t("AppliedCharacterStyle").trim()),
+                        style: self.listed_char_style_ref(&t("AppliedCharacterStyle")),
                         through: t("Inclusive").trim() != "false",
                         count: t("Repetition").trim().parse().unwrap_or(1),
                         until: names::nested_until_in(d.and_then(|d| d.get("type")).unwrap_or("enumeration"), &t("Delimiter")),
@@ -1344,7 +1390,7 @@ impl<'r> Importer<'r> {
                 .map(|it| {
                     let t = |k: &str| it.find(k).map(|x| x.text_content()).unwrap_or_default();
                     designcraft_doc::NestedLineStyle {
-                        style: self.char_style_ref(t("AppliedCharacterStyle").trim()),
+                        style: self.listed_char_style_ref(&t("AppliedCharacterStyle")),
                         lines: t("LineCount").trim().parse().unwrap_or(1),
                     }
                 })
@@ -1356,7 +1402,7 @@ impl<'r> Importer<'r> {
                 .find_all("ListItem")
                 .map(|it| {
                     let t = |k: &str| it.find(k).map(|x| x.text_content()).unwrap_or_default();
-                    designcraft_doc::GrepStyle { style: self.char_style_ref(t("AppliedCharacterStyle").trim()), pattern: t("GrepExpression") }
+                    designcraft_doc::GrepStyle { style: self.listed_char_style_ref(&t("AppliedCharacterStyle")), pattern: t("GrepExpression") }
                 })
                 .collect();
             a.grep_styles = Some(v);
@@ -1466,27 +1512,56 @@ impl<'r> Importer<'r> {
     }
 
     fn rule(&mut self, e: &El, k: &str) -> Option<Rule> {
-        let on = e.boolean(k);
-        let weight = e.num(&format!("{k}LineWeight"));
+        // A style or range can set some of a rule's settings (such as only its colour); the others
+        // come from its paragraph style chain, so the rule is whole.
+        let fields = ["", "LineWeight", "Color", "Tint", "Width", "Offset", "LeftIndent", "RightIndent"];
+        if !fields.iter().any(|f| e.prop(&format!("{k}{f}")).is_some()) {
+            return None;
+        }
+        let v: Vec<Option<String>> = fields.iter().map(|f| self.para_setting(e, &format!("{k}{f}"))).collect();
+        let get = |i: usize| v.get(i).cloned().flatten();
+        let num = |i: usize| get(i).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
+        let on = get(0).map(|v| v.trim() == "true");
+        let weight = num(1);
         on.or(weight.map(|_| false))?;
         let mut r = Rule { on: on.unwrap_or(false), ..Rule::default() };
         if let Some(w) = weight {
             r.weight = w;
         }
-        if let Some(c) = e.prop(&format!("{k}Color")) {
+        if let Some(t) = tint(num(3)) {
+            r.tint = t;
+        }
+        r.column_width = get(4).is_none_or(|w| w.trim() != "TextWidth");
+        r.offset = num(5).unwrap_or(0.0);
+        r.left_indent = num(6).unwrap_or(0.0);
+        r.right_indent = num(7).unwrap_or(0.0);
+        if let Some(c) = get(2) {
             let c = c.trim();
             if c.contains('/') {
                 r.color = self.swatch_ref(c);
             }
         }
-        if let Some(t) = tint(e.num(&format!("{k}Tint"))) {
-            r.tint = t;
-        }
-        r.column_width = e.prop(&format!("{k}Width")).is_none_or(|w| w.trim() != "TextWidth");
-        r.offset = e.num(&format!("{k}Offset")).unwrap_or(0.0);
-        r.left_indent = e.num(&format!("{k}LeftIndent")).unwrap_or(0.0);
-        r.right_indent = e.num(&format!("{k}RightIndent")).unwrap_or(0.0);
         Some(r)
+    }
+
+    /// Paragraph setting `k` of `e` (a paragraph style or a range): its own, else from its
+    /// paragraph style chain (`BasedOn` of a style, the applied style of a range).
+    fn para_setting(&self, e: &El, k: &str) -> Option<String> {
+        if let Some(v) = e.prop(k) {
+            return Some(v);
+        }
+        let style_ref = |r: String| if r.starts_with("ParagraphStyle/") { r } else { format!("ParagraphStyle/{}", names::escape_id(&r)) };
+        let mut next =
+            if e.local() == "ParagraphStyle" { e.prop("BasedOn") } else { e.get("AppliedParagraphStyle").map(str::to_string) }.map(style_ref);
+        for _ in 0..16 {
+            let Some(id) = next else { break };
+            let s = self.para_els.get(&id)?;
+            if let Some(v) = s.prop(k) {
+                return Some(v);
+            }
+            next = s.prop("BasedOn").map(style_ref);
+        }
+        None
     }
 
     fn cell_style_ref(&self, reference: &str) -> String {
@@ -1854,11 +1929,12 @@ impl<'r> Importer<'r> {
                         let has_text = c.find_all("TextFrame").next().is_some();
                         if !has_text && let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY) {
                             use designcraft_doc::anchored::AnchorAlign as A;
-                            let set = c.find("AnchoredObjectSetting");
-                            let get = |k: &str| set.and_then(|s| s.num(k)).unwrap_or(0.0);
-                            let position = match set.and_then(|s| s.get("AnchoredPosition")) {
+                            // Settings the item doesn't state come from its object style.
+                            let setting = |k: &str| self.anchored_setting(c, k);
+                            let get = |k: &str| setting(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
+                            let position = match setting("AnchoredPosition").as_deref() {
                                 Some("AboveLine") => designcraft_doc::AnchorPosition::AboveLine {
-                                    align: match set.and_then(|s| s.get("HorizontalAlignment")) {
+                                    align: match setting("HorizontalAlignment").as_deref() {
                                         Some("CenterAlign") => A::Center,
                                         Some("RightAlign") => A::Right,
                                         _ => A::Left,
@@ -1867,23 +1943,23 @@ impl<'r> Importer<'r> {
                                     space_after: get("AnchorYoffset"),
                                 },
                                 Some("Anchored") => {
-                                    let s = |k: &str| set.and_then(|x| x.get(k)).unwrap_or("");
-                                    let col = match s("HorizontalAlignment") {
+                                    let s = |k: &str| setting(k).unwrap_or_default();
+                                    let col = match s("HorizontalAlignment").as_str() {
                                         "CenterAlign" => 1,
                                         "RightAlign" => 2,
                                         _ => 0,
                                     };
-                                    let row = match s("VerticalAlignment") {
+                                    let row = match s("VerticalAlignment").as_str() {
                                         "CenterAlign" => 1,
                                         "BottomAlign" => 2,
                                         _ => 0,
                                     };
                                     designcraft_doc::AnchorPosition::Custom {
-                                        x_relative: names::anchor_rel_in(s("HorizontalReferencePoint")),
-                                        y_relative: names::anchor_rel_in(s("VerticalReferencePoint")),
+                                        x_relative: names::anchor_rel_in(&s("HorizontalReferencePoint")),
+                                        y_relative: names::anchor_rel_in(&s("VerticalReferencePoint")),
                                         x_offset: get("AnchorXoffset"),
                                         y_offset: get("AnchorYoffset"),
-                                        object_point: names::anchor_in(s("AnchorPoint")),
+                                        object_point: names::anchor_in(&s("AnchorPoint")),
                                         ref_point: row * 3 + col,
                                         keep_within_column: s("PinPosition") == "true",
                                     }
@@ -2004,6 +2080,29 @@ impl<'r> Importer<'r> {
                 found
             })
         })
+    }
+
+    /// An anchored object setting of item `e`: its own `AnchoredObjectSetting` value, else its object
+    /// style chain's, else `[None]`'s. IDML writes on an item only the settings that differ from
+    /// its object style (a group's element often has just its position and alignment).
+    fn anchored_setting(&self, e: &El, k: &str) -> Option<String> {
+        const NONE: &str = "ObjectStyle/$ID/[None]";
+        let own = |el: &El| el.elements().find(|c| c.local() == "AnchoredObjectSetting").and_then(|s| s.get(k)).map(str::to_string);
+        if let Some(v) = own(e) {
+            return Some(v);
+        }
+        let mut os = Some(e.get("AppliedObjectStyle").unwrap_or(NONE).to_string());
+        let mut seen_none = false;
+        for _ in 0..16 {
+            let Some(id) = os else { break };
+            seen_none |= id == NONE;
+            let Some(s) = self.object_els.get(&id) else { break };
+            if let Some(v) = own(s) {
+                return Some(v);
+            }
+            os = s.prop("BasedOn").map(|b| if b.starts_with("ObjectStyle/") { b } else { format!("ObjectStyle/{}", names::escape_id(&b)) });
+        }
+        if seen_none { None } else { self.object_els.get(NONE).and_then(own) }
     }
 
     /// Resolve an item attribute, falling back to its object style chain.

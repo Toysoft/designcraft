@@ -844,6 +844,26 @@ fn cjk_character_attributes_import_from_independent_xml_and_round_trip() {
 }
 
 #[test]
+fn western_documents_ignore_the_japanese_leading_model_indesign_stores_by_default() {
+    // InDesign writes LeadingModelAkiBelow even into Western documents; its Western composers
+    // ignore it. Applied, it pulls a line of larger type up into the line above.
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]" Composer="HL Composer">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" LeadingModel="LeadingModelAkiBelow" CharacterAlignment="AlignEmCenter"><Content>WEEK</Content></CharacterStyleRange>
+      </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let doc = import_idml(&fixture_with_story(story)).unwrap();
+    let st = doc.stories.values().find(|s| s.text.contains("WEEK")).unwrap();
+    let a = &st.runs().next().unwrap().1.over;
+    assert_eq!(a.leading_model, None);
+    assert_eq!(a.character_alignment, None);
+    // A Japanese composer applies them, even to Latin text.
+    let japanese = story.replace(r#"Composer="HL Composer""#, r#"Composer="HL Composer J""#);
+    let doc = import_idml(&fixture_with_story(&japanese)).unwrap();
+    let st = doc.stories.values().find(|s| s.text.contains("WEEK")).unwrap();
+    assert_eq!(st.runs().next().unwrap().1.over.leading_model, Some(designcraft_doc::cjk::LeadingModel::AkiBelow));
+}
+
+#[test]
 fn warichu_imports_from_idml_and_round_trips() {
     let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
       <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
@@ -1478,4 +1498,90 @@ fn type_on_a_path_keeps_its_start_and_end_brackets() {
         assert!((pt.start - 30.0).abs() < 1e-6, "{pt:?}");
         assert_eq!(pt.end.map(|e| e.round()), end, "an end bracket at the path's end is no end bracket");
     }
+}
+
+#[test]
+fn style_names_ending_in_a_space_and_partial_rule_overrides_import() {
+    // Nested style "Decimals " (a name with a trailing space, as InDesign allows) and a label
+    // style that only recolours the rule of the style it is based on.
+    let styles = STYLES
+        .replace(
+            r#"  </RootCharacterStyleGroup>"#,
+            r#"    <CharacterStyle Self="CharacterStyle/Decimals " Name="Decimals " Position="Superscript"/>
+  </RootCharacterStyleGroup>"#,
+        )
+        .replace(
+            r#"  </RootParagraphStyleGroup>"#,
+            r#"    <ParagraphStyle Self="ParagraphStyle/Price" Name="Price">
+      <Properties><BasedOn type="string">$ID/[No paragraph style]</BasedOn>
+        <AllNestedStyles type="list"><ListItem type="record"><AppliedCharacterStyle type="object">CharacterStyle/Decimals </AppliedCharacterStyle><Delimiter type="enumeration">AnyCharacter</Delimiter><Repetition type="long">2</Repetition><Inclusive type="boolean">true</Inclusive></ListItem></AllNestedStyles>
+      </Properties>
+    </ParagraphStyle>
+    <ParagraphStyle Self="ParagraphStyle/Label white" Name="Label white" RuleAbove="true" RuleAboveLineWeight="16" RuleAboveOffset="-3">
+      <Properties><BasedOn type="string">$ID/[No paragraph style]</BasedOn><RuleAboveColor type="object">Color/Paper</RuleAboveColor></Properties>
+    </ParagraphStyle>
+    <ParagraphStyle Self="ParagraphStyle/Label black" Name="Label black">
+      <Properties><BasedOn type="object">ParagraphStyle/Label white</BasedOn><RuleAboveColor type="object">Color/Black</RuleAboveColor></Properties>
+    </ParagraphStyle>
+  </RootParagraphStyleGroup>"#,
+        );
+    let d = import_idml(&fixture_with_table_styles(&styles, STORY)).unwrap();
+    let style = |n: &str| d.styles.paragraph.iter().find(|s| s.name == n).unwrap();
+    let nested = style("Price").para.nested_styles.clone().unwrap();
+    assert_eq!(nested[0].style, "Decimals ", "the trailing space is part of the name");
+    let white = style("Label white").para.rule_above.clone().unwrap();
+    let black = style("Label black").para.rule_above.clone().unwrap();
+    assert!(black.on, "the rule stays on");
+    assert_eq!((black.weight, black.offset), (16.0, -3.0), "weight and offset come from the base style");
+    assert_ne!(black.color, white.color, "only the colour is overridden");
+}
+
+#[test]
+fn anchored_objects_take_unstated_settings_from_their_object_style() {
+    // InDesign writes an anchored item's settings on its object style when the item doesn't
+    // override them: the item here states none of its own.
+    use designcraft_doc::{AnchorPosition, AnchoredObject, anchored::AnchorAlign};
+    use std::io::Read;
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(40.0, 40.0, 400.0, 400.0), lid, "Above.", ParaFormat::default()).unwrap();
+    let b = designcraft_doc::Item::new(designcraft_doc::ItemId(d.alloc()), lid, Shape::Oval, shapes::ellipse(Rect::new(0.0, 0.0, 60.0, 30.0)));
+    d.story_mut(sid).unwrap().insert_object(0, AnchoredObject::new(b, AnchorPosition::Inline { y_offset: 0.0 }));
+    let bytes = export_idml(&d);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for i in 0..zip.len() {
+        let mut f = zip.by_index(i).unwrap();
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        files.push((f.name().to_string(), s));
+    }
+    // Drops every `<AnchoredObjectSetting …/>` (the exporter writes them empty).
+    let without_settings = |s: &str| -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find("<AnchoredObjectSetting") {
+            out.push_str(&rest[..i]);
+            let end = rest[i..].find("/>").unwrap() + i + 2;
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    };
+    let style = r#"<ObjectStyle Self="ObjectStyle/Above" Name="Above"><AnchoredObjectSetting AnchoredPosition="AboveLine" HorizontalAlignment="RightAlign" AnchorSpaceAbove="5"/></ObjectStyle>"#;
+    let mut styled = false;
+    for (name, s) in &mut files {
+        if name.starts_with("Stories/") && s.contains("<AnchoredObjectSetting") {
+            *s = without_settings(s).replace("<Oval ", r#"<Oval AppliedObjectStyle="ObjectStyle/Above" "#);
+        }
+        if s.contains("</RootObjectStyleGroup>") {
+            *s = s.replace("</RootObjectStyleGroup>", &format!("{style}</RootObjectStyleGroup>"));
+            styled = true;
+        }
+    }
+    assert!(styled, "the package has object styles");
+    let parts: Vec<(&str, &str)> = files.iter().filter(|(n, _)| n != "mimetype").map(|(n, s)| (n.as_str(), s.as_str())).collect();
+    let back = import_idml(&zip_files(&parts)).unwrap();
+    let s = back.stories.values().find(|s| !s.objects.is_empty()).unwrap();
+    assert_eq!(s.objects[0].position, AnchorPosition::AboveLine { align: AnchorAlign::Right, space_before: 5.0, space_after: 0.0 });
 }
