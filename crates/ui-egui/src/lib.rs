@@ -195,7 +195,7 @@ pub struct UiState {
     pub dynamic_spelling: bool,
     /// Preferences › Story Editor Display: text size (points).
     pub story_editor_size: f32,
-    /// Edit › Interface Language: supported codes are listed in `i18n::LANGUAGES`.
+    /// Preferences › General › Interface Language: supported codes are listed in `i18n::LANGUAGES`.
     pub language: String,
     /// Edit › Transparency Flattener Presets: "" (none), "high", "medium" or "low" for PDF export.
     pub flattener: String,

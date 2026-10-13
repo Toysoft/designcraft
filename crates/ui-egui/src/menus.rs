@@ -39,7 +39,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "app.language",
         "Interface Language",
         None,
-        "{lang: \"\"|de|fr|es|ja|zh|ar|pt-br|it|uk} — menus and panel names (the macOS menu bar follows on the next launch)",
+        "{lang?: \"\"|de|fr|es|ja|zh|ar|pt-br|it|uk} — menus and panel names (the macOS menu bar follows on the next launch); without lang, opens Preferences, where it is the first setting",
     ),
     (
         "app.flattener",
@@ -255,18 +255,6 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "cmd:edit.transparencyBlendSpace|Document CMYK|{\"space\": \"cmyk\"}",
             "<",
             "ui:app.colorSettings",
-            ">Interface Language",
-            "ui:app.language|English|{\"lang\": \"\"}",
-            "ui:app.language|Deutsch|{\"lang\": \"de\"}",
-            "ui:app.language|Français|{\"lang\": \"fr\"}",
-            "ui:app.language|Español|{\"lang\": \"es\"}",
-            "ui:app.language|日本語|{\"lang\": \"ja\"}",
-            "ui:app.language|简体中文|{\"lang\": \"zh\"}",
-            "ui:app.language|العربية|{\"lang\": \"ar\"}",
-            "ui:app.language|Português (Brasil)|{\"lang\": \"pt-br\"}",
-            "ui:app.language|Italiano|{\"lang\": \"it\"}",
-            "ui:app.language|Українська|{\"lang\": \"uk\"}",
-            "<",
             ">Transparency Flattener Presets",
             "ui:app.flattener|None (keep transparency)|{\"preset\": \"\"}",
             "ui:app.flattener|High Resolution|{\"preset\": \"high\"}",
@@ -864,7 +852,7 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             }
         }
         "app.language" => {
-            let v = p.get("lang").and_then(Value::as_str).unwrap_or("");
+            let Some(v) = p.get("lang").and_then(Value::as_str) else { return Some(app.run("app.preferences", json!({}))) };
             if !crate::i18n::LANGUAGES.iter().any(|(c, _)| *c == v) {
                 return Some(Err(format!("unknown language `{v}`")));
             }
@@ -1061,6 +1049,8 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             let list = app.session.prefs.autocorrect_list.iter().map(|(a, b)| format!("{a} → {b}")).collect::<Vec<_>>().join("\n");
             f["autocorrectText"] = json!(list);
             f["section"] = json!("general");
+            // The language previews as it changes; Cancel goes back to this one.
+            f["openedLanguage"] = json!(app.ui.language);
             app.ui.dialog = Some(crate::dialogs::Dialog::new("preferences", f));
             Ok(Value::Null)
         }
@@ -2648,6 +2638,16 @@ mod tests {
         assert_eq!(checked(&app, "app.language", &json!({"lang": "de"})), Some(true));
         assert_eq!(crate::i18n::tr(&app.ui.language, "Window"), "Fenster");
         assert!(run_ui(&mut app, "app.language", &json!({"lang": "xx"})).unwrap().is_err());
+        // The language is set in Preferences, not from a menu; without `lang` the command opens it.
+        let mut items = Vec::new();
+        for (_, entries) in menu_tree() {
+            walk(&entries, &mut items);
+        }
+        assert!(!items.iter().any(|(_, id, _)| id == "app.language"), "no menu item sets the language");
+        run_ui(&mut app, "app.language", &json!({})).unwrap().unwrap();
+        assert_eq!(app.ui.dialog.as_ref().map(|d| d.id.as_str()), Some("preferences"));
+        assert_eq!(app.ui.language, "de");
+        app.ui.dialog = None;
 
         run_ui(&mut app, "app.language", &json!({"lang": "zh"})).unwrap().unwrap();
         assert_eq!(app.ui.language, "zh");
@@ -2707,11 +2707,7 @@ mod tests {
         assert_eq!(restored.language, "uk");
         assert_eq!(crate::i18n::tr(&restored.language, "File"), "Файл");
         assert_eq!(crate::i18n::tr(&restored.language, "A custom name"), "A custom name");
-        assert!(menu_tree().iter().flat_map(|(_, entries)| entries.iter()).any(|entry| {
-            matches!(entry, Item::Sub(label, children) if label == "Interface Language" && children.iter().any(|child| {
-                matches!(child, Item::Cmd { label, id, params, .. } if label == "Українська" && id == "app.language" && params["lang"] == "uk")
-            }))
-        }));
+        assert!(crate::i18n::LANGUAGES.contains(&("uk", "Українська")), "Preferences lists Ukrainian by its own name");
     }
 
     #[test]

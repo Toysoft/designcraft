@@ -1083,6 +1083,21 @@ fn preferences(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog, max_he
                     });
                 }
                 _ => {
+                    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Interface Language")).font(semibold(12.0)));
+                    // Each language by its own name, so the list reads the same in every interface language.
+                    let current = crate::i18n::LANGUAGES.iter().find(|(code, _)| *code == app.ui.language).map_or("English", |(_, name)| *name);
+                    egui::ComboBox::from_id_salt("pref_language").width(180.0).height(400.0).selected_text(crate::rtl::widget(ui, current)).show_ui(
+                        ui,
+                        |ui| {
+                            for (code, name) in crate::i18n::LANGUAGES {
+                                if ui.selectable_label(*code == app.ui.language, crate::rtl::widget(ui, *name)).clicked() {
+                                    // Applied by `show` right after this frame, which has `&mut DesignApp`.
+                                    d.fields.insert("applyLanguage".into(), json!(code));
+                                }
+                            }
+                        },
+                    );
+                    ui.add_space(6.0);
                     crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "When Scaling")).font(semibold(12.0)));
                     check(ui, d, "scaleStrokes", crate::i18n::tr(&app.ui.language, "Include Stroke Weight"));
                     ui.add_space(6.0);
@@ -1728,16 +1743,33 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             });
         });
     });
+    // Preferences › General › Interface Language takes effect at once, like any other app setting.
+    if let Some(lang) = d.fields.remove("applyLanguage")
+        && let Err(e) = app.run("app.language", json!({"lang": lang}))
+    {
+        d.fields.insert("status".into(), json!(e));
+    }
     app.ui.dialog = Some(d);
     match result {
         Some(true) => {
             let _ = confirm(app);
         }
-        Some(false) => {
-            app.ui.dialog = None;
-            app.cancel_pdf_import();
-        }
+        Some(false) => cancel(app),
         None => {}
+    }
+}
+
+/// Close the open dialog without applying it. Preferences also puts back the interface language
+/// it opened with, since choosing one previews it at once.
+pub fn cancel(app: &mut DesignApp) {
+    let d = app.ui.dialog.take();
+    app.cancel_pdf_import();
+    if let Some(d) = d
+        && d.id == "preferences"
+        && let Some(lang) = d.fields.get("openedLanguage").and_then(Value::as_str)
+        && lang != app.ui.language
+    {
+        let _ = app.run("app.language", json!({"lang": lang}));
     }
 }
 
@@ -3836,6 +3868,68 @@ mod tests {
     }
 
     #[test]
+    fn preferences_first_setting_switches_interface_language() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("app.preferences", json!({})).unwrap();
+        let ctx = dialog_context("");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1178.0, 814.0));
+        for _ in 0..3 {
+            dialog_frame(&mut app, &ctx, screen, vec![]);
+        }
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        let heading = visible_label(&labels, screen, "Interface Language");
+        let combo = visible_label(&labels, screen, "English");
+        let scaling = visible_label(&labels, screen, "When Scaling");
+        assert!(heading.bottom() <= combo.top() && combo.bottom() <= scaling.top(), "the language comes first: {heading:?} {combo:?} {scaling:?}");
+        let pane = labels.iter().filter(|(_, rect, _)| rect.left() >= heading.left() - 1.0 && rect.top() < heading.top());
+        assert!(pane.clone().all(|(text, _, _)| text == "Preferences"), "nothing above it: {:?}", pane.collect::<Vec<_>>());
+
+        // Choosing a language applies it at once; the dialog stays open.
+        click_dialog(&mut app, &ctx, screen, combo.center());
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        for (_, name) in crate::i18n::LANGUAGES {
+            assert!(labels.iter().any(|(text, _, _)| text == name), "{name} is listed by its own name");
+        }
+        let deutsch = visible_label(&labels, screen, "Deutsch").center();
+        click_dialog(&mut app, &ctx, screen, deutsch);
+        assert_eq!(app.ui.language, "de");
+        assert_eq!(app.ui.dialog.as_ref().map(|d| d.id.as_str()), Some("preferences"));
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        let heading = visible_label(&labels, screen, "Sprache der Oberfläche");
+        let combo = visible_label(&labels, screen, "Deutsch");
+
+        // The names stay endonyms in the German interface.
+        click_dialog(&mut app, &ctx, screen, combo.center());
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        for name in ["English", "Français", "日本語", "Українська"] {
+            assert!(labels.iter().any(|(text, _, _)| text == name), "{name}");
+        }
+        click_dialog(&mut app, &ctx, screen, heading.center());
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        assert!(!labels.iter().any(|(text, _, _)| text == "Français"), "the list closes");
+
+        // The control channel's command and the combo show the same setting.
+        app.run("app.language", json!({"lang": "ja"})).unwrap();
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        assert!(labels.iter().any(|(text, _, _)| text == "日本語"));
+        assert!(labels.iter().any(|(text, _, _)| text == crate::i18n::tr("ja", "Interface Language")));
+
+        // Cancel puts back the language the dialog opened with; OK keeps the choice.
+        let cancel_button = visible_label(&labels, screen, crate::i18n::tr("ja", "Cancel")).center();
+        click_dialog(&mut app, &ctx, screen, cancel_button);
+        assert!(app.ui.dialog.is_none());
+        assert_eq!(app.ui.language, "");
+        app.run("app.preferences", json!({})).unwrap();
+        app.run("app.language", json!({"lang": "it"})).unwrap();
+        confirm(&mut app).unwrap();
+        assert_eq!(app.ui.language, "it");
+        app.run("app.preferences", json!({})).unwrap();
+        app.run("app.language", json!({"lang": "uk"})).unwrap();
+        cancel(&mut app);
+        assert_eq!(app.ui.language, "it");
+    }
+
+    #[test]
     fn preferences_sidebar_scroll_keeps_selected_options_visible() {
         let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({})).unwrap();
@@ -3873,6 +3967,9 @@ mod tests {
         }
         let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
         let body = visible_label(&labels, screen, "When Scaling").center();
+        // The last General option sits below this short viewport.
+        scroll_dialog(&mut app, &ctx, screen, body, egui::vec2(0.0, -600.0));
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
         let option = "Absolute Numbering (instead of Section Numbering)";
         let (_, rect, clip) = labels.iter().find(|(text, _, _)| text == option).unwrap();
         assert!(rect.right() > clip.right(), "rightmost option starts horizontally clipped: {rect:?}, {clip:?}");

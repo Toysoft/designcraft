@@ -1516,7 +1516,6 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Step and Repeat", "間隔を指定して複製"),
     ("Table of Contents", "目次"),
     ("Type on a Path Options", "パス上のテキストのオプション"),
-    ("Edit/Interface Language", "編集/インターフェイスの言語"),
     ("Edit/Spelling", "編集/スペルチェック"),
     ("Edit/Transparency Blend Space", "編集/透明合成のカラースペース"),
     ("Edit/Transparency Flattener Presets", "編集/透明の統合プリセット"),

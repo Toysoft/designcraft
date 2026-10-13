@@ -1,5 +1,6 @@
-//! Interface language (Edit › Interface Language): translations of menu titles, the most used
-//! menu items and panel names. Untranslated strings stay English. The translations are our own.
+//! Interface language (Preferences › General › Interface Language): translations of menu titles,
+//! the most used menu items and panel names. Untranslated strings stay English. The translations
+//! are our own.
 
 use std::{collections::HashMap, sync::OnceLock};
 
