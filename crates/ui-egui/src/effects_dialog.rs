@@ -66,7 +66,7 @@ pub fn open(app: &mut DesignApp, page: &str) {
 
 /// Every effect's settings, those still at their defaults included (the document leaves them out).
 fn effects_json(e: &designcraft_doc::Effects) -> Value {
-    use designcraft_doc::{Bevel, DirectionalFeather, DropShadow, GradientFeather, InnerGlow, InnerShadow, OuterGlow, Satin};
+    use designcraft_doc::{Bevel, DirectionalFeather, DropShadow, FeatherOptions, GradientFeather, InnerGlow, InnerShadow, OuterGlow, Satin};
     let mut fx = serde_json::to_value(e).unwrap_or_else(|_| json!({}));
     let defaults = [
         ("dropShadow", serde_json::to_value(DropShadow::default())),
@@ -77,6 +77,7 @@ fn effects_json(e: &designcraft_doc::Effects) -> Value {
         ("satin", serde_json::to_value(Satin::default())),
         ("directionalFeather", serde_json::to_value(DirectionalFeather::default())),
         ("gradientFeather", serde_json::to_value(GradientFeather::default())),
+        ("featherOptions", serde_json::to_value(FeatherOptions::default())),
     ];
     for (k, v) in defaults {
         if !fx[k].is_object()
@@ -351,6 +352,23 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
             let key = page;
             heading(ui, &tr("Blending"));
             grid("b").show(ui, |ui| {
+                // Inner Glow: its blend mode (Screen, as InDesign starts it).
+                if key == "innerGlow" {
+                    row(ui, "Mode:");
+                    let cur = d.fields.get("fx").and_then(|f| f["innerGlow"]["mode"].as_str()).unwrap_or("Screen").to_string();
+                    let label = |m: &designcraft_color::BlendMode| {
+                        serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+                    };
+                    let shown = designcraft_color::BlendMode::ALL.iter().find(|m| label(m) == cur).map_or("Screen", |m| m.label());
+                    egui::ComboBox::from_id_salt("fx_glow_mode").selected_text(tr(shown)).width(150.0).show_ui(ui, |ui| {
+                        for m in designcraft_color::BlendMode::ALL {
+                            if ui.selectable_label(label(&m) == cur, tr(m.label())).clicked() {
+                                set(d, &["innerGlow", "mode"], json!(label(&m)));
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
                 row(ui, "Color:");
                 swatch(app, ui, d, &[key, "color"]);
                 row(ui, "Opacity:");
@@ -367,6 +385,19 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
                 } else {
                     row(ui, "Choke:");
                     percent(ui, d, &[key, "choke"]);
+                    ui.end_row();
+                    row(ui, "Technique:");
+                    let cur = d.fields.get("fx").and_then(|f| f["innerGlow"]["technique"].as_str()).unwrap_or("softer").to_string();
+                    egui::ComboBox::from_id_salt("fx_technique").selected_text(tr(if cur == "precise" { "Precise" } else { "Softer" })).show_ui(
+                        ui,
+                        |ui| {
+                            for (v, l) in [("softer", "Softer"), ("precise", "Precise")] {
+                                if ui.selectable_label(cur == v, tr(l)).clicked() {
+                                    set(d, &["innerGlow", "technique"], json!(v));
+                                }
+                            }
+                        },
+                    );
                     ui.end_row();
                     row(ui, "Source:");
                     let mut center = d.fields.get("fx").is_some_and(|f| f["innerGlow"]["center"].as_bool().unwrap_or(false));
@@ -441,6 +472,24 @@ fn page_ui(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog, page: &str) {
             grid("o").show(ui, |ui| {
                 row(ui, "Feather Width:");
                 measure(ui, d, &["feather"], unit);
+                ui.end_row();
+                row(ui, "Choke:");
+                percent(ui, d, &["featherOptions", "choke"]);
+                ui.end_row();
+                row(ui, "Corners:");
+                let cur = d.fields.get("fx").and_then(|f| f["featherOptions"]["corners"].as_str()).unwrap_or("diffused").to_string();
+                let shown = match cur.as_str() {
+                    "sharp" => "Sharp",
+                    "rounded" => "Rounded",
+                    _ => "Diffused",
+                };
+                egui::ComboBox::from_id_salt("fx_corners").selected_text(tr(shown)).show_ui(ui, |ui| {
+                    for (v, l) in [("sharp", "Sharp"), ("rounded", "Rounded"), ("diffused", "Diffused")] {
+                        if ui.selectable_label(cur == v, tr(l)).clicked() {
+                            set(d, &["featherOptions", "corners"], json!(v));
+                        }
+                    }
+                });
                 ui.end_row();
             });
         }

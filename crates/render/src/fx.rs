@@ -113,10 +113,17 @@ impl Renderer {
             ctx.set_transform(Affine::IDENTITY);
             ctx.push_layer(None, None, None, None, None);
         }
-        // The object, feathered or not.
+        // The object, feathered or not. Choke keeps that much of the width opaque (a shorter
+        // fade); Sharp and Rounded corners follow the inset shape more tightly than Diffused.
         if e.feather > 0.0 && it.path.is_closed() {
-            let w = e.feather;
-            self.with_filters(ctx, f, reach, w / 4.0, |me, c, fr| {
+            let fo = &e.feather_options;
+            let w = e.feather * (1.0 - fo.choke.clamp(0.0, 100.0) / 100.0).max(0.01);
+            let (sigma, join) = match fo.corners {
+                designcraft_doc::FeatherCorners::Diffused => (w / 4.0, kurbo::Join::Round),
+                designcraft_doc::FeatherCorners::Rounded => (w / 3.0, kurbo::Join::Round),
+                designcraft_doc::FeatherCorners::Sharp => (w / 6.0, kurbo::Join::Miter),
+            };
+            self.with_filters(ctx, f, reach, sigma, |me, c, fr| {
                 c.set_transform(fr.view * xf);
                 c.push_clip_layer(bp);
                 me.draw_body(c, fr, it, bp, xf, page);
@@ -124,14 +131,14 @@ impl Renderer {
                 c.set_transform(Affine::IDENTITY);
                 c.push_layer(None, Some(BlendMode::new(Mix::Normal, Compose::DestIn)), None, None, None);
                 c.set_transform(fr.view);
-                c.push_layer(None, None, None, None, Some(blur(w / 4.0)));
+                c.push_layer(None, None, None, None, Some(blur(sigma)));
                 c.set_transform(fr.view * xf);
                 c.set_paint(peniko::Color::BLACK);
                 c.fill_path(bp);
                 c.set_transform(Affine::IDENTITY);
                 c.push_layer(None, Some(BlendMode::new(Mix::Normal, Compose::DestOut)), None, None, None);
                 c.set_transform(fr.view * xf);
-                c.set_stroke(kurbo::Stroke::new(w).with_join(kurbo::Join::Round));
+                c.set_stroke(kurbo::Stroke::new(w).with_join(join));
                 c.stroke_path(bp);
                 c.pop_layer();
                 c.pop_layer();
@@ -208,13 +215,16 @@ impl Renderer {
         {
             let g = &e.inner_glow;
             let (sigma, choke) = split(g.size, g.choke);
+            // Precise keeps the glow close to the edge: a tighter blur.
+            let sigma = if g.technique == designcraft_doc::GlowTechnique::Precise { sigma * 0.4 } else { sigma };
+            let mix = crate::blend_mode(g.mode).mix;
             let paint = color_of(&c, g.opacity.clamp(0.0, 1.0));
             if g.center {
+                ctx.set_transform(Affine::IDENTITY);
+                ctx.push_layer(None, Some(BlendMode::new(mix, Compose::SrcOver)), None, None, None);
                 self.with_filters(ctx, f, reach, sigma, |_, c, fr| {
                     c.set_transform(fr.view * xf);
                     c.push_clip_layer(bp);
-                    c.set_transform(Affine::IDENTITY);
-                    c.push_layer(None, Some(BlendMode::new(Mix::Screen, Compose::SrcOver)), None, None, None);
                     c.set_transform(fr.view);
                     c.push_layer(None, None, None, None, Some(blur(sigma)));
                     c.set_transform(fr.view * xf);
@@ -230,10 +240,10 @@ impl Renderer {
                     c.pop_layer();
                     c.pop_layer();
                     c.pop_layer();
-                    c.pop_layer();
                 });
+                ctx.pop_layer();
             } else {
-                self.inner_edge(ctx, f, reach, bp, xf, Vec2::ZERO, sigma, choke, paint, Mix::Screen);
+                self.inner_edge(ctx, f, reach, bp, xf, Vec2::ZERO, sigma, choke, paint, mix);
             }
         }
         // Satin: the shape shifted both ways along the angle, blurred, where exactly one covers.
@@ -304,13 +314,15 @@ impl Renderer {
         paint: peniko::Color,
         mix: Mix,
     ) {
+        // The blend mode applies to the finished (clipped, blurred) edge against what's below it:
+        // inside the clip layer it would only meet that layer's transparent backdrop.
+        if mix != Mix::Normal {
+            ctx.set_transform(Affine::IDENTITY);
+            ctx.push_layer(None, Some(BlendMode::new(mix, Compose::SrcOver)), None, None, None);
+        }
         self.with_filters(ctx, f, reach, sigma, |_, c, fr| {
             c.set_transform(fr.view * xf);
             c.push_clip_layer(bp);
-            if mix != Mix::Normal {
-                c.set_transform(Affine::IDENTITY);
-                c.push_layer(None, Some(BlendMode::new(mix, Compose::SrcOver)), None, None, None);
-            }
             c.set_transform(fr.view);
             c.push_layer(None, None, None, None, Some(blur(sigma)));
             // Everything outside the offset shape, so the colour bleeds in from the edges.
@@ -329,11 +341,11 @@ impl Renderer {
                 c.stroke_path(&shape);
             }
             c.pop_layer();
-            if mix != Mix::Normal {
-                c.pop_layer();
-            }
             c.pop_layer();
         });
+        if mix != Mix::Normal {
+            ctx.pop_layer();
+        }
     }
 
     /// Run `draw`, which pushes filter layers. Single-threaded contexts draw directly. On a

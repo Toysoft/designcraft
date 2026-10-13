@@ -527,7 +527,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Effects",
             [],
             None,
-            "{effects?: {dropShadow?: {on?, color?, opacity?, angle?, globalLight?, distance?, size?, spread?}, innerShadow?, outerGlow?, innerGlow?, bevel?, satin?, feather? (width), directionalFeather?, gradientFeather?} (the fields given replace the object's, as the Effects dialog sets them), opacity?: 0..1, blend?, ids?} — every effect at once, one undo step",
+            "{effects?: {dropShadow?: {on?, color?, opacity?, angle?, globalLight?, distance?, size?, spread?}, innerShadow?, outerGlow?, innerGlow? {on?, color?, opacity?, size?, choke?, center?, mode? (blend mode: Screen, Multiply, …; Screen by default), technique?: softer|precise}, bevel?, satin?, feather? (width), featherOptions? {choke? (%), corners?: sharp|rounded|diffused}, directionalFeather?, gradientFeather?} (the fields given replace the object's, as the Effects dialog sets them), opacity?: 0..1, blend?, ids?} — every effect at once, one undo step",
             has_selection,
             set_effects
         ),
@@ -1553,6 +1553,7 @@ fn sanitize_effects(e: &mut designcraft_doc::Effects) -> Result<()> {
     len(&mut sa.distance)?;
     len(&mut sa.size)?;
     len(&mut e.feather)?;
+    pct(&mut e.feather_options.choke)?;
     for w in &mut e.directional_feather.widths {
         len(w)?;
     }
@@ -3506,5 +3507,29 @@ mod effects_command_tests {
             assert!(s.execute("object.effects", &p).is_err(), "{bad}");
         }
         assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
+    }
+}
+
+#[cfg(test)]
+mod glow_feather_options_tests {
+    use serde_json::json;
+
+    #[test]
+    fn glow_mode_technique_and_feather_options_are_kept() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        s.execute(
+            "object.effects",
+            &json!({"ids": [id], "effects": {"innerGlow": {"on": true, "mode": "Multiply", "technique": "precise"}, "feather": 4.5, "featherOptions": {"choke": 140, "corners": "sharp"}}}),
+        )
+        .unwrap();
+        let e = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().effects.clone();
+        assert_eq!((e.inner_glow.mode, e.inner_glow.technique), (designcraft_color::BlendMode::Multiply, designcraft_doc::GlowTechnique::Precise));
+        assert_eq!((e.feather_options.choke, e.feather_options.corners), (100.0, designcraft_doc::FeatherCorners::Sharp), "choke is a percentage");
+        // InDesign's defaults: Screen and Softer; Diffused corners, no choke.
+        let d = designcraft_doc::Effects::default();
+        assert_eq!((d.inner_glow.mode, d.inner_glow.technique), (designcraft_color::BlendMode::Screen, designcraft_doc::GlowTechnique::Softer));
+        assert_eq!((d.feather_options.choke, d.feather_options.corners), (0.0, designcraft_doc::FeatherCorners::Diffused));
     }
 }
