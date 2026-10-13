@@ -1681,9 +1681,10 @@ mod image_content_cache_tests {
                 let opts = PdfOptions { standard, ..Default::default() };
                 let mut ex = exporter(&d, &cache, &opts);
                 ex.rgb_only = standard == Standard::PdfA2b;
-                // The pinned image decoder does not support CMYKA as RGB. Associated alpha
-                // is also rejected by the ink-preserving path: retain both failure names.
-                let succeeds = alpha.is_none() || (alpha == Some(2) && !ex.rgb_only);
+                // Unassociated alpha (2) decodes on both paths, as RGB through
+                // `decode_rgba`'s CMYK fallback. Associated alpha (1) has no meaning as ink
+                // values and is rejected by both: retain both failure names.
+                let succeeds = alpha.is_none() || alpha == Some(2);
                 let first = ex.load_image(a);
                 assert_eq!(first.is_some(), succeeds, "{alpha:?} {standard:?}");
                 if alpha.is_none() {
