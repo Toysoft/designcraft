@@ -1,6 +1,6 @@
 # DesignCraft parity with Adobe InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (cancelable macOS Dock Quit) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (object styles carry effects) · **Target:** Adobe InDesign 2026 (21.6.0.57, macOS)
 
 The authoritative assessment of how close DesignCraft is to Adobe InDesign. [ROADMAP.md](../ROADMAP.md)
 summarizes it; [gaps.md](gaps.md) lists every known shortfall one at a time; the feature-by-feature
@@ -401,6 +401,7 @@ It is evidence of breadth: each item exists. It is not a claim of InDesign-level
 - Nested styles (through/up to N sentences, words, characters, letters, digits, tabs, breaks, spaces or given characters) and GREP styles (regex → character style), edited in Paragraph Style Options and composed under local formatting; `ui.dialog.open` for agents. Nested line styles are still to come; nested and GREP styles round-trip through IDML.
 - Table and cell styles (round-trip through IDML): cell styles (fill, insets, vertical justification, strokes, paragraph style) and table styles (region cell styles, border, alternating rows, spacing); apply from the Table panel, edits re-apply to every user; `style.cell.*`, `style.table.*`.
 - Style groups: paragraph and character styles shown in group folders, Move to Group (new, existing, none); `style.group` renames every use (styles, stories, table cells, footnotes, object styles).
+- Object styles carry effects: `style.object.create` keeps the selection's effects, `style.object.apply` sets them, and `style.object.edit {name, dropShadow?, feather?, …, effects?: null}` changes them on the style and on every item whose effects still match it (items with their own effects keep them; `style.object.clearOverrides` returns them to the style). New frames take their default style's effects. Effect values that aren't finite numbers are refused and the others clamped, in these commands and in the `object.*` effect commands. IDML carries only the drop shadow and feather, for ObjectStyles (read per effects category flag, settings from the BasedOn chain) as for items; the other effects stay in `.designcraft` files. There is no Object Style Options dialog yet.
 - Scrubby zoom: drag the Zoom tool left or right to zoom continuously around the press point.
 - Guides belong to the active layer: hidden with it (or with its Show Guides off) and locked with it.
 - Pencil tool (N): freehand strokes simplified to smooth paths (Alt closes); Smooth and Erase tools re-fit or remove the stretch you drag along (`path.smooth`, `path.erase`).

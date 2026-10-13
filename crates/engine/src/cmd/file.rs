@@ -376,6 +376,9 @@ fn file_place(s: &mut Session, p: &Value) -> Result<Value> {
             let (bx, by, bw, bh) = crop_box.unwrap_or((0.0, 0.0, nw, nh));
             let mut it = Item::new(id, lid, Shape::Rectangle, shapes::rectangle(Rect::new(x, y, x + bw * k, y + bh * k)));
             it.object_style = d.styles.default_graphic_frame.clone();
+            if let Some(e) = d.styles.object_effects(&it.object_style) {
+                it.effects = e.clone();
+            }
             it.content = Content::Graphic(Graphic {
                 asset: aid,
                 size: (nw, nh),
@@ -491,6 +494,9 @@ fn place_drop(s: &mut Session, p: &Value) -> Result<Value> {
                 let id = ItemId(d.alloc());
                 let mut it = Item::new(id, lid, Shape::Rectangle, shapes::rectangle(frame_r));
                 it.object_style = d.styles.default_graphic_frame.clone();
+                if let Some(e) = d.styles.object_effects(&it.object_style) {
+                    it.effects = e.clone();
+                }
                 it.content = Content::Graphic(Graphic {
                     asset: aid,
                     size: (nw, nh),

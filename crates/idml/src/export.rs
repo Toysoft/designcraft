@@ -1034,9 +1034,31 @@ impl<'a> Ex<'a> {
                 el.set("AppliedParagraphStyle", names::style_self("ParagraphStyle", PARA_BUILTINS, ps));
             }
             let mut el = with_props(el, props);
+            if let Some(e) = &os.effects {
+                let mut t = El::new("TransparencySetting");
+                for c in self.effect_els(e, true) {
+                    t.push(c);
+                }
+                el.push(t);
+            }
             if let Some(tf) = &os.text_frame {
                 el.push(text_frame_pref(tf, &self.sw(&tf.column_rule_color)));
             }
+            // Effects: a style with effects sets the drop shadow and feather, never blending.
+            let on = bool_s(os.effects.is_some());
+            el.push(
+                El::new("ObjectStyleObjectEffectsCategorySettings")
+                    .attr("EnableTransparency", "false")
+                    .attr("EnableDropShadow", on)
+                    .attr("EnableFeather", on)
+                    .attr("EnableInnerShadow", "false")
+                    .attr("EnableOuterGlow", "false")
+                    .attr("EnableInnerGlow", "false")
+                    .attr("EnableBevelEmboss", "false")
+                    .attr("EnableSatin", "false")
+                    .attr("EnableDirectionalFeather", "false")
+                    .attr("EnableGradientFeather", "false"),
+            );
             og.insert(&os.name, el);
         }
         let mut ro = El::new("RootObjectStyleGroup").attr("Self", self.fresh());
@@ -1682,25 +1704,15 @@ impl<'a> Ex<'a> {
         }
         let mut el = with_props(el, props);
         // Transparency.
+        // An item whose style sets effects writes the effects it has turned off too, so that on
+        // import it doesn't take the style's.
+        let styled = self.d.styles.object_effects(os).is_some();
         let ds = &it.effects.drop_shadow;
-        if it.opacity < 1.0 || it.blend != designcraft_color::BlendMode::Normal || ds.on || it.effects.feather > 0.0 {
+        if it.opacity < 1.0 || it.blend != designcraft_color::BlendMode::Normal || ds.on || it.effects.feather > 0.0 || styled {
             let mut t = El::new("TransparencySetting");
             t.push(El::new("BlendingSetting").attr("BlendMode", names::blend_out(it.blend)).attr("Opacity", pct(it.opacity as f64)));
-            if ds.on {
-                let a = self.d.light_angle(ds.angle, ds.global_light).to_radians();
-                t.push(
-                    El::new("DropShadowSetting")
-                        .attr("Mode", "Drop")
-                        .attr("XOffset", num(-ds.distance * a.cos()))
-                        .attr("YOffset", num(ds.distance * a.sin()))
-                        .attr("Size", num(ds.size))
-                        .attr("Spread", num(ds.spread))
-                        .attr("Opacity", pct(ds.opacity as f64))
-                        .attr("EffectColor", self.sw(&ds.color)),
-                );
-            }
-            if it.effects.feather > 0.0 {
-                t.push(El::new("FeatherSetting").attr("Mode", "Standard").attr("Width", num(it.effects.feather)));
+            for c in self.effect_els(&it.effects, styled) {
+                t.push(c);
             }
             el.push(t);
         }
@@ -1758,6 +1770,30 @@ impl<'a> Ex<'a> {
             _ => {}
         }
         el
+    }
+
+    /// The `TransparencySetting` children for `e`'s drop shadow and feather; `all` also writes the
+    /// effects that are off (`Mode="None"`), as an object style that sets effects does.
+    fn effect_els(&self, e: &designcraft_doc::Effects, all: bool) -> Vec<El> {
+        let mut out = Vec::new();
+        let ds = &e.drop_shadow;
+        if ds.on || all {
+            let a = self.d.light_angle(ds.angle, ds.global_light).to_radians();
+            out.push(
+                El::new("DropShadowSetting")
+                    .attr("Mode", if ds.on { "Drop" } else { "None" })
+                    .attr("XOffset", num(-ds.distance * a.cos()))
+                    .attr("YOffset", num(ds.distance * a.sin()))
+                    .attr("Size", num(ds.size))
+                    .attr("Spread", num(ds.spread))
+                    .attr("Opacity", pct(ds.opacity as f64))
+                    .attr("EffectColor", self.sw(&ds.color)),
+            );
+        }
+        if e.feather > 0.0 || all {
+            out.push(El::new("FeatherSetting").attr("Mode", if e.feather > 0.0 { "Standard" } else { "None" }).attr("Width", num(e.feather)));
+        }
+        out
     }
 
     fn image_el(&mut self, asset: &designcraft_doc::Asset, g: &designcraft_doc::Graphic) -> El {

@@ -911,6 +911,62 @@ impl GradientFeather {
 }
 
 impl Effects {
+    /// These effects with opacities in 0–1, percentages in 0–100 and sizes, widths and distances
+    /// not below 0, or an error naming the first value that isn't a finite number.
+    pub fn sanitized(mut self) -> Result<Effects, String> {
+        fn finite(name: &str, v: f64) -> Result<f64, String> {
+            if v.is_finite() { Ok(v) } else { Err(format!("{name} must be a finite number")) }
+        }
+        let len = |name: &str, v: f64| finite(name, v).map(|v| v.max(0.0));
+        let pct = |name: &str, v: f64| finite(name, v).map(|v| v.clamp(0.0, 100.0));
+        let opacity = |name: &str, v: f32| finite(name, f64::from(v)).map(|v| v.clamp(0.0, 1.0) as f32);
+        let ds = &mut self.drop_shadow;
+        ds.opacity = opacity("dropShadow.opacity", ds.opacity)?;
+        ds.angle = finite("dropShadow.angle", ds.angle)?;
+        ds.distance = len("dropShadow.distance", ds.distance)?;
+        ds.size = len("dropShadow.size", ds.size)?;
+        ds.spread = pct("dropShadow.spread", ds.spread)?;
+        self.feather = len("feather", self.feather)?;
+        let e = &mut self.inner_shadow;
+        e.opacity = opacity("innerShadow.opacity", e.opacity)?;
+        e.angle = finite("innerShadow.angle", e.angle)?;
+        e.distance = len("innerShadow.distance", e.distance)?;
+        e.size = len("innerShadow.size", e.size)?;
+        e.choke = pct("innerShadow.choke", e.choke)?;
+        let e = &mut self.outer_glow;
+        e.opacity = opacity("outerGlow.opacity", e.opacity)?;
+        e.size = len("outerGlow.size", e.size)?;
+        e.spread = pct("outerGlow.spread", e.spread)?;
+        let e = &mut self.gradient_feather;
+        e.angle = finite("gradientFeather.angle", e.angle)?;
+        e.start = opacity("gradientFeather.start", e.start)?;
+        e.end = opacity("gradientFeather.end", e.end)?;
+        if let Some(v) = &mut e.vector {
+            for c in v.iter_mut() {
+                *c = finite("gradientFeather.vector", *c)?;
+            }
+        }
+        let e = &mut self.inner_glow;
+        e.opacity = opacity("innerGlow.opacity", e.opacity)?;
+        e.size = len("innerGlow.size", e.size)?;
+        e.choke = pct("innerGlow.choke", e.choke)?;
+        let e = &mut self.bevel;
+        e.size = len("bevel.size", e.size)?;
+        e.depth = len("bevel.depth", e.depth)?;
+        e.angle = finite("bevel.angle", e.angle)?;
+        e.highlight_opacity = opacity("bevel.highlightOpacity", e.highlight_opacity)?;
+        e.shadow_opacity = opacity("bevel.shadowOpacity", e.shadow_opacity)?;
+        let e = &mut self.satin;
+        e.opacity = opacity("satin.opacity", e.opacity)?;
+        e.angle = finite("satin.angle", e.angle)?;
+        e.distance = len("satin.distance", e.distance)?;
+        e.size = len("satin.size", e.size)?;
+        for w in self.directional_feather.widths.iter_mut() {
+            *w = len("directionalFeather.widths", *w)?;
+        }
+        Ok(self)
+    }
+
     /// Any effect drawn with soft (raster) filters?
     pub fn any(&self) -> bool {
         self.drop_shadow.on

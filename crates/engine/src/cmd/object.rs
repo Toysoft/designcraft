@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use designcraft_color::BlendMode;
 use designcraft_doc::{
-    Content, Document, Fill, Item, ItemId, ParaFormat, Selection, Shape, SpreadRef, Story, StoryId, Stroke, TextFrame, TextFrameOptions, TextSel,
+    Content, Document, Effects, Fill, Item, ItemId, ParaFormat, Selection, Shape, SpreadRef, Story, StoryId, Stroke, TextFrame, TextFrameOptions,
+    TextSel,
 };
 use designcraft_geom::{Affine, Point, Rect, Vec2, shapes};
 use serde_json::{Value, json};
@@ -276,24 +277,19 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let ds = &mut i.effects.drop_shadow;
-                        ds.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!ds.on);
-                        ds.distance = f64_or(&p2, "distance", ds.distance);
-                        ds.angle = f64_or(&p2, "angle", ds.angle);
-                        ds.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(ds.global_light);
-                        ds.opacity = f64_or(&p2, "opacity", ds.opacity as f64) as f32;
-                        ds.size = f64_or(&p2, "size", ds.size);
-                        ds.spread = f64_or(&p2, "spread", ds.spread);
-                        if let Some(c) = str_param(&p2, "color") {
-                            ds.color = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.dropShadow", move |fx| {
+                    let ds = &mut fx.drop_shadow;
+                    ds.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!ds.on);
+                    ds.distance = f64_or(&p2, "distance", ds.distance);
+                    ds.angle = f64_or(&p2, "angle", ds.angle);
+                    ds.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(ds.global_light);
+                    ds.opacity = f64_or(&p2, "opacity", ds.opacity as f64) as f32;
+                    ds.size = f64_or(&p2, "size", ds.size);
+                    ds.spread = f64_or(&p2, "spread", ds.spread);
+                    if let Some(c) = str_param(&p2, "color") {
+                        ds.color = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -305,24 +301,19 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.inner_shadow;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        e.distance = f64_or(&p2, "distance", e.distance);
-                        e.angle = f64_or(&p2, "angle", e.angle);
-                        e.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(e.global_light);
-                        e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
-                        e.size = f64_or(&p2, "size", e.size);
-                        e.choke = f64_or(&p2, "choke", e.choke);
-                        if let Some(c) = str_param(&p2, "color") {
-                            e.color = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.innerShadow", move |fx| {
+                    let e = &mut fx.inner_shadow;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    e.distance = f64_or(&p2, "distance", e.distance);
+                    e.angle = f64_or(&p2, "angle", e.angle);
+                    e.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(e.global_light);
+                    e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
+                    e.size = f64_or(&p2, "size", e.size);
+                    e.choke = f64_or(&p2, "choke", e.choke);
+                    if let Some(c) = str_param(&p2, "color") {
+                        e.color = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -334,21 +325,16 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.outer_glow;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
-                        e.size = f64_or(&p2, "size", e.size);
-                        e.spread = f64_or(&p2, "spread", e.spread);
-                        if let Some(c) = str_param(&p2, "color") {
-                            e.color = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.outerGlow", move |fx| {
+                    let e = &mut fx.outer_glow;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
+                    e.size = f64_or(&p2, "size", e.size);
+                    e.spread = f64_or(&p2, "spread", e.spread);
+                    if let Some(c) = str_param(&p2, "color") {
+                        e.color = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -394,22 +380,17 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.inner_glow;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
-                        e.size = f64_or(&p2, "size", e.size);
-                        e.choke = f64_or(&p2, "choke", e.choke);
-                        e.center = p2.get("center").and_then(Value::as_bool).unwrap_or(e.center);
-                        if let Some(c) = str_param(&p2, "color") {
-                            e.color = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.innerGlow", move |fx| {
+                    let e = &mut fx.inner_glow;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
+                    e.size = f64_or(&p2, "size", e.size);
+                    e.choke = f64_or(&p2, "choke", e.choke);
+                    e.center = p2.get("center").and_then(Value::as_bool).unwrap_or(e.center);
+                    if let Some(c) = str_param(&p2, "color") {
+                        e.color = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -421,27 +402,22 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.bevel;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        e.size = f64_or(&p2, "size", e.size);
-                        e.depth = f64_or(&p2, "depth", e.depth);
-                        e.angle = f64_or(&p2, "angle", e.angle);
-                        e.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(e.global_light);
-                        e.highlight_opacity = f64_or(&p2, "highlightOpacity", e.highlight_opacity as f64) as f32;
-                        e.shadow_opacity = f64_or(&p2, "shadowOpacity", e.shadow_opacity as f64) as f32;
-                        if let Some(c) = str_param(&p2, "highlight") {
-                            e.highlight = c.into();
-                        }
-                        if let Some(c) = str_param(&p2, "shadow") {
-                            e.shadow = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.bevel", move |fx| {
+                    let e = &mut fx.bevel;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    e.size = f64_or(&p2, "size", e.size);
+                    e.depth = f64_or(&p2, "depth", e.depth);
+                    e.angle = f64_or(&p2, "angle", e.angle);
+                    e.global_light = p2.get("globalLight").and_then(Value::as_bool).unwrap_or(e.global_light);
+                    e.highlight_opacity = f64_or(&p2, "highlightOpacity", e.highlight_opacity as f64) as f32;
+                    e.shadow_opacity = f64_or(&p2, "shadowOpacity", e.shadow_opacity as f64) as f32;
+                    if let Some(c) = str_param(&p2, "highlight") {
+                        e.highlight = c.into();
+                    }
+                    if let Some(c) = str_param(&p2, "shadow") {
+                        e.shadow = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -453,23 +429,18 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.satin;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
-                        e.angle = f64_or(&p2, "angle", e.angle);
-                        e.distance = f64_or(&p2, "distance", e.distance);
-                        e.size = f64_or(&p2, "size", e.size);
-                        e.invert = p2.get("invert").and_then(Value::as_bool).unwrap_or(e.invert);
-                        if let Some(c) = str_param(&p2, "color") {
-                            e.color = c.into();
-                        }
-                    },
-                    false,
-                )
+                set_effects(s, p, "object.satin", move |fx| {
+                    let e = &mut fx.satin;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    e.opacity = f64_or(&p2, "opacity", e.opacity as f64) as f32;
+                    e.angle = f64_or(&p2, "angle", e.angle);
+                    e.distance = f64_or(&p2, "distance", e.distance);
+                    e.size = f64_or(&p2, "size", e.size);
+                    e.invert = p2.get("invert").and_then(Value::as_bool).unwrap_or(e.invert);
+                    if let Some(c) = str_param(&p2, "color") {
+                        e.color = c.into();
+                    }
+                })
             }
         ),
         cmd!(
@@ -481,32 +452,27 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             |s, p| {
                 let p2 = p.clone();
-                set_flag(
-                    s,
-                    p,
-                    move |i| {
-                        let e = &mut i.effects.directional_feather;
-                        e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
-                        match p2.get("widths") {
-                            Some(Value::Number(n)) => e.widths = [n.as_f64().unwrap_or(0.0).max(0.0); 4],
-                            Some(v @ Value::Array(_)) => {
-                                if let Ok(w) = serde_json::from_value::<[f64; 4]>(v.clone()) {
-                                    e.widths = w.map(|x| x.max(0.0));
-                                }
+                set_effects(s, p, "object.directionalFeather", move |fx| {
+                    let e = &mut fx.directional_feather;
+                    e.on = p2.get("on").and_then(Value::as_bool).unwrap_or(!e.on);
+                    match p2.get("widths") {
+                        Some(Value::Number(n)) => e.widths = [n.as_f64().unwrap_or(0.0).max(0.0); 4],
+                        Some(v @ Value::Array(_)) => {
+                            if let Ok(w) = serde_json::from_value::<[f64; 4]>(v.clone()) {
+                                e.widths = w.map(|x| x.max(0.0));
                             }
-                            _ => {}
                         }
-                        if e.on && e.widths.iter().all(|w| *w <= 0.0) {
-                            e.widths = [9.0; 4];
-                        }
-                    },
-                    false,
-                )
+                        _ => {}
+                    }
+                    if e.on && e.widths.iter().all(|w| *w <= 0.0) {
+                        e.widths = [9.0; 4];
+                    }
+                })
             }
         ),
         cmd!("object.feather", "Basic Feather", ["Object", "Effects"], None, "{width (0 = off), ids?}", has_selection, |s, p| {
             let w = f64_or(p, "width", 9.0).max(0.0);
-            set_flag(s, p, move |i| i.effects.feather = w, false)
+            set_effects(s, p, "object.feather", move |fx| fx.feather = w)
         }),
         cmd!("object.content", "Content", ["Object", "Content"], None, "{type: graphic|text|unassigned, ids?}", has_selection, content_type),
         cmd!(
@@ -863,6 +829,9 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
         let mut it = Item::new(id, lid, sh, path);
         if content == "graphic" {
             it.object_style = d.styles.default_graphic_frame.clone();
+            if let Some(e) = d.styles.object_effects(&it.object_style) {
+                it.effects = e.clone();
+            }
         } else {
             // Shapes drawn with Rectangle/Ellipse/Polygon get the default 1 pt black stroke.
             it.stroke = Stroke::default();
@@ -1399,6 +1368,22 @@ fn set_flag(s: &mut Session, p: &Value, f: impl Fn(&mut Item), deselect: bool) -
         }
         if deselect {
             *sel = Selection::default();
+        }
+        Ok(json!({"changed": ids.len()}))
+    })
+}
+
+/// Edits the targets' effects. A value that isn't a finite number is refused; the others are
+/// clamped to their ranges.
+fn set_effects(s: &mut Session, p: &Value, cmd: &'static str, f: impl Fn(&mut Effects)) -> Result<Value> {
+    let ids = targets(s, p)?;
+    s.edit(|d, _| {
+        for id in &ids {
+            if let Some(it) = d.item_mut(*id) {
+                let mut fx = it.effects.clone();
+                f(&mut fx);
+                it.effects = fx.sanitized().map_err(|m| bad(cmd, m))?;
+            }
         }
         Ok(json!({"changed": ids.len()}))
     })

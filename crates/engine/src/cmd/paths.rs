@@ -194,6 +194,7 @@ fn gradient_feather(s: &mut Session, p: &Value) -> Result<Value> {
                     gf.vector = Some([a.x, a.y, b.x, b.y]);
                 }
             }
+            it.effects = it.effects.clone().sanitized().map_err(|m| bad("object.gradientFeather", m))?;
         }
         Ok(json!({"changed": ids.len()}))
     })

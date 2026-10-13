@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::attrs::{CharAttrs, CharProps, ParaAttrs, ParaProps};
-use crate::item::{Fill, Stroke, TextFrameOptions};
+use crate::item::{Effects, Fill, Item, Stroke, TextFrameOptions};
 use crate::story::{BASIC_PARAGRAPH, CharFormat, NO_CHAR_STYLE, ParaFormat};
 
 pub const NO_PARA_STYLE: &str = "[No Paragraph Style]";
@@ -55,6 +55,28 @@ pub struct ObjectStyle {
     pub paragraph_style: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_frame: Option<TextFrameOptions>,
+    /// Effects (drop shadow, feather, glows…). An item using the style follows them until its own
+    /// effects differ from the style's (a local override).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Effects>,
+}
+
+impl ObjectStyle {
+    /// Gives `it` the fill, stroke, effects and text frame options this style sets.
+    pub fn apply_to(&self, it: &mut Item) {
+        if let Some(f) = &self.fill {
+            it.fill = f.clone();
+        }
+        if let Some(st) = &self.stroke {
+            it.stroke = st.clone();
+        }
+        if let Some(e) = &self.effects {
+            it.effects = e.clone();
+        }
+        if let (Some(tf), Some(o)) = (it.text_frame_mut(), &self.text_frame) {
+            tf.options = o.clone();
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -690,6 +712,10 @@ impl Styles {
     }
     pub fn object_style(&self, name: &str) -> Option<&ObjectStyle> {
         self.object.iter().find(|s| s.name == name)
+    }
+    /// The effects object style `name` sets, if any (for new items that get a default style).
+    pub fn object_effects(&self, name: &str) -> Option<&Effects> {
+        self.object_style(name)?.effects.as_ref()
     }
 
     /// The paragraph style chain from root to `name` (cycle-safe).
