@@ -764,7 +764,7 @@ impl DesignApp {
         if !self.color_applied {
             self.color_applied = true;
             if let Some(cs) = self.ui.color_settings.clone() {
-                let _ = designcraft_color::cms::set_active(&cs);
+                let _ = designcraft_color::cms::set_active(&cs.with_known_profiles());
             }
         }
         let scale = self.ui.ui_scale.clamp(0.5, 3.0);

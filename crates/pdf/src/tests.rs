@@ -175,7 +175,9 @@ fn standards() {
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert!(crate::check_pdfx4(&r.bytes).is_empty());
     let text = String::from_utf8_lossy(&r.bytes).to_string();
-    assert!(text.contains("/OutputIntents[") && text.contains("DesignCraft Generic CMYK"));
+    // The default working CMYK space is the built-in Coated FOGRA39.
+    assert!(text.contains("/OutputIntents[") && text.contains("/OutputConditionIdentifier(FOGRA39)"), "output intent");
+    assert!(text.contains(r"/OutputCondition(Coated FOGRA39 \(fitted, craft-cms\))"), "output condition");
     // A plain export fails the checks; both read with the same pages.
     let plain = export_pdf(&d, &Cache::new(), &PdfOptions::default()).unwrap();
     assert_eq!(hayro_syntax::Pdf::new(r.bytes.clone()).unwrap().pages().len(), hayro_syntax::Pdf::new(plain.clone()).unwrap().pages().len());
