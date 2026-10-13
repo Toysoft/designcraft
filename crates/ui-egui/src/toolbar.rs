@@ -194,15 +194,10 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
 /// utility button and the Screen Mode well.
 fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
     let t = Tokens::get(ui.ctx());
-    let info = crate::panels::sel_info(app);
     let doc = app.session.active().map(|d| d.doc.clone());
-    let text_id = egui::Id::new("proxy_text");
     let stroke_front = app.ui.stroke_front;
-    let text_mode: bool = ui.data(|d| d.get_temp(text_id)).unwrap_or(false);
-    let (fill_sw, stroke_sw) = match &info {
-        Some(i) => (i.fill.clone(), i.stroke.clone()),
-        None => ("[None]".to_string(), "[Black]".to_string()),
-    };
+    let text_mode = app.ui.formatting_affects_text || proxy_affects_text(app);
+    let (fill_sw, stroke_sw) = proxy_colors(app);
     let x0 = ui.max_rect().min.x + (width - 30.0) / 2.0;
     // Row 1: default colours + swap.
     let (row, _) = ui.allocate_exact_size(vec2(width, 11.0), Sense::hover());
@@ -314,7 +309,7 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
             })
             .clicked()
         {
-            ui.data_mut(|d| d.insert_temp(text_id, k == 1));
+            let _ = app.run("color.formattingAffectsText", json!({"on": k == 1}));
         }
     }
     ui.add_space(5.0);
@@ -328,14 +323,13 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
     let chip = egui::Rect::from_center_size(well.center(), vec2(14.0, 14.0));
     crate::widgets::paint_chip(ui.painter(), chip, None, None);
     flyout_triangle(ui.painter(), well, t.icon);
-    let target = if stroke_front { "object.stroke" } else { "object.fill" };
     if resp.clicked() {
         let _ = app.run("color.applyNone", json!({}));
     }
     egui::Popup::context_menu(&resp).show(|ui| {
         for (label, sw) in [("Apply Color", "[Black]"), ("Apply None", "[None]")] {
             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).clicked() {
-                let _ = app.run(target, json!({"swatch": sw}));
+                let _ = apply_swatch(app, sw);
                 ui.close();
             }
         }
@@ -423,14 +417,59 @@ fn tool_button(ui: &mut egui::Ui, icon: &str, active: bool, tip: &str) -> egui::
     })
 }
 
-/// Default Fill and Stroke (D): no fill, a black stroke.
+/// Whether the proxy's colours are the text's: text selected (as with InDesign's Type tool), or
+/// Formatting Affects Text (J) with a text frame selected. Other objects keep their own colours.
+pub(crate) fn proxy_affects_text(app: &DesignApp) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    st.selection.text.is_some()
+        || (app.ui.formatting_affects_text && st.selection.items.iter().any(|id| st.doc.item(*id).is_some_and(|i| i.is_text_frame())))
+}
+
+/// The text's fill and stroke (swatch, tint) when the proxy affects text.
+fn text_colors(app: &mut DesignApp) -> Option<((String, f64), (String, f64))> {
+    if !proxy_affects_text(app) {
+        return None;
+    }
+    let a = crate::panels::text_attrs(app)?;
+    let c = &a["chars"];
+    let get = |k: &str, t: &str, d: &str| (c[k].as_str().unwrap_or(d).to_string(), c[t].as_f64().unwrap_or(1.0));
+    Some((get("fill", "fillTint", "[Black]"), get("stroke", "strokeTint", "[None]")))
+}
+
+/// The fill and stroke swatches the proxy shows: the text's (see [`proxy_affects_text`]) or the
+/// selected object's.
+pub(crate) fn proxy_colors(app: &mut DesignApp) -> (String, String) {
+    if let Some(((f, _), (s, _))) = text_colors(app) {
+        return (f, s);
+    }
+    match crate::panels::sel_info(app) {
+        Some(i) => (i.fill, i.stroke),
+        None => ("[None]".to_string(), "[Black]".to_string()),
+    }
+}
+
+/// Default Fill and Stroke (D): no fill and a black stroke; on text, black text with no stroke
+/// (as in InDesign).
 pub(crate) fn default_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
+    if proxy_affects_text(app) {
+        return app.run("type.char", json!({"attrs": {"fill": "[Black]", "fillTint": 1.0, "stroke": "[None]", "strokeTint": 1.0}}));
+    }
     app.run("object.defaultFillStroke", json!({}))
 }
 
-/// Swap Fill and Stroke (Shift+X): each selected object's fill and stroke trade places.
+/// Swap Fill and Stroke (Shift+X): fill and stroke colours (and tints) trade places, on the
+/// selected text or each selected object.
 pub(crate) fn swap_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
+    if let Some(((f, ft), (s, st))) = text_colors(app) {
+        return app.run("type.char", json!({"attrs": {"fill": s, "fillTint": st, "stroke": f, "strokeTint": ft}}));
+    }
     app.run("object.swapFillStroke", json!({}))
+}
+
+/// Formatting Affects Container/Text (J): toggles, or sets with `on`.
+pub(crate) fn formatting_affects_text(app: &mut DesignApp, on: Option<bool>) -> Result<Value, String> {
+    app.ui.formatting_affects_text = on.unwrap_or(!app.ui.formatting_affects_text);
+    Ok(json!({"on": app.ui.formatting_affects_text}))
 }
 
 /// Fill/Stroke toggle (X): brings the other of fill and stroke to the front of the proxy.
@@ -439,10 +478,19 @@ pub(crate) fn toggle_fill_stroke(app: &mut DesignApp) -> Result<Value, String> {
     Ok(json!({"strokeFront": app.ui.stroke_front}))
 }
 
-/// Apply None (/): to the fill or the stroke, whichever is in front of the proxy.
+/// Apply None (/): to the fill or the stroke, whichever is in front of the proxy (of the text,
+/// when the proxy affects text).
 pub(crate) fn apply_none(app: &mut DesignApp) -> Result<Value, String> {
-    let target = if app.ui.stroke_front { "object.stroke" } else { "object.fill" };
-    app.run(target, json!({"swatch": "[None]"}))
+    apply_swatch(app, "[None]")
+}
+
+/// `swatch` on the fill or stroke in front, of the text or the objects.
+fn apply_swatch(app: &mut DesignApp, swatch: &str) -> Result<Value, String> {
+    let key = if app.ui.stroke_front { "stroke" } else { "fill" };
+    if proxy_affects_text(app) {
+        return app.run("type.char", json!({"attrs": {key: swatch}}));
+    }
+    app.run(&format!("object.{key}"), json!({"swatch": swatch}))
 }
 
 #[cfg(test)]
@@ -583,5 +631,57 @@ mod tests {
         assert!(app.session.wants_text());
         press(&mut app, &ctx, Key::X, Modifiers::NONE);
         assert!(app.ui.stroke_front, "X while typing leaves the proxy alone");
+    }
+}
+
+#[cfg(test)]
+mod proxy_text_tests {
+    use serde_json::json;
+
+    use crate::DesignApp;
+
+    fn chars(app: &mut DesignApp) -> (String, String) {
+        let a = crate::panels::text_attrs(app).unwrap();
+        (a["chars"]["fill"].as_str().unwrap().to_string(), a["chars"]["stroke"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn the_proxy_and_its_keys_work_on_the_selected_text() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let f = app.run("frame.create", json!({"rect": [72, 72, 300, 140], "content": "text", "text": "LYH+STUDIO"})).unwrap();
+        // Text selected: the proxy is the text's.
+        app.run("text.select", json!({"story": f["story"], "anchor": 0, "focus": 10})).unwrap();
+        assert!(super::proxy_affects_text(&app));
+        assert_eq!(super::proxy_colors(&mut app), ("[Black]".to_string(), "[None]".to_string()));
+        app.run("color.swapFillStroke", json!({})).unwrap();
+        assert_eq!(chars(&mut app), ("[None]".to_string(), "[Black]".to_string()), "outlined text");
+        app.run("color.swapFillStroke", json!({})).unwrap();
+        assert_eq!(chars(&mut app), ("[Black]".to_string(), "[None]".to_string()));
+        // Apply None goes to the one in front (X brings the stroke to the front).
+        app.run("color.toggleFillStroke", json!({})).unwrap();
+        app.run("color.applyNone", json!({})).unwrap();
+        assert_eq!(chars(&mut app), ("[Black]".to_string(), "[None]".to_string()), "the stroke was already none");
+        app.run("color.toggleFillStroke", json!({})).unwrap();
+        app.run("color.applyNone", json!({})).unwrap();
+        assert_eq!(chars(&mut app).0, "[None]");
+        app.run("color.defaultFillStroke", json!({})).unwrap();
+        assert_eq!(chars(&mut app), ("[Black]".to_string(), "[None]".to_string()), "text defaults: black, no stroke");
+        // A rectangle: its own fill and stroke, J or not.
+        let r = app.run("frame.create", json!({"rect": [72, 200, 200, 300], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": [r]})).unwrap();
+        app.run("color.formattingAffectsText", json!({})).unwrap();
+        assert!(app.ui.formatting_affects_text);
+        assert!(!super::proxy_affects_text(&app));
+        app.run("color.defaultFillStroke", json!({})).unwrap();
+        let i = crate::panels::sel_info(&app).unwrap();
+        assert_eq!((i.fill.as_str(), i.stroke.as_str()), ("[None]", "[Black]"));
+        // J with the text frame selected: its text.
+        app.run("selection.set", json!({"ids": [f["id"]]})).unwrap();
+        assert!(super::proxy_affects_text(&app));
+        app.run("color.swapFillStroke", json!({})).unwrap();
+        assert_eq!(chars(&mut app), ("[None]".to_string(), "[Black]".to_string()));
+        app.run("color.formattingAffectsText", json!({"on": false})).unwrap();
+        assert!(!super::proxy_affects_text(&app));
     }
 }

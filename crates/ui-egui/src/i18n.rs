@@ -55,6 +55,16 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    (
+        "Formatting Affects Container/Text",
+        [
+            "Formatierung wirkt sich auf Rahmen/Text aus",
+            "Mise en forme du bloc/texte",
+            "El formato afecta al contenedor/texto",
+            "書式設定の対象：コンテナー／テキスト",
+            "格式针对容器/文本",
+        ],
+    ),
     ("Reverse Path", ["Pfadrichtung umkehren", "Inverser le tracé", "Invertir trazado", "パスの方向反転", "反转路径"]),
     ("Set Anchor", ["Ankerpunkt festlegen", "Définir le point d’ancrage", "Definir punto de ancla", "アンカーポイントを設定", "设置锚点"]),
     ("Clear", ["Löschen", "Effacer", "Borrar", "消去", "清除"]),

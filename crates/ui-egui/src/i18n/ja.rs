@@ -30,6 +30,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "カット"),
     ("Copy", "コピー"),
     ("Paste", "ペースト"),
+    ("Formatting Affects Container/Text", "書式設定の対象：コンテナー／テキスト"),
     ("Reverse Path", "パスの方向反転"),
     ("Set Anchor", "アンカーポイントを設定"),
     ("Clear", "消去"),

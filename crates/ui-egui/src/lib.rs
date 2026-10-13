@@ -291,6 +291,10 @@ pub struct UiState {
     /// Color panel act on it (X toggles).
     #[serde(skip)]
     pub stroke_front: bool,
+    /// Tools panel: Formatting Affects Text (J): with text frames selected, the proxy's colours
+    /// are their text's.
+    #[serde(default)]
+    pub formatting_affects_text: bool,
 }
 
 impl Default for UiState {
@@ -367,6 +371,7 @@ impl Default for UiState {
             palette: None,
             flyout: None,
             stroke_front: false,
+            formatting_affects_text: false,
         }
     }
 }

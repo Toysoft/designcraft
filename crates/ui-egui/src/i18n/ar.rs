@@ -30,6 +30,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "قص"),
     ("Copy", "نسخ"),
     ("Paste", "لصق"),
+    ("Formatting Affects Container/Text", "التنسيق يؤثر على الحاوية/النص"),
     ("Reverse Path", "عكس المسار"),
     ("Set Anchor", "تعيين نقطة الارتساء"),
     ("Clear", "مسح"),

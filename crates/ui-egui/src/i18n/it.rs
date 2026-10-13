@@ -28,6 +28,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "Taglia"),
     ("Copy", "Copia"),
     ("Paste", "Incolla"),
+    ("Formatting Affects Container/Text", "Formattazione su contenitore/testo"),
     ("Reverse Path", "Inverti tracciato"),
     ("Set Anchor", "Imposta ancoraggio"),
     ("Clear", "Cancella"),
