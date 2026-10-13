@@ -1896,10 +1896,10 @@ mod tests {
     }
 
     #[test]
-    fn clicks_in_a_row_select_word_sentence_paragraph_and_story() {
+    fn clicks_in_a_row_select_word_line_paragraph_and_story() {
         let text = "One two. Three four! Five six.\nSecond para here.";
         let (mut h, id) = typing(text);
-        // Inside "Three", the second sentence: its start is not the paragraph's.
+        // Inside "Three": two clicks the word, three the line, four the paragraph, five the story.
         let p = screen_at(&mut h, id, 10..14);
         h.hover_at(p);
         h.step();
@@ -1909,7 +1909,7 @@ mod tests {
             let r = selected(&h);
             got.push(text[r].to_string());
         }
-        assert_eq!(got[1..], ["Three", "Three four! ", "One two. Three four! Five six.", text], "{got:?}");
+        assert_eq!(got[1..], ["Three", "One two. Three four! Five six.", "One two. Three four! Five six.", text], "{got:?}");
         assert!(got[0].is_empty(), "one click places the caret: {got:?}");
     }
 
@@ -2149,11 +2149,11 @@ mod text_editing_tests {
         t.app.run("object.fill", json!({"swatch": "[Paper]"})).unwrap();
         t.app.run("object.stroke", json!({"swatch": "[Black]"})).unwrap();
         // X: Stroke in front, and back.
-        assert!(!t.app.stroke_front);
+        assert!(!t.app.ui.stroke_front);
         t.key(egui::Key::X, egui::Modifiers::NONE);
-        assert!(t.app.stroke_front);
+        assert!(t.app.ui.stroke_front);
         t.key(egui::Key::X, egui::Modifiers::NONE);
-        assert!(!t.app.stroke_front);
+        assert!(!t.app.ui.stroke_front);
         // Shift+X: the frame's fill and stroke trade places.
         t.key(egui::Key::X, egui::Modifiers::SHIFT);
         assert_eq!(colours(&t), ("[Black]".to_string(), "[Paper]".to_string()));
@@ -2174,7 +2174,7 @@ mod text_editing_tests {
         t.step(vec![egui::Event::Text("x".into())], egui::Modifiers::NONE, None);
         t.key(egui::Key::X, egui::Modifiers::NONE);
         assert!(t.text().starts_with('x'));
-        assert!(!t.app.stroke_front);
+        assert!(!t.app.ui.stroke_front);
     }
 
     #[test]

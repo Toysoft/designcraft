@@ -13,7 +13,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let doc = st.doc.clone();
     // Clicks apply to the fill or stroke in front in the Tools panel, of the text or the frames.
     let text = super::formatting_affects_text(app);
-    let stroke = app.stroke_front;
+    let stroke = app.ui.stroke_front;
     let fill_cur = super::target_swatch(app, stroke).map(|s| s.0);
     let applies = match (text, stroke) {
         (true, false) => "Applies to text",

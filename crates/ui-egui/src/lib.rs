@@ -507,8 +507,6 @@ pub struct DesignApp {
     pub format_text: Option<bool>,
     /// Whether text was being edited when `format_text` was last read (a change resets it).
     pub format_text_editing: bool,
-    /// The Tools panel's Stroke is in front of its Fill (X): swatches apply to strokes.
-    pub stroke_front: bool,
     /// Story open in the Story Editor.
     pub story_editor: Option<designcraft_doc::StoryId>,
     control_rx: Option<Receiver<ControlRequest>>,
@@ -567,7 +565,6 @@ impl DesignApp {
             paste_plain: false,
             format_text: None,
             format_text_editing: false,
-            stroke_front: false,
             story_editor: None,
             control_rx: None,
             pending_shots: vec![],

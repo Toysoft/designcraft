@@ -1339,8 +1339,8 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
             }))
         }
         "window.toggleFillStroke" => {
-            app.stroke_front = p.get("stroke").and_then(Value::as_bool).unwrap_or(!app.stroke_front);
-            Ok(json!({"stroke": app.stroke_front}))
+            app.ui.stroke_front = p.get("stroke").and_then(Value::as_bool).unwrap_or(!app.ui.stroke_front);
+            Ok(json!({"stroke": app.ui.stroke_front}))
         }
         "window.swapFillStroke" => crate::panels::swap_fill_stroke(app),
         "window.formattingAffectsText" => {
