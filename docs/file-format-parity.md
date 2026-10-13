@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (XLSX cached values preserve numeric precision and text; shared print spooler; Windows CI passes) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every format InDesign 2026 reads or writes, with DesignCraft's support, fidelity and tests. The
 InDesign list comes from its bundle's `Info.plist` (`CFBundleDocumentTypes`,
@@ -62,7 +62,7 @@ score below).
 | HEIC | `.heic` | ✓ | ✗ | | <1% |
 | Word | `.docx` | ✓ styles, footnotes, tables, track changes, options | ✓ styles by name, footnotes, tables, tabs, breaks, moved text (#257), style mapping and conflicts | `.doc` not supported (InDesign reads it) | 2% |
 | RTF | `.rtf` | ✓ | ✓ | | <1% |
-| Excel | `.xlsx`, `.xls` | ✓ | ~ `.xlsx` first sheet's used range | no sheet/range options; `.xls` ✗ | <1% |
+| Excel | `.xlsx`, `.xls` | ✓ | ~ `.xlsx` first sheet's used range | cached numbers keep their precision and formula strings stay text; no sheet/range options; `.xls` ✗ | <1% |
 | Plain text, Markdown | `.txt`, `.md` | ✓ (txt) | ✓ | | <1% |
 | InDesign Tagged Text | `.txt` | ✓ | ✓ import and export | | <1% |
 | CSV / TSV (Data Merge) | | ✓ | ✓ (+ Excel) | | <1% |
@@ -107,4 +107,5 @@ for real work** (estimated). INDD alone moves this dimension by up to 30 points.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | XLSX table placement and data merge preserve small numeric values and cached formula strings; synthetic regressions in `textimport::xlsx::tests`. Scores unchanged. |
 | 2026-10-10 | major | Created from InDesign 2026's declared document types and filters, `plan/indesign/08-file-formats.md` and the code |
