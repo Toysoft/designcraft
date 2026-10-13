@@ -106,7 +106,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "{} — [None] for the fill or stroke in front of the proxy (of the selected text when the proxy affects text)",
     ),
     (
-        "color.formattingAffectsText",
+        "app.formattingAffectsText",
         "Formatting Affects Container/Text",
         Some("J"),
         "{on?: bool} → {on} — with text frames selected, the proxy's colours go to their text (on) or the frames (off); toggles without `on`",
@@ -1157,7 +1157,7 @@ pub fn run_ui(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value, 
         "color.swapFillStroke" => crate::toolbar::swap_fill_stroke(app),
         "color.toggleFillStroke" => crate::toolbar::toggle_fill_stroke(app),
         "color.applyNone" => crate::toolbar::apply_none(app),
-        "color.formattingAffectsText" => crate::toolbar::formatting_affects_text(app, p.get("on").and_then(Value::as_bool)),
+        "app.formattingAffectsText" => crate::toolbar::formatting_affects_text(app, p.get("on").and_then(Value::as_bool)),
         "view.frameEdges" => flag(&mut app.ui.frame_edges),
         "view.overprintPreview" => {
             app.canvas.shown = None;

@@ -309,7 +309,7 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32) {
             })
             .clicked()
         {
-            let _ = app.run("color.formattingAffectsText", json!({"on": k == 1}));
+            let _ = app.run("app.formattingAffectsText", json!({"on": k == 1}));
         }
     }
     ui.add_space(5.0);
@@ -670,7 +670,7 @@ mod proxy_text_tests {
         // A rectangle: its own fill and stroke, J or not.
         let r = app.run("frame.create", json!({"rect": [72, 200, 200, 300], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
         app.run("selection.set", json!({"ids": [r]})).unwrap();
-        app.run("color.formattingAffectsText", json!({})).unwrap();
+        app.run("app.formattingAffectsText", json!({})).unwrap();
         assert!(app.ui.formatting_affects_text);
         assert!(!super::proxy_affects_text(&app));
         app.run("color.defaultFillStroke", json!({})).unwrap();
@@ -681,7 +681,7 @@ mod proxy_text_tests {
         assert!(super::proxy_affects_text(&app));
         app.run("color.swapFillStroke", json!({})).unwrap();
         assert_eq!(chars(&mut app), ("[None]".to_string(), "[Black]".to_string()));
-        app.run("color.formattingAffectsText", json!({"on": false})).unwrap();
+        app.run("app.formattingAffectsText", json!({"on": false})).unwrap();
         assert!(!super::proxy_affects_text(&app));
     }
 }
