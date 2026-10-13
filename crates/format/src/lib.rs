@@ -25,7 +25,7 @@ pub enum FormatError {
     #[error("not a DesignCraft document: {0}")]
     NotOurs(String),
     #[error("document is from a newer DesignCraft (format {0}); please update")]
-    TooNew(u32),
+    TooNew(u64),
     #[error("{0}")]
     Io(String),
 }
@@ -96,9 +96,9 @@ fn load_zip(bytes: &[u8]) -> Result<Document, FormatError> {
     if let Some(meta) = read(&mut z, "meta.json")
         && let Ok(m) = serde_json::from_slice::<Value>(&meta)
         && let Some(v) = m.get("version").and_then(Value::as_u64)
-        && v as u32 > VERSION
+        && v > u64::from(VERSION)
     {
-        return Err(FormatError::TooNew(v as u32));
+        return Err(FormatError::TooNew(v));
     }
     let json = read(&mut z, "document.json").ok_or_else(|| FormatError::NotOurs("missing document.json".into()))?;
     let mut v: Value = serde_json::from_slice(&json).map_err(|e| FormatError::NotOurs(e.to_string()))?;
@@ -417,5 +417,19 @@ mod tests {
             z.finish().unwrap();
         }
         assert!(matches!(load(&buf.into_inner()), Err(FormatError::TooNew(99))));
+    }
+
+    #[test]
+    fn newer_version_is_not_narrowed_to_u32() {
+        for version in [u64::from(VERSION) + 1, (1u64 << 32) + u64::from(VERSION), u64::MAX] {
+            let mut buf = Cursor::new(Vec::new());
+            {
+                let mut z = zip::ZipWriter::new(&mut buf);
+                z.start_file("meta.json", zip::write::SimpleFileOptions::default()).unwrap();
+                z.write_all(format!(r#"{{"version": {version}}}"#).as_bytes()).unwrap();
+                z.finish().unwrap();
+            }
+            assert!(matches!(load(&buf.into_inner()), Err(FormatError::TooNew(v)) if v == version), "version {version}");
+        }
     }
 }
