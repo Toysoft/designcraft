@@ -95,8 +95,8 @@ tools, headless or connected to the app. See [agents.md](agents.md), [mcp.md](mc
 
 `cargo xtask ci`: rustfmt, clippy `-D warnings`, tests, `assets` (every asset attributed in
 ASSETS.md), `layers`, `wasm`. Clean crates deny `unwrap`/`expect`/`panic!`/`todo!`/
-`unimplemented!`/`unreachable!`. CI on GitHub currently runs only the FreeBSD and Windows ARM64
-builds (on manifest changes), packaging lint and the release workflow; `xtask ci` runs locally.
+`unimplemented!`/`unreachable!`. CI on GitHub runs only packaging lint and the release workflow,
+which builds a Linux x86_64 tarball on every `v*` tag; `xtask ci` runs locally.
 
 ## Revision history
 
