@@ -128,6 +128,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-14** · The Free Transform tool (E) works as InDesign's: drag inside to move, a handle to scale with the contents (Shift keeps proportions, Alt from the centre), past the opposite edge to reflect, outside the box to rotate (Shift: 45°), and Cmd during a handle's drag shears (Alt+Cmd from the centre). It was a placeholder. No readiness percentage change.
 - **2026-10-12** · Text threads by hand: click a selected text frame's in or out port to load
   the text cursor, then click a frame to thread it, click empty space for a column-wide frame or
   drag one (it snaps like frame drawing); Shift-click autoflows, Alt-click stays loaded on the
