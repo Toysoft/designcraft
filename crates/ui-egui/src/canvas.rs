@@ -408,10 +408,57 @@ fn cursor_icon(c: Cursor) -> egui::CursorIcon {
     }
 }
 
+/// The display options that change how the canvas texture looks without touching the document.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayKey {
+    quality: designcraft_render::DisplayQuality,
+    separation: Option<u8>,
+    rich_black: bool,
+    overprint_preview: bool,
+    proof_colors: bool,
+    tag_markers: bool,
+    highlight_substituted_fonts: bool,
+    highlight_hj: bool,
+    show_note_anchors: bool,
+    show_added_text: bool,
+    highlight_keeps: bool,
+    highlight_custom_tracking: bool,
+}
+
+fn display_key(app: &DesignApp) -> DisplayKey {
+    let (ui, prefs) = (&app.ui, &app.session.prefs);
+    DisplayKey {
+        quality: ui.display_quality,
+        separation: ui.separation,
+        rich_black: ui.rich_black,
+        overprint_preview: ui.overprint_preview,
+        proof_colors: ui.proof_colors,
+        tag_markers: ui.tag_markers,
+        highlight_substituted_fonts: prefs.highlight_substituted_fonts,
+        highlight_hj: prefs.highlight_hj,
+        show_note_anchors: prefs.show_note_anchors,
+        show_added_text: prefs.show_added_text,
+        highlight_keeps: prefs.highlight_keeps,
+        highlight_custom_tracking: prefs.highlight_custom_tracking,
+    }
+}
+
+/// When a display option changed, drop the texture and any render in flight: they were drawn with the old options.
+fn invalidate_on_display_change(app: &mut DesignApp) {
+    let key = display_key(app);
+    if app.canvas.display_key != Some(key) {
+        app.canvas.display_key = Some(key);
+        app.canvas.shown = None;
+        app.canvas.pending = None;
+        app.canvas.pending_doc = None;
+    }
+}
+
 /// Keep the canvas texture current. Panning inside the overscanned region just shifts the
 /// texture; zooming shows the old texture scaled until the background render arrives; document
 /// edits render synchronously so editing never lags.
 fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf, layout: &CanvasLayout, preview: bool) {
+    invalidate_on_display_change(app);
     let Some(st) = app.session.active() else { return };
     let ppp = ctx.pixels_per_point() as f64;
     let doc_key = (st.uid, std::sync::Arc::as_ptr(&st.doc) as u64, st.revision, preview);
@@ -1893,6 +1940,22 @@ mod tests {
         );
         h.run_steps(4);
         h
+    }
+
+    #[test]
+    fn display_option_change_drops_the_render_in_flight() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        let shown = crate::Shown { doc: (1, 2, 3, false), origin: Point::new(0.0, 0.0), zoom: 1.0, size: (10.0, 10.0) };
+        invalidate_on_display_change(&mut app);
+        app.canvas.shown = Some(shown);
+        app.canvas.pending = Some((7, shown));
+        // Nothing changed: the texture and the request stay.
+        invalidate_on_display_change(&mut app);
+        assert!(app.canvas.shown.is_some() && app.canvas.pending.is_some());
+        // A display option changed while the render ran: its result must not be accepted.
+        app.ui.display_quality = designcraft_render::DisplayQuality::Fast;
+        invalidate_on_display_change(&mut app);
+        assert!(app.canvas.shown.is_none() && app.canvas.pending.is_none() && app.canvas.pending_doc.is_none());
     }
 
     fn right_click(h: &mut Harness<'_, DesignApp>, p: Pos2) {

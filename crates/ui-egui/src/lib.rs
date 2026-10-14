@@ -440,6 +440,7 @@ impl CanvasCache {
             last_ms: 0.0,
             shown_doc: None,
             pending_doc: None,
+            display_key: None,
             patcher: designcraft_render::Renderer::new(),
             patches: 0,
         }
@@ -467,6 +468,8 @@ pub struct CanvasCache {
     pub shown_doc: Option<std::sync::Arc<designcraft_doc::Document>>,
     /// Document of the request in flight.
     pub pending_doc: Option<std::sync::Arc<designcraft_doc::Document>>,
+    /// Display options the texture and the request in flight were rendered with.
+    pub display_key: Option<canvas::DisplayKey>,
     /// Renders damaged regions (its own context: region sizes vary).
     pub patcher: designcraft_render::Renderer,
     /// Partial repaints / full renders since start (perf readout).
