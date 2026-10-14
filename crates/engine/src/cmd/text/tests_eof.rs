@@ -185,11 +185,13 @@ fn ordinary_carets_empty_stories_and_cell_eof_keep_their_existing_policy() {
     assert_eq!(caret.cell, Some(designcraft_doc::CellAddr { table, row: 0, col: 0 }));
     assert_eq!((caret.story, caret.anchor, caret.focus), (sid, 2, 2));
     assert!(s.doc().unwrap().selection.text.unwrap().cell.is_some());
-    let mut before = serde_json::to_value(&*s.doc().unwrap().doc).unwrap();
-    // Acquiring the cell mutably bumps its parent story even when caret formatting is unchanged.
-    before["stories"][sid.0.to_string()]["rev"] = json!(s.doc().unwrap().doc.story(sid).unwrap().rev.wrapping_add(1));
+    let before = serde_json::to_value(&*s.doc().unwrap().doc).unwrap();
     format(&mut s, json!({"size": 42}));
     assert_eq!(serde_json::to_value(&*s.doc().unwrap().doc).unwrap(), before);
+    assert_eq!(attrs(&mut s)["chars"]["size"], 42.0);
+    let pending = super::typing_format(&s).unwrap();
+    assert_eq!(pending.at, caret);
+    assert_eq!(pending.attrs.size, Some(42.0));
     s.doc().unwrap().doc.check().unwrap();
 }
 
@@ -462,4 +464,193 @@ fn eof_tracked_replacement_preserves_selected_lf_format_and_caret_staging() {
             s.doc().unwrap().doc.check().unwrap();
         }
     }
+}
+
+fn assert_pending_size_continues_at_new_eof(pending_edit: Value, stored_size: Option<f64>, resolved_size: f64) {
+    let (mut s, sid) = fixture("A");
+    assert_eq!(attrs(&mut s)["chars"]["size"], 12.0);
+    select(&mut s, sid, 0, 1);
+    format(&mut s, json!({"size": 15}));
+    select(&mut s, sid, 1, 1);
+    let before = s.doc().unwrap().doc.clone();
+    let original = before.story(sid).unwrap().format_after(0).clone();
+    let undo = s.doc().unwrap().history.undo.len();
+    format(&mut s, pending_edit.clone());
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before), "pending formatting must leave the entire document unchanged");
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+    assert_eq!(attrs(&mut s)["chars"]["size"], json!(resolved_size));
+    assert!(super::typing_format(&s).is_some());
+
+    assert_eq!(s.execute("text.insert", &json!({"text": "\n", "raw": true})).unwrap(), json!({"pos": 2}));
+    assert!(super::typing_format(&s).is_none());
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+    let after_lf = s.doc().unwrap().doc.clone();
+    let story = after_lf.story(sid).unwrap();
+    assert_eq!(story.text, "A\n");
+    assert_eq!(story.format_after(0), &original);
+    assert_eq!(story.format_after(1).over.size, stored_size, "the inserted LF already has the pending edit");
+    let eof_size = attrs(&mut s)["chars"]["size"].clone();
+    let mut back = reopen(&mut s);
+    select(&mut back, sid, 2, 2);
+    let reopened_eof_size = attrs(&mut back)["chars"]["size"].clone();
+
+    assert_eq!(s.execute("text.insert", &json!({"text": "X", "raw": true})).unwrap(), json!({"pos": 3}));
+    assert_eq!(back.execute("text.insert", &json!({"text": "X", "raw": true})).unwrap(), json!({"pos": 3}));
+    let typed = s.doc().unwrap().doc.clone();
+    let story = typed.story(sid).unwrap();
+    assert_eq!(story.text, "A\nX");
+    assert_eq!(story.format_after(0), &original);
+    assert_eq!(story.format_after(1).over.size, stored_size);
+    let inserted_size = story.format_after(2).over.size;
+    let native_story = back.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(native_story.text, "A\nX");
+    assert_eq!(native_story.format_after(0), &original);
+    assert_eq!(native_story.format_after(1).over.size, stored_size);
+    let reopened_inserted_size = native_story.format_after(2).over.size;
+    assert_eq!(
+        (eof_size, inserted_size, reopened_eof_size, reopened_inserted_size),
+        (json!(resolved_size), stored_size, json!(resolved_size), stored_size),
+        "pending edit {pending_edit} must continue after Enter, including native reopen"
+    );
+    assert_eq!(attrs(&mut s)["chars"]["size"], json!(resolved_size));
+    assert_eq!(attrs(&mut back)["chars"]["size"], json!(resolved_size));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &after_lf));
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &typed));
+    s.doc().unwrap().doc.check().unwrap();
+    back.doc().unwrap().doc.check().unwrap();
+}
+
+#[test]
+fn eof_pending_size_survives_newline_and_native_continuation() {
+    assert_pending_size_continues_at_new_eof(json!({"size": 20}), Some(20.0), 20.0);
+}
+
+#[test]
+fn eof_pending_size_clear_survives_newline_and_native_continuation() {
+    assert_pending_size_continues_at_new_eof(json!({"size": null}), None, 12.0);
+}
+
+fn assert_eof_color_follows_promotion(target: &str) {
+    let (mut s, sid) = fixture("A\n");
+    let prior = s.doc().unwrap().doc.story(sid).unwrap().clone();
+    let old = s.execute("object.color", &json!({"color": "#123456", "target": target})).unwrap()["swatch"].as_str().unwrap().to_string();
+    assert!(s.doc().unwrap().doc.swatch(&old).is_some());
+    assert!(super::typing_format(&s).is_none(), "outer blank EOF color is document-resident");
+    let story = s.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(story.text, prior.text);
+    assert_eq!(story.chars, prior.chars);
+    assert_eq!(story.paras[0], prior.paras[0]);
+    assert_eq!(serde_json::to_value(&story.paras[1].chars).unwrap()[target], json!(old));
+    assert_eq!(attrs(&mut s)["chars"][target], json!(old));
+    let before = s.doc().unwrap().doc.clone();
+    let undo = s.doc().unwrap().history.undo.len();
+
+    assert_eq!(s.execute("swatch.addToSwatches", &json!({"swatch": old, "name": "Brand"})).unwrap(), json!({"name": "Brand"}));
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+    assert!(s.doc().unwrap().doc.swatch(&old).is_none());
+    assert!(s.doc().unwrap().doc.swatch("Brand").is_some());
+    let promoted = s.doc().unwrap().doc.clone();
+    let eof_color = attrs(&mut s)["chars"][target].clone();
+    let mut back = reopen(&mut s);
+    select(&mut back, sid, 2, 2);
+    let reopened_eof_color = attrs(&mut back)["chars"][target].clone();
+
+    s.execute("text.insert", &json!({"text": "X", "raw": true})).unwrap();
+    back.execute("text.insert", &json!({"text": "X", "raw": true})).unwrap();
+    let story = s.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(story.text, "A\nX");
+    assert_eq!(story.format_after(0), prior.format_after(0));
+    assert_eq!(story.format_after(1), prior.format_after(1));
+    let inserted_color = serde_json::to_value(&story.format_after(2).over).unwrap()[target].clone();
+    let native_story = back.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(native_story.text, "A\nX");
+    assert_eq!(native_story.format_after(0), prior.format_after(0));
+    assert_eq!(native_story.format_after(1), prior.format_after(1));
+    let reopened_inserted_color = serde_json::to_value(&native_story.format_after(2).over).unwrap()[target].clone();
+    assert_eq!(
+        (eof_color, inserted_color, reopened_eof_color, reopened_inserted_color),
+        (json!("Brand"), json!("Brand"), json!("Brand"), json!("Brand")),
+        "promoted {target} must update persistent EOF typing and subsequent insertion"
+    );
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &promoted));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &promoted));
+    select(&mut s, sid, 2, 2);
+    assert_eq!(attrs(&mut s)["chars"][target], "Brand");
+    s.doc().unwrap().doc.check().unwrap();
+    back.doc().unwrap().doc.check().unwrap();
+}
+
+#[test]
+fn eof_promoted_fill_survives_native_reopen_and_typing() {
+    assert_eof_color_follows_promotion("fill");
+}
+
+#[test]
+fn eof_promoted_stroke_survives_native_reopen_and_typing() {
+    assert_eof_color_follows_promotion("stroke");
+}
+
+#[test]
+fn eof_promoted_swatch_updates_inherited_character_defaults() {
+    let (mut s, sid) = fixture("A\n");
+    let old = s.execute("object.color", &json!({"color": "#123456"})).unwrap()["swatch"].as_str().unwrap().to_string();
+    // Like the existing legacy-defaults fixture, load genuine paragraph character defaults.
+    // Staging a size then moves these references into eof_inherited_chars.
+    let mut legacy = serde_json::to_value(&*s.doc().unwrap().doc).unwrap();
+    let paragraph = &mut legacy["stories"][sid.0.to_string()]["paras"][1];
+    paragraph["chars"] = json!({"fill": old, "stroke": old});
+    paragraph.as_object_mut().unwrap().remove("eofInheritedChars");
+    let mut s = open(&serde_json::to_vec(&legacy).unwrap());
+    select(&mut s, sid, 2, 2);
+    format(&mut s, json!({"size": 20}));
+    let story = s.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(story.paras[1].chars.size, Some(20.0));
+    assert_eq!(story.paras[1].chars.fill, None);
+    assert_eq!(story.paras[1].chars.stroke, None);
+    assert_eq!(serde_json::to_value(story.paras[1].eof_inherited_chars.as_ref().unwrap()).unwrap(), json!({"fill": old, "stroke": old}));
+    assert!(story.chars.iter().all(|run| run.format.over.fill.is_none() && run.format.over.stroke.is_none()));
+    let before = s.doc().unwrap().doc.clone();
+    let undo = s.doc().unwrap().history.undo.len();
+
+    s.execute("swatch.addToSwatches", &json!({"swatch": old, "name": "Brand"})).unwrap();
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+    assert!(s.doc().unwrap().doc.swatch(&old).is_none());
+    assert!(s.doc().unwrap().doc.swatch("Brand").is_some());
+    let promoted = s.doc().unwrap().doc.clone();
+    let eof_attrs = attrs(&mut s);
+    let inherited = serde_json::to_value(&promoted.story(sid).unwrap().paras[1].eof_inherited_chars).unwrap();
+    let mut back = reopen(&mut s);
+    select(&mut back, sid, 2, 2);
+    back.execute("text.insert", &json!({"text": "X", "raw": true})).unwrap();
+    let after_attrs = attrs(&mut back);
+    let story = back.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(story.text, "A\nX");
+    assert_eq!(story.format_after(0), before.story(sid).unwrap().format_after(0));
+    assert_eq!(story.format_after(1), before.story(sid).unwrap().format_after(1));
+    assert_eq!(story.format_after(2).over.size, Some(20.0));
+    assert_eq!(story.format_after(2).over.fill, None);
+    assert_eq!(story.format_after(2).over.stroke, None);
+    assert!(story.paras[1].eof_inherited_chars.is_none());
+    let restored = serde_json::to_value(&story.paras[1].chars).unwrap();
+    assert_eq!(
+        (eof_attrs["chars"]["fill"].clone(), eof_attrs["chars"]["stroke"].clone(), inherited),
+        (json!("Brand"), json!("Brand"), json!({"fill": "Brand", "stroke": "Brand"})),
+        "promotion must update references held only in the EOF inheritance carrier"
+    );
+    assert_eq!(restored, json!({"fill": "Brand", "stroke": "Brand"}));
+    assert_eq!(after_attrs["chars"]["fill"], "Brand");
+    assert_eq!(after_attrs["chars"]["stroke"], "Brand");
+    assert_eq!(after_attrs["chars"]["size"], 20.0);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &promoted));
+    s.doc().unwrap().doc.check().unwrap();
+    back.doc().unwrap().doc.check().unwrap();
 }
