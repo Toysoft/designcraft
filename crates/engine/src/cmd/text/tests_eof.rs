@@ -654,3 +654,204 @@ fn eof_promoted_swatch_updates_inherited_character_defaults() {
     s.doc().unwrap().doc.check().unwrap();
     back.doc().unwrap().doc.check().unwrap();
 }
+
+#[test]
+fn eof_enter_preserves_promoted_empty_paragraph_leading() {
+    let (mut s, sid) = fixture("A\n");
+    select(&mut s, sid, 0, 2);
+    format(&mut s, json!({"leading": {"kind": "points", "value": 18}}));
+    select(&mut s, sid, 2, 2);
+    format(&mut s, json!({"leading": {"kind": "points", "value": 36}}));
+    let metrics = |s: &Session| {
+        s.cache
+            .get(&s.doc().unwrap().doc, sid, None)
+            .frames
+            .iter()
+            .flat_map(|f| &f.lines)
+            .map(|line| (line.para, line.range.clone(), line.leading))
+            .collect::<Vec<_>>()
+    };
+    let mut native = reopen(&mut s);
+    for s in [&mut s, &mut native] {
+        select(s, sid, 2, 2);
+        let before = s.doc().unwrap().doc.clone();
+        assert_eq!(metrics(s), vec![(0, 0..1, 18.0), (1, 2..2, 36.0)]);
+        s.execute("text.insert", &json!({"text": "\n", "raw": true})).unwrap();
+        let after = s.doc().unwrap().doc.clone();
+        let story = after.story(sid).unwrap();
+        assert_eq!(story.text, "A\n\n");
+        assert_eq!(story.format_after(0), before.story(sid).unwrap().format_after(0));
+        assert_eq!(story.format_after(1), before.story(sid).unwrap().format_after(1));
+        assert_eq!(
+            metrics(s),
+            vec![(0, 0..1, 18.0), (1, 2..2, 36.0), (2, 3..3, 36.0)],
+            "Enter must preserve the former EOF's composed leading, not only the new EOF"
+        );
+        assert!(story.paras[1].eof_inherited_chars.is_none());
+        assert!(story.paras[1].chars.is_empty());
+        assert!(story.paras[2].eof_inherited_chars.is_some());
+        let back = reopen(s);
+        assert_eq!(metrics(&back), vec![(0, 0..1, 18.0), (1, 2..2, 36.0), (2, 3..3, 36.0)]);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+        assert_eq!(metrics(s), vec![(0, 0..1, 18.0), (1, 2..2, 36.0)]);
+        s.execute("edit.redo", &json!({})).unwrap();
+        assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &after));
+        assert_eq!(metrics(s), vec![(0, 0..1, 18.0), (1, 2..2, 36.0), (2, 3..3, 36.0)]);
+        select(s, sid, 3, 3);
+        s.execute("text.insert", &json!({"text": "\n", "raw": true})).unwrap();
+        assert_eq!(metrics(s), vec![(0, 0..1, 18.0), (1, 2..2, 36.0), (2, 3..3, 36.0), (3, 4..4, 36.0)]);
+        s.doc().unwrap().doc.check().unwrap();
+        back.doc().unwrap().doc.check().unwrap();
+    }
+}
+
+#[test]
+fn eof_append_and_thread_preserve_both_stories_blank_leading() {
+    let metrics = |s: &Session, sid: StoryId| {
+        s.cache
+            .get(&s.doc().unwrap().doc, sid, None)
+            .frames
+            .iter()
+            .flat_map(|f| &f.lines)
+            .map(|line| (line.para, line.range.clone(), line.leading))
+            .collect::<Vec<_>>()
+    };
+    for direct_append in [true, false] {
+        let (mut s, sid) = fixture("A\n");
+        let from = s.doc().unwrap().doc.story(sid).unwrap().frames[0];
+        select(&mut s, sid, 0, 2);
+        format(&mut s, json!({"leading": {"kind": "points", "value": 18}}));
+        select(&mut s, sid, 2, 2);
+        format(&mut s, json!({"leading": {"kind": "points", "value": 36}}));
+        let frame = s.execute("frame.create", &json!({"rect": [40, 520, 440, 740], "content": "text", "text": "B\n"})).unwrap();
+        let other_sid = StoryId(frame["story"].as_u64().unwrap());
+        select(&mut s, other_sid, 0, 2);
+        format(&mut s, json!({"leading": {"kind": "points", "value": 22}}));
+        select(&mut s, other_sid, 2, 2);
+        format(&mut s, json!({"leading": {"kind": "points", "value": 42}}));
+        let incoming = s.doc().unwrap().doc.story(other_sid).unwrap().clone();
+        let original = s.doc().unwrap().doc.story(sid).unwrap().clone();
+        assert_eq!(metrics(&s, sid), vec![(0, 0..1, 18.0), (1, 2..2, 36.0)]);
+        assert_eq!(metrics(&s, other_sid), vec![(0, 0..1, 22.0), (1, 2..2, 42.0)]);
+
+        // Empty appends must neither consume a stage nor invent a separator.
+        let mut unchanged = original.clone();
+        unchanged.append_story(designcraft_doc::Story::with_text(StoryId(0), "", Default::default()));
+        assert_eq!(unchanged, original);
+        let (mut empty, empty_sid) = fixture("");
+        empty
+            .edit(|d, _| {
+                d.story_mut(empty_sid).unwrap().append_story(incoming.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(empty.doc().unwrap().doc.story(empty_sid).unwrap().text, "B\n");
+        assert_eq!(empty.doc().unwrap().doc.story(empty_sid).unwrap().paras, incoming.paras);
+        assert_eq!(metrics(&empty, empty_sid), vec![(0, 0..1, 22.0), (1, 2..2, 42.0)]);
+        empty.doc().unwrap().doc.check().unwrap();
+
+        let before = s.doc().unwrap().doc.clone();
+        if direct_append {
+            s.edit(|d, _| {
+                d.story_mut(sid).unwrap().append_story(incoming.clone());
+                Ok(())
+            })
+            .unwrap();
+        } else {
+            s.execute("text.thread", &json!({"from": from.0, "to": frame["id"]})).unwrap();
+            assert!(s.doc().unwrap().doc.story(other_sid).is_none());
+        }
+        let after = s.doc().unwrap().doc.clone();
+        let story = after.story(sid).unwrap();
+        assert_eq!(story.text, "A\n\nB\n");
+        assert_eq!(story.format_after(0), original.format_after(0));
+        assert_eq!(story.format_after(1), original.format_after(1));
+        assert_eq!(story.format_after(3), incoming.format_after(0));
+        let expected = vec![(0, 0..1, 18.0), (1, 2..2, 36.0), (2, 3..4, 22.0), (3, 5..5, 42.0)];
+        assert_eq!(metrics(&s, sid), expected, "direct_append={direct_append}: both blank paragraphs must keep their own leading");
+        assert!(story.paras[1].eof_inherited_chars.is_none());
+        assert!(story.paras[1].chars.is_empty());
+        assert!(story.paras[3].eof_inherited_chars.is_some());
+        let back = reopen(&mut s);
+        assert_eq!(metrics(&back, sid), expected);
+        if !direct_append {
+            s.execute("edit.undo", &json!({})).unwrap();
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+            assert_eq!(metrics(&s, sid), vec![(0, 0..1, 18.0), (1, 2..2, 36.0)]);
+            assert_eq!(metrics(&s, other_sid), vec![(0, 0..1, 22.0), (1, 2..2, 42.0)]);
+            s.execute("edit.redo", &json!({})).unwrap();
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &after));
+            assert_eq!(metrics(&s, sid), expected);
+        }
+        s.doc().unwrap().doc.check().unwrap();
+        back.doc().unwrap().doc.check().unwrap();
+    }
+}
+
+#[test]
+fn eof_promoted_empty_leading_keeps_live_style_and_explicit_clear() {
+    for direct_append in [false, true] {
+        for clear_before in [false, true] {
+            let (mut s, sid) = fixture("A\n");
+            select(&mut s, sid, 0, 2);
+            if clear_before {
+                format(&mut s, json!({"leading": {"kind": "points", "value": 36}}));
+            } else {
+                s.execute("style.character.create", &json!({"name": "Live", "chars": {"leading": {"kind": "points", "value": 30}}})).unwrap();
+                s.execute("style.character.apply", &json!({"name": "Live"})).unwrap();
+            }
+            // Genuine paragraph defaults stay below the live character style and direct LF format.
+            let mut legacy = serde_json::to_value(&*s.doc().unwrap().doc).unwrap();
+            legacy["stories"][sid.0.to_string()]["paras"][1]["chars"] = json!({"leading": {"kind": "points", "value": 24}});
+            let mut s = open(&serde_json::to_vec(&legacy).unwrap());
+            let leading = |s: &Session| {
+                let composed = s.cache.get(&s.doc().unwrap().doc, sid, None);
+                let mut lines = composed.frames.iter().flat_map(|f| &f.lines).filter(|line| line.para == 1 && line.range == (2..2));
+                let leading = lines.next().unwrap().leading;
+                assert!(lines.next().is_none(), "the promoted paragraph must compose exactly once");
+                leading
+            };
+            select(&mut s, sid, 2, 2);
+            if clear_before {
+                format(&mut s, json!({"leading": null}));
+                assert!(s.doc().unwrap().doc.story(sid).unwrap().paras[1].chars.is_empty());
+            } else {
+                format(&mut s, json!({"leading": {"kind": "points", "value": 36}}));
+            }
+            let expected = if clear_before { 24.0 } else { 36.0 };
+            assert_eq!(leading(&s), expected);
+            if direct_append {
+                s.edit(|d, _| {
+                    d.story_mut(sid).unwrap().append_story(designcraft_doc::Story::with_text(StoryId(0), "B", Default::default()));
+                    Ok(())
+                })
+                .unwrap();
+            } else {
+                s.execute("text.insert", &json!({"text": "\n", "raw": true})).unwrap();
+            }
+            assert_eq!(s.doc().unwrap().doc.story(sid).unwrap().text, if direct_append { "A\n\nB" } else { "A\n\n" });
+            assert_eq!(leading(&s), expected, "direct_append={direct_append}, clear_before={clear_before}: the LF owns the blank's metrics");
+            let story = s.doc().unwrap().doc.story(sid).unwrap();
+            assert!(story.paras[1].eof_inherited_chars.is_none());
+            assert_eq!(story.paras[1].chars.leading, Some(Leading::Points(24.0)));
+            if clear_before {
+                assert_eq!(story.format_after(1).over.leading, Some(Leading::Points(36.0)));
+                assert_eq!(story.format_after(2).over.leading, None);
+            } else {
+                assert_eq!(story.format_after(2).style, "Live");
+                select(&mut s, sid, 2, 3);
+                format(&mut s, json!({"leading": null}));
+                assert_eq!(leading(&s), 30.0, "clearing direct leading must expose the live character style");
+                s.execute("style.character.edit", &json!({"name": "Live", "chars": {"leading": {"kind": "points", "value": 32}}})).unwrap();
+                assert_eq!(leading(&s), 32.0, "the separator's character style must remain live");
+                s.execute("style.character.edit", &json!({"name": "Live", "chars": {"leading": null}})).unwrap();
+                assert_eq!(leading(&s), 24.0, "removing style leading must expose genuine paragraph defaults");
+            }
+            let back = reopen(&mut s);
+            assert_eq!(leading(&back), 24.0);
+            s.doc().unwrap().doc.check().unwrap();
+            back.doc().unwrap().doc.check().unwrap();
+        }
+    }
+}
