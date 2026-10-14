@@ -333,6 +333,24 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32) {
             pen.frect(5.0, 5.0, 15.0, 9.0);
             pen.frect(5.0, 11.0, 11.0, 15.0);
         }
+        "objdistribute-h" => {
+            pen.frect(2.5, 5.0, 6.0, 15.0);
+            pen.frect(14.0, 5.0, 17.5, 15.0);
+            pen.line(&[(7.5, 10.0), (12.5, 10.0)]);
+            pen.line(&[(7.5, 10.0), (9.0, 8.5)]);
+            pen.line(&[(7.5, 10.0), (9.0, 11.5)]);
+            pen.line(&[(12.5, 10.0), (11.0, 8.5)]);
+            pen.line(&[(12.5, 10.0), (11.0, 11.5)]);
+        }
+        "objdistribute-v" => {
+            pen.frect(5.0, 2.5, 15.0, 6.0);
+            pen.frect(5.0, 14.0, 15.0, 17.5);
+            pen.line(&[(10.0, 7.5), (10.0, 12.5)]);
+            pen.line(&[(10.0, 7.5), (8.5, 9.0)]);
+            pen.line(&[(10.0, 7.5), (11.5, 9.0)]);
+            pen.line(&[(10.0, 12.5), (8.5, 11.0)]);
+            pen.line(&[(10.0, 12.5), (11.5, 11.0)]);
+        }
         "panel-transform" => {
             pen.rect(4.0, 4.0, 16.0, 16.0);
             for (x, y) in [(4.0, 4.0), (16.0, 4.0), (4.0, 16.0), (16.0, 16.0), (10.0, 10.0)] {
@@ -896,5 +914,26 @@ mod tests {
         assert_ne!(drawn[0], drawn[1], "Scale draws like Free Transform");
         assert_ne!(drawn[0], drawn[2], "Shear draws like Free Transform");
         assert_ne!(drawn[1], drawn[2], "Scale and Shear draw alike");
+    }
+
+    #[test]
+    fn distribute_icons_are_distinct_from_align_and_each_other() {
+        // `objalign-*` ship upstream and back the Properties Align row; only the
+        // two `objdistribute-*` icons are new here, so they must be real glyphs and
+        // must not collide with any `objalign-*` (one glyph per command).
+        let distribute = ["objdistribute-h", "objdistribute-v"];
+        let align = ["objalign-left", "objalign-hcenter", "objalign-right", "objalign-top", "objalign-vcenter", "objalign-bottom"];
+        let unknown = drawing("no-such-icon");
+        let d: Vec<String> = distribute.iter().map(|n| drawing(n)).collect();
+        for (n, g) in distribute.iter().zip(&d) {
+            assert_ne!(*g, unknown, "{n} falls back to the placeholder");
+        }
+        assert_ne!(d[0], d[1], "objdistribute-h and objdistribute-v draw alike");
+        for dn in &d {
+            for an in &align {
+                let ag = drawing(an);
+                assert_ne!(*dn, ag, "distribute icon draws like {an}");
+            }
+        }
     }
 }

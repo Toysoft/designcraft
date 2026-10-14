@@ -1866,37 +1866,24 @@ pub fn pathfinder_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
 
 pub fn align_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        for (edge, tip) in [
-            ("left", "Align left edges"),
-            ("hcenter", "Align horizontal centers"),
-            ("right", "Align right edges"),
-            ("top", "Align top edges"),
-            ("vcenter", "Align vertical centers"),
-            ("bottom", "Align bottom edges"),
+        for (edge, icon, tip) in [
+            ("left", "objalign-left", "Align left edges"),
+            ("hcenter", "objalign-hcenter", "Align horizontal centers"),
+            ("right", "objalign-right", "Align right edges"),
+            ("top", "objalign-top", "Align top edges"),
+            ("vcenter", "objalign-vcenter", "Align vertical centers"),
+            ("bottom", "objalign-bottom", "Align bottom edges"),
         ] {
-            if ui
-                .small_button(match edge {
-                    "left" => "⇤",
-                    "hcenter" => "↔",
-                    "right" => "⇥",
-                    "top" => "⤒",
-                    "vcenter" => "↕",
-                    _ => "⤓",
-                })
-                .on_hover_ui(|ui| {
-                    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, tip));
-                })
-                .clicked()
-            {
+            if widgets::icon_toggle(ui, icon, false, crate::i18n::tr(&app.ui.language, tip)).clicked() {
                 let _ = app.run("object.align", json!({"edge": edge}));
             }
         }
     });
     ui.horizontal(|ui| {
-        if ui.small_button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Distribute ↔"))).clicked() {
+        if widgets::icon_toggle(ui, "objdistribute-h", false, crate::i18n::tr(&app.ui.language, "Distribute ↔")).clicked() {
             let _ = app.run("object.distribute", json!({"axis": "horizontal"}));
         }
-        if ui.small_button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Distribute ↕"))).clicked() {
+        if widgets::icon_toggle(ui, "objdistribute-v", false, crate::i18n::tr(&app.ui.language, "Distribute ↕")).clicked() {
             let _ = app.run("object.distribute", json!({"axis": "vertical"}));
         }
     });
