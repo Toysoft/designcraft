@@ -250,8 +250,12 @@ fn page_menu(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Docu
         ui.close();
     }
     let mut shuffle = doc.spreads.get(si).is_none_or(|sp| sp.allow_shuffle);
-    if ui.checkbox(&mut shuffle, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Allow Spread to Shuffle"))).clicked() {
+    let response =
+        crate::widgets::native_checkbox(ui, &mut shuffle, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Allow Spread to Shuffle")));
+    if response.changed() {
         let _ = app.run("layout.spreadShuffle", json!({"spread": si, "allow": shuffle}));
+    }
+    if response.clicked() {
         ui.close();
     }
     ui.separator();
