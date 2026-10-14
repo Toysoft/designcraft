@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use craft_ui::theme::SuitePalette;
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,7 @@ impl Brightness {
 #[derive(Clone, Copy, Debug)]
 pub struct Tokens {
     pub dark: bool,
+    pub standard_dark: bool,
     pub app_bar: Color32,
     pub panel: Color32,
     pub panel_darker: Color32,
@@ -60,6 +62,7 @@ pub struct Tokens {
     pub tool_active: Color32,
     pub accent: Color32,
     pub accent_strong: Color32,
+    pub on_accent: Color32,
     pub row_selected: Color32,
     pub pasteboard: Color32,
     pub ruler: Color32,
@@ -71,6 +74,8 @@ pub struct Tokens {
     pub border: Color32,
     /// Outline of fields and buttons.
     pub field_border: Color32,
+    /// Active widget outline; separate from ordinary field borders in standard Dark.
+    pub focus: Color32,
     /// Active tool / toggle well.
     pub well: Color32,
     pub well_rim: Color32,
@@ -91,8 +96,10 @@ fn hex(s: u32) -> Color32 {
 
 impl Tokens {
     pub fn for_brightness(b: Brightness) -> Self {
+        let suite = SuitePalette::ARTCRAFT_DARK;
         let dark = Tokens {
             dark: true,
+            standard_dark: false,
             app_bar: hex(0x262626),
             panel: hex(0x323232),
             panel_darker: hex(0x282828),
@@ -108,6 +115,7 @@ impl Tokens {
             tool_active: hex(0x1b1b1b),
             accent: hex(0x378ef0),
             accent_strong: hex(0x1473e6),
+            on_accent: Color32::WHITE,
             row_selected: hex(0x2d4f7c),
             pasteboard: hex(0x232323),
             ruler: hex(0x2e2e2e),
@@ -117,6 +125,7 @@ impl Tokens {
             radius: 1,
             border: hex(0x1e1e1e),
             field_border: hex(0x5a5a5a),
+            focus: hex(0x5a5a5a),
             well: hex(0x1b1b1b),
             well_rim: hex(0x3a3a3a),
             ruler_text: hex(0xd8d8d8),
@@ -127,7 +136,38 @@ impl Tokens {
             measure_text: Color32::WHITE,
         };
         match b {
-            Brightness::Dark => dark,
+            // Shared ArtCraft UI roles. The measured Medium Dark and accessibility
+            // palettes continue to inherit the original base.
+            Brightness::Dark => Tokens {
+                standard_dark: true,
+                app_bar: suite.chrome,
+                panel: suite.panel,
+                panel_darker: suite.window,
+                input: suite.input,
+                input_border: suite.border,
+                divider: suite.border,
+                text: suite.text,
+                text_strong: suite.text_strong,
+                text_dim: suite.text_secondary,
+                text_disabled: suite.text_disabled,
+                icon: suite.text,
+                hover: suite.hover,
+                tool_active: suite.pressed,
+                accent: suite.accent,
+                accent_strong: suite.accent_hover,
+                on_accent: suite.on_accent,
+                row_selected: suite.selection,
+                tab_inactive: suite.chrome,
+                button: suite.raised,
+                border: suite.border,
+                field_border: suite.border_strong,
+                focus: suite.focus,
+                well: suite.raised,
+                well_rim: suite.border,
+                section_divider: suite.border,
+                tab_strip: suite.chrome,
+                ..dark
+            },
             // Measured from InDesign 2026 (plan/indesign/11-observed-ui.md §1).
             Brightness::MediumDark => Tokens {
                 app_bar: hex(0x535353),
@@ -151,6 +191,7 @@ impl Tokens {
                 button: hex(0x535353),
                 border: hex(0x383838),
                 field_border: hex(0x747474),
+                focus: hex(0x747474),
                 well: hex(0x303030),
                 well_rim: hex(0x565656),
                 ruler_text: hex(0xffffff),
@@ -181,6 +222,7 @@ impl Tokens {
                 button: hex(0xb8b8b8),
                 border: hex(0x8c8c8c),
                 field_border: hex(0x7a7a7a),
+                focus: hex(0x7a7a7a),
                 well: hex(0x9a9a9a),
                 well_rim: hex(0x8a8a8a),
                 ruler_text: hex(0x1e1e1e),
@@ -211,6 +253,7 @@ impl Tokens {
                 button: hex(0xf0f0f0),
                 border: hex(0xc4c4c4),
                 field_border: hex(0xa8a8a8),
+                focus: hex(0xa8a8a8),
                 well: hex(0xcfcfcf),
                 well_rim: hex(0xbdbdbd),
                 ruler_text: hex(0x1e1e1e),
@@ -242,6 +285,7 @@ impl Tokens {
                 button: hex(0x000000),
                 border: hex(0xffffff),
                 field_border: hex(0xffffff),
+                focus: hex(0xffffff),
                 well: hex(0x5c5c00),
                 well_rim: hex(0xffeb3b),
                 ruler_text: hex(0xffffff),
@@ -328,7 +372,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.window_stroke = Stroke::new(1.0, t.divider);
     v.window_corner_radius = CornerRadius::same(4);
     v.menu_corner_radius = CornerRadius::same(4);
-    v.selection.bg_fill = t.accent_strong;
+    v.selection.bg_fill = if t.standard_dark { t.row_selected } else { t.accent_strong };
     v.selection.stroke = Stroke::new(1.0, t.text_strong);
     v.hyperlink_color = t.accent;
     v.override_text_color = Some(t.text);
@@ -340,7 +384,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.divider);
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.field_border);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.field_border);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, t.field_border);
+    v.widgets.active.bg_stroke = Stroke::new(1.0, t.focus);
     // InDesign buttons are outline-only.
     v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = t.input;
@@ -360,6 +404,41 @@ impl Tokens {
     /// Tokens stored by [`apply`].
     pub fn get(ctx: &egui::Context) -> Tokens {
         ctx.data(|d| d.get_temp::<Tokens>(egui::Id::NULL)).unwrap_or_else(|| Tokens::for_brightness(Brightness::Dark))
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn standard_dark_roles_preserve_medium_and_high_contrast() {
+        let dark = Tokens::for_brightness(Brightness::Dark);
+        let suite = SuitePalette::ARTCRAFT_DARK;
+        assert_eq!(dark.app_bar, suite.chrome);
+        assert_eq!(dark.panel, suite.panel);
+        assert_eq!(dark.input, suite.input);
+        assert_eq!(dark.text, suite.text);
+        assert_eq!(dark.accent, suite.accent);
+        assert_eq!(dark.on_accent, suite.on_accent);
+        assert_eq!(dark.focus, suite.focus);
+        let ctx = egui::Context::default();
+        apply(&ctx, &dark);
+        assert_eq!(ctx.style_of(egui::Theme::Dark).visuals.widgets.active.bg_stroke.color, dark.focus);
+        assert!(dark.standard_dark);
+        assert_eq!(dark.row_selected, suite.selection);
+        assert_eq!(Tokens::for_brightness(Brightness::MediumDark).panel, hex(0x535353));
+        assert!(!Tokens::for_brightness(Brightness::MediumDark).standard_dark);
+        let high = Tokens::for_brightness(Brightness::HighContrast);
+        assert_eq!(high.panel, Color32::BLACK);
+        assert_eq!(high.accent, hex(0xffeb3b));
+        assert_eq!(high.input_border, Color32::WHITE);
+        assert!(!high.standard_dark);
+        for brightness in [Brightness::MediumDark, Brightness::MediumLight, Brightness::Light, Brightness::HighContrast] {
+            let alternative = Tokens::for_brightness(brightness);
+            assert_eq!(alternative.focus, alternative.field_border, "{brightness:?} focus changed");
+        }
+        assert_eq!(crate::UiState::default().brightness, Brightness::MediumDark);
     }
 }
 
