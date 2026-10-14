@@ -78,8 +78,8 @@ fn arrow(pen: &Pen, hollow: bool) {
 pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32) {
     let mut pen = Pen { p, r, c, w: 1.3 };
     match name {
-        "tool-selection" => arrow(&pen, true),
-        "tool-direct" => arrow(&pen, false),
+        "tool-selection" => arrow(&pen, false),
+        "tool-direct" => arrow(&pen, true),
         "tool-page" => {
             pen.closed(&[(5.0, 3.0), (12.0, 3.0), (15.0, 6.0), (15.0, 17.0), (5.0, 17.0)]);
             pen.line(&[(12.0, 3.0), (12.0, 6.0), (15.0, 6.0)]);
@@ -896,5 +896,21 @@ mod tests {
         assert_ne!(drawn[0], drawn[1], "Scale draws like Free Transform");
         assert_ne!(drawn[0], drawn[2], "Shear draws like Free Transform");
         assert_ne!(drawn[1], drawn[2], "Scale and Shear draw alike");
+    }
+
+    /// Whether the arrow icon `name` paints is filled, from the fill of its one path shape.
+    fn arrow_filled(name: &str) -> bool {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0)), name, Color32::WHITE);
+        });
+        out.textures_delta.clear();
+        out.shapes.iter().any(|s| matches!(&s.shape, Shape::Path(p) if p.fill != Color32::TRANSPARENT))
+    }
+
+    #[test]
+    fn selection_arrow_is_filled_and_direct_selection_hollow() {
+        assert!(arrow_filled("tool-selection"), "Selection draws a hollow arrow");
+        assert!(!arrow_filled("tool-direct"), "Direct Selection draws a filled arrow");
     }
 }
