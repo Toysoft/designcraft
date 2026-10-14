@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use craft_ui::theme::SuiteDarkPalette;
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,7 @@ fn hex(s: u32) -> Color32 {
 
 impl Tokens {
     pub fn for_brightness(b: Brightness) -> Self {
+        let suite = SuiteDarkPalette::ARTCRAFT;
         let dark = Tokens {
             dark: true,
             standard_dark: false,
@@ -134,36 +136,36 @@ impl Tokens {
             measure_text: Color32::WHITE,
         };
         match b {
-            // ArtCraft's first-party dark UI roles. The measured Medium Dark and
-            // accessibility palettes continue to inherit the original base.
+            // Shared ArtCraft UI roles. The measured Medium Dark and accessibility
+            // palettes continue to inherit the original base.
             Brightness::Dark => Tokens {
                 standard_dark: true,
-                app_bar: hex(0x0a0a0c),
-                panel: hex(0x101014),
-                panel_darker: hex(0x121316),
-                input: hex(0x060607),
-                input_border: hex(0x36373a),
-                divider: hex(0x36373a),
-                text: hex(0xf2f1ee),
-                text_strong: hex(0xffffff),
-                text_dim: hex(0xa6a6a8),
-                text_disabled: hex(0x717176),
-                icon: hex(0xf2f1ee),
-                hover: hex(0x323337),
-                tool_active: hex(0x414246),
-                accent: hex(0x2d81ff),
-                accent_strong: hex(0x59a7ff),
-                on_accent: hex(0x060607),
-                row_selected: hex(0x203b65),
-                tab_inactive: hex(0x0a0a0c),
-                button: hex(0x1e1f22),
-                border: hex(0x36373a),
-                field_border: hex(0x77787c),
-                focus: hex(0x74aaff),
-                well: hex(0x1e1f22),
-                well_rim: hex(0x36373a),
-                section_divider: hex(0x36373a),
-                tab_strip: hex(0x0a0a0c),
+                app_bar: suite.chrome,
+                panel: suite.panel,
+                panel_darker: suite.window,
+                input: suite.input,
+                input_border: suite.border,
+                divider: suite.border,
+                text: suite.text,
+                text_strong: suite.text_strong,
+                text_dim: suite.text_secondary,
+                text_disabled: suite.text_disabled,
+                icon: suite.text,
+                hover: suite.hover,
+                tool_active: suite.pressed,
+                accent: suite.accent,
+                accent_strong: suite.accent_hover,
+                on_accent: suite.on_accent,
+                row_selected: suite.selection,
+                tab_inactive: suite.chrome,
+                button: suite.raised,
+                border: suite.border,
+                field_border: suite.border_strong,
+                focus: suite.focus,
+                well: suite.raised,
+                well_rim: suite.border,
+                section_divider: suite.border,
+                tab_strip: suite.chrome,
                 ..dark
             },
             // Measured from InDesign 2026 (plan/indesign/11-observed-ui.md §1).
@@ -412,18 +414,19 @@ mod palette_tests {
     #[test]
     fn standard_dark_roles_preserve_medium_and_high_contrast() {
         let dark = Tokens::for_brightness(Brightness::Dark);
-        assert_eq!(dark.app_bar, hex(0x0a0a0c));
-        assert_eq!(dark.panel, hex(0x101014));
-        assert_eq!(dark.input, hex(0x060607));
-        assert_eq!(dark.text, hex(0xf2f1ee));
-        assert_eq!(dark.accent, hex(0x2d81ff));
-        assert_eq!(dark.on_accent, hex(0x060607));
-        assert_eq!(dark.focus, hex(0x74aaff));
+        let suite = SuiteDarkPalette::ARTCRAFT;
+        assert_eq!(dark.app_bar, suite.chrome);
+        assert_eq!(dark.panel, suite.panel);
+        assert_eq!(dark.input, suite.input);
+        assert_eq!(dark.text, suite.text);
+        assert_eq!(dark.accent, suite.accent);
+        assert_eq!(dark.on_accent, suite.on_accent);
+        assert_eq!(dark.focus, suite.focus);
         let ctx = egui::Context::default();
         apply(&ctx, &dark);
         assert_eq!(ctx.style_of(egui::Theme::Dark).visuals.widgets.active.bg_stroke.color, dark.focus);
         assert!(dark.standard_dark);
-        assert_eq!(dark.row_selected, hex(0x203b65));
+        assert_eq!(dark.row_selected, suite.selection);
         assert_eq!(Tokens::for_brightness(Brightness::MediumDark).panel, hex(0x535353));
         assert!(!Tokens::for_brightness(Brightness::MediumDark).standard_dark);
         let high = Tokens::for_brightness(Brightness::HighContrast);
