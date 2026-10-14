@@ -29,7 +29,7 @@ come as Middle East editions with an English or French interface and right-to-le
 |---|---|---|---|---|---|---|---|---|
 | English | en | ✓ | 1,724 / 1,724 (100%) | all / all / none | Latin ✓ | yes | full | 0 |
 | Simplified Chinese (Mandarin) | zh | ✓ (zh_CN) | 1,438 (83%) | menus, panels, most dialogs; tooltips partly; no help | CJK typesetting ✓ (cjk.md); **no canvas IME** (#322); CJK UI font not embedded in release builds, so boxes on Linux (#332) | no | partial | 25–40 |
-| Spanish | es | ✓ | 1,438 (83%) | menus, panels, most dialogs; no help | Latin ✓; Spanish hyphenation ✓ (#222) | no | partial | 5–8 |
+| Spanish | es | ✓ | 1,697 (98%): `es.rs` covers every catalog key (the shared column left 1,277 of its rows in English) | whole interface; no help | Latin ✓; Spanish hyphenation ✓ (#222) | no | partial | 1–2 |
 | Hindi | hi | ✗ | 0 (0%) | none | Devanagari shaped by harfrust in documents but untested; no Hindi hyphenation or spelling | no | none | 20–30 |
 | Arabic | ar | Middle East edition (English/French UI) | 1,459 (85%) | menus, panels, most dialogs; no help | RTL UI text (`rtl.rs`: bidi + shaping); Arabic composition, kashida, digits, RTL stories and tables ✓ (arabic-typography.md); list bullets and multi-column RTL open (#100) | no | partial | 15–25 |
 | French | fr | ✓ | 1,438 (83%) | menus, panels, most dialogs; no help | Latin ✓; no French hyphenation | no | partial | 6–10 |

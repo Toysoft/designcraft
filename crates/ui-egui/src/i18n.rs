@@ -4,6 +4,7 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 mod ar;
+mod es;
 mod it;
 mod ja;
 mod pt_br;
@@ -2880,6 +2881,7 @@ fn column(lang: &str) -> Option<usize> {
 
 /// `s` in `lang` (English, or the string itself, when there's no translation).
 pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
+    static SPANISH: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static JAPANESE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static TRANSLATIONS: OnceLock<HashMap<&'static str, [&'static str; 5]>> = OnceLock::new();
     static ARABIC: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
@@ -2889,8 +2891,13 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     if lang == "ar" {
         return ARABIC.get_or_init(|| ar::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
-    // The Japanese table covers the whole interface; the shared table's Japanese column is the fallback
-    // for keys added there after it.
+    // The Spanish and Japanese tables cover the whole interface; the shared table's Spanish and Japanese
+    // columns are the fallback for keys added there after them.
+    if lang == "es"
+        && let Some(text) = SPANISH.get_or_init(|| es::TABLE.iter().copied().collect()).get(s).copied()
+    {
+        return text;
+    }
     if lang == "ja"
         && let Some(text) = JAPANESE.get_or_init(|| ja::TABLE.iter().copied().collect()).get(s).copied()
     {
@@ -2952,12 +2959,15 @@ mod tests {
     fn cached_lookup_preserves_every_translation_across_language_switches() {
         for (key, translations) in TABLE {
             for (lang, expected) in ["de", "fr", "es", "ja", "zh"].into_iter().zip(translations) {
-                // `ja::TABLE` translates the whole interface and wins over the shared Japanese column.
-                if lang != "ja" {
+                // `es::TABLE` and `ja::TABLE` translate the whole interface and win over the shared columns.
+                if lang != "es" && lang != "ja" {
                     assert_eq!(tr(lang, key), *expected, "{lang}: {key}");
                 }
             }
             assert_eq!(tr("", key), *key);
+        }
+        for (key, expected) in es::TABLE {
+            assert_eq!(tr("es", key), *expected, "es: {key}");
         }
         for (key, expected) in ar::TABLE {
             assert_eq!(tr("ar", key), *expected, "ar: {key}");
@@ -3055,6 +3065,35 @@ mod tests {
         assert_eq!(style_name("uk", "My layout style"), "My layout style");
         assert_eq!(workspace_name("uk", "Essentials"), "Основне");
         assert_eq!(workspace_name("uk", "My workspace"), "My workspace");
+    }
+
+    #[test]
+    fn spanish_catalog_covers_every_key_and_preserves_placeholders() {
+        let catalog: std::collections::HashMap<_, _> = es::TABLE.iter().copied().collect();
+        assert_eq!(catalog.len(), es::TABLE.len(), "duplicate Spanish keys");
+        let mut keys: std::collections::HashSet<&str> = TABLE.iter().map(|(key, _)| *key).collect();
+        for table in [ja::TABLE, ar::TABLE, pt_br::TABLE, it::TABLE, uk::TABLE] {
+            keys.extend(table.iter().map(|(key, _)| *key));
+        }
+        let mut missing: Vec<_> = keys.iter().filter(|k| !catalog.contains_key(*k)).collect();
+        missing.sort();
+        assert!(missing.is_empty(), "Spanish lacks {missing:?}");
+        let stale: Vec<_> = catalog.keys().filter(|k| !keys.contains(*k)).collect();
+        assert!(stale.is_empty(), "Spanish entries for unknown keys: {stale:?}");
+        let placeholders =
+            |s: &str| s.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name.to_owned())).collect::<Vec<_>>();
+        for (key, translation) in es::TABLE {
+            assert!(!translation.trim().is_empty(), "empty {key}");
+            let (mut source, mut translated) = (placeholders(key), placeholders(translation));
+            source.sort();
+            translated.sort();
+            assert_eq!(source, translated, "placeholders: {key}");
+            assert_eq!(key.ends_with('…'), translation.ends_with('…'), "ellipsis: {key}");
+        }
+        assert_eq!(tr("es", "Cancel"), "Cancelar");
+        assert_eq!(tr("es", "Spread"), "Pliego");
+        assert_eq!(tr("es", "File"), "Archivo");
+        assert!(!is_rtl("es"));
     }
 
     #[test]
