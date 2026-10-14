@@ -474,10 +474,23 @@ pub fn font_family_picker(app: &mut DesignApp, ui: &mut egui::Ui, current: &str,
     }
 }
 
+/// The style a style combo shows: `—` for none; a style with axis settings is no longer its named
+/// style, so it shows its axes alone (`Cd Hair {wght:620}` → `(wght:620)`).
+pub fn style_shown(current: &str) -> String {
+    if current.is_empty() {
+        "—".to_string()
+    } else if let Some((_, axes)) = current.split_once('{') {
+        format!("({})", axes.trim_end_matches('}').trim())
+    } else {
+        current.to_string()
+    }
+}
+
 pub fn font_style_picker(app: &mut DesignApp, ui: &mut egui::Ui, family: &str, current: &str, width: f32) {
     let styles = fonts(app).styles(family);
     let mut pick = None;
-    egui::ComboBox::from_id_salt("font_style").selected_text(if current.is_empty() { "—" } else { current }).width(width).show_ui(ui, |ui| {
+    let shown = style_shown(current);
+    egui::ComboBox::from_id_salt("font_style").selected_text(shown).width(width).show_ui(ui, |ui| {
         for s in &styles {
             if ui.selectable_label(s == current, s).clicked() {
                 pick = Some(s.clone());
@@ -512,6 +525,13 @@ mod font_menu_tests {
     use designcraft_fonts::testing::{font_with, with_names};
 
     use super::*;
+
+    #[test]
+    fn a_style_with_axis_settings_shows_its_axes_alone() {
+        assert_eq!(style_shown("Cd Hair {wdth:110,wght:620,ital:1}"), "(wdth:110,wght:620,ital:1)");
+        assert_eq!(style_shown("Cd Hair"), "Cd Hair");
+        assert_eq!(style_shown(""), "—");
+    }
 
     #[test]
     fn cjk_fonts_follow_the_western_ones_under_their_native_names() {

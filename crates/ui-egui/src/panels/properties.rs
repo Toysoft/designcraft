@@ -1317,27 +1317,28 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
                 });
         });
     }
-    egui::Grid::new("chargrid").num_columns(4).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
-        caption(ui, crate::i18n::tr(&app.ui.language, "Size"));
-        if let Some(v) = number(ui, "pcs", c["size"].as_f64(), " pt", 56.0, 2) {
-            let _ = app.run("type.char", json!({"attrs": {"size": v}}));
+    // Two columns: Size over Tracking on the left, Leading over Baseline on the right. Each label
+    // is a fixed-width cell and each field takes the rest of its column.
+    let c_size = c["size"].as_f64();
+    let auto = c["leading"]["kind"].as_str() != Some("points");
+    let lv = if auto { c["size"].as_f64().map(|s| s * a["para"]["autoLeading"].as_f64().unwrap_or(1.2)) } else { c["leading"]["value"].as_f64() };
+    let tracking = c["tracking"].as_f64();
+    let baseline = c["baselineShift"].as_f64();
+    ui.columns(2, |cols| {
+        if let [left, right] = cols {
+            if let Some(v) = char_field(app, left, "Size", "pcs", c_size, " pt", 2) {
+                let _ = app.run("type.char", json!({"attrs": {"size": v}}));
+            }
+            if let Some(v) = char_field(app, left, "Tracking", "pct", tracking, "", 0) {
+                let _ = app.run("type.char", json!({"attrs": {"tracking": v}}));
+            }
+            if let Some(v) = char_field(app, right, "Leading", "pcl", lv, if auto { "" } else { " pt" }, 2) {
+                let _ = app.run("type.char", json!({"attrs": {"leading": {"kind": "points", "value": v}}}));
+            }
+            if let Some(v) = char_field(app, right, "Baseline", "pcb", baseline, " pt", 2) {
+                let _ = app.run("type.char", json!({"attrs": {"baselineShift": v}}));
+            }
         }
-        caption(ui, crate::i18n::tr(&app.ui.language, "Leading"));
-        let auto = c["leading"]["kind"].as_str() != Some("points");
-        let lv = if auto { c["size"].as_f64().map(|s| s * a["para"]["autoLeading"].as_f64().unwrap_or(1.2)) } else { c["leading"]["value"].as_f64() };
-        if let Some(v) = number(ui, "pcl", lv, if auto { crate::i18n::tr(&app.ui.language, " (auto)") } else { " pt" }, 64.0, 2) {
-            let _ = app.run("type.char", json!({"attrs": {"leading": {"kind": "points", "value": v}}}));
-        }
-        ui.end_row();
-        caption(ui, crate::i18n::tr(&app.ui.language, "Tracking"));
-        if let Some(v) = number(ui, "pct", c["tracking"].as_f64(), "", 56.0, 0) {
-            let _ = app.run("type.char", json!({"attrs": {"tracking": v}}));
-        }
-        caption(ui, crate::i18n::tr(&app.ui.language, "Baseline"));
-        if let Some(v) = number(ui, "pcb", c["baselineShift"].as_f64(), " pt", 64.0, 2) {
-            let _ = app.run("type.char", json!({"attrs": {"baselineShift": v}}));
-        }
-        ui.end_row();
     });
     ui.horizontal(|ui| {
         caption(ui, crate::i18n::tr(&app.ui.language, "Color"));
@@ -2252,28 +2253,49 @@ fn variable_font_axes(app: &mut DesignApp, ui: &mut egui::Ui, family: &str, styl
     let cur = |tag: &str, default: f32| face.coords.iter().find(|(t, _)| t == tag.as_bytes()).map_or(default, |c| c.1);
     let mut values: Vec<(String, f32)> = axes.iter().map(|a| (a.0.clone(), cur(&a.0, a.3))).collect();
     crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Variable Font")).size(11.0));
-    egui::Grid::new("vf_axes").num_columns(2).spacing(vec2(6.0, 2.0)).show(ui, |ui| {
-        for (i, (tag, name, min, _, max)) in axes.iter().enumerate() {
-            caption(ui, name);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 80.0;
-                // The value field beside the slider takes typed values, so the slider's own is hidden.
-                let slider = ui.add(egui::Slider::new(&mut values[i].1, *min..=*max).step_by(1.0).show_value(false));
-                if slider.changed() {
-                    variable_font_preview(app, ui, &base, &values);
-                }
-                if !slider.dragged() {
-                    variable_font_commit(app, ui);
-                }
-                if let Some(v) = number(ui, &format!("vf{tag}"), Some(values[i].1 as f64), "", 46.0, 0) {
-                    values[i].1 = (v as f32).clamp(*min, *max).round();
-                    variable_font_preview(app, ui, &base, &values);
-                    variable_font_commit(app, ui);
-                }
-            });
-            ui.end_row();
-        }
-    });
+    for (i, (tag, name, min, _, max)) in axes.iter().enumerate() {
+        // Label, then a slider filling the middle, then the value field: every axis's slider is the
+        // same length.
+        ui.horizontal(|ui| {
+            caption_cell(ui, name, PANEL_LABEL_W);
+            ui.spacing_mut().slider_width = (ui.available_width() - PANEL_FIELD_W - ui.spacing().item_spacing.x * 2.0).max(40.0);
+            // The value field beside the slider takes typed values, so the slider's own is hidden.
+            let slider = ui.add(egui::Slider::new(&mut values[i].1, *min..=*max).step_by(1.0).show_value(false));
+            if slider.changed() {
+                variable_font_preview(app, ui, &base, &values);
+            }
+            if !slider.dragged() {
+                variable_font_commit(app, ui);
+            }
+            if let Some(v) = number(ui, &format!("vf{tag}"), Some(values[i].1 as f64), "", PANEL_FIELD_W, 0) {
+                values[i].1 = (v as f32).clamp(*min, *max).round();
+                variable_font_preview(app, ui, &base, &values);
+                variable_font_commit(app, ui);
+            }
+        });
+    }
+}
+
+/// Label and value-field widths shared by the Character panel's rows, so their edges line up.
+const PANEL_LABEL_W: f32 = 52.0;
+const PANEL_FIELD_W: f32 = 52.0;
+
+/// A Character panel column row: a fixed-width caption, then a number field filling the rest of the
+/// column. Returns the value committed.
+fn char_field(app: &DesignApp, ui: &mut Ui, label: &str, id: &str, value: Option<f64>, suffix: &str, decimals: usize) -> Option<f64> {
+    ui.horizontal(|ui| {
+        caption_cell(ui, crate::i18n::tr(&app.ui.language, label), PANEL_LABEL_W);
+        let width = (ui.available_width() - ui.spacing().item_spacing.x).max(40.0);
+        number(ui, id, value, suffix, width, decimals)
+    })
+    .inner
+}
+
+/// A left-aligned caption in a cell of fixed width, so the field after it lines up.
+fn caption_cell(ui: &mut Ui, text: &str, width: f32) {
+    let t = Tokens::get(ui.ctx());
+    let (r, _) = ui.allocate_exact_size(vec2(width, crate::widgets::FIELD_H), Sense::hover());
+    crate::rtl::paint(ui.painter(), pos2(r.min.x, r.center().y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(11.5), t.text);
 }
 
 /// The style for the axis values: `base {tag:value,…}`.
