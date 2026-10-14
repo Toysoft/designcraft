@@ -889,6 +889,7 @@ dependencies = [
 name = "designcraft"
 version = "0.7.1"
 dependencies = [
+ "arboard",
  "designcraft-engine",
  "designcraft-ui-egui",
  "eframe",
@@ -945,6 +946,7 @@ dependencies = [
  "regex",
  "unicode-bidi",
  "unicode-bidi-mirroring",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -989,6 +991,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "unicode-segmentation",
  "wasm-bindgen-test",
  "zip",
 ]

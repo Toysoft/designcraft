@@ -86,6 +86,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.screenMode", "Screen Mode", None, "{mode: normal|preview|bleed|slug|presentation}"),
     ("view.togglePreview", "Toggle Normal/Preview", Some("W"), "{}"),
     (
+        "app.formattingAffectsText",
+        "Formatting Affects Text",
+        Some("J"),
+        "{on?: bool} — with text frames selected, colours go to their text (on) or the frames (off); toggles without `on`",
+    ),
+    (
         "color.defaultFillStroke",
         "Default Fill and Stroke",
         Some("D"),

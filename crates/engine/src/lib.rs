@@ -277,6 +277,8 @@ pub struct Session {
     pub(crate) transforms: (Vec<(String, Value)>, Vec<designcraft_doc::ItemId>, bool),
     /// Drag and drop text editing: the press landed in the selected text.
     pub(crate) text_drag: bool,
+    /// Character formatting chosen at a bare caret, for the text typed there next.
+    pub(crate) typing_format: Option<cmd::text::TypingFormat>,
     /// The open Object Library (File › New / Open Library).
     pub library: Option<cmd::library::Library>,
     /// The open book (File › Open Book).
@@ -308,6 +310,7 @@ impl Session {
             loaded: None,
             transforms: Default::default(),
             text_drag: false,
+            typing_format: None,
             library: None,
             conveyor: Vec::new(),
             book: None,
@@ -476,7 +479,7 @@ impl Session {
         }
         let mut d = (*st.doc).clone();
         if overset {
-            let _ = cmd::place_text_autoflow(&mut d, sid, 500);
+            let _ = cmd::place_text_autoflow(&mut d, sid, 500, "Smart Text Reflow");
         } else {
             // Drop empty trailing frames on the last pages (one frame, nothing else there).
             while let Some(story) = d.story(sid) {
