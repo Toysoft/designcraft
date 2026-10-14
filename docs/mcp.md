@@ -51,13 +51,16 @@ claude mcp add designcraft -- designcraft-cli mcp
 | UI-only commands via `execute` (`view.*`, `window.*`, `help.*`, `edit.dynamicSpelling`, and `app.*` except `app.links`) | Error | Work |
 
 In connected mode every tool maps to a control-channel method (`engine.execute`, `ui.render`, `ui.pointer`, …), so
-what the agent does shows up live in the window. The connection is re-established once if the app restarts.
+what the agent does shows up live in the window. A failed request is not resent: the operation may have completed,
+so inspect the document before retrying. The next request re-establishes the connection.
 
 ## Coordinates
 
 Points (1/72 in), y down, in **spread** space: on a single-page spread the page's top-left is (0, 0); on a facing
 spread the right page starts at x = page width. `inspect_document` lists page bounds per spread. Page indices in
-`render_page` / `export_png` are 0-based. `pointer` events in connected mode may use `"space": "screen"` (egui points,
+`render_page` / `export_png` are 0-based. Commands that create items take `spread`: a body spread index, or
+`{"kind": "parent", "index": 0}` for a parent spread (its index in `parents` of `inspect_document`); any other
+value is an error. `pointer` events in connected mode may use `"space": "screen"` (egui points,
 see `ui_inspect` → `canvasRect`).
 
 ## Text offsets

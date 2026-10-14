@@ -193,12 +193,12 @@ pub fn scripts(app: &mut DesignApp, ui: &mut egui::Ui) {
             sel = app.ui.scripts.len() - 1;
         }
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Load…"))).clicked()
-            && let Some(_path) = app.services.pick_open.as_mut().and_then(|f| f("script"))
+            && let Some(path) = app.services.pick_open.as_mut().and_then(|f| f("script"))
         {
             #[cfg(not(target_arch = "wasm32"))]
-            match std::fs::read_to_string(&_path) {
+            match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    let name = std::path::Path::new(&_path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Script".into());
+                    let name = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Script".into());
                     app.ui.scripts.push((name, text));
                     sel = app.ui.scripts.len() - 1;
                 }

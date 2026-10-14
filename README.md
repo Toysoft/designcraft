@@ -98,12 +98,15 @@ by its own renderer. Try it yourself with `File → New → Sample Document`, or
 
 ## Quick start
 
+The egui frontend requires Rust 1.95 or newer (including its shared `craft-ui` components).
+
 ```sh
 cargo run --release -p designcraft                         # desktop app (start screen)
 cargo run --release -p designcraft -- --sample             # open the sample magazine
 cargo run --release -p designcraft -- --sample --control 7979   # + JSON control channel
 cargo run --release -p designcraft-cli -- run --sample --all-pages out/       # headless: render every page to PNG
 cargo run --release -p designcraft-cli -- commands         # list every command
+cargo run --release -p designcraft-cli -- script --help    # command script syntax (docs/agents.md)
 cargo xtask ci                                             # fmt, clippy, tests, assets, layering, wasm
 ```
 
@@ -183,7 +186,7 @@ egui frontend is a separate crate, so the UI can be swapped without touching the
 | L6 | `ui-egui` (InDesign-style UI, control channel) |
 | L7 | `apps/designcraft`, `apps/designcraft-cli`, `apps/designcraft-web` |
 
-- **Status and milestones:** [ROADMAP.md](ROADMAP.md)
+- **Status and milestones:** [ROADMAP.md](ROADMAP.md) (stage: pre-alpha); how close to InDesign: [`docs/target-app-parity.md`](docs/target-app-parity.md); known gaps: [`docs/gaps.md`](docs/gaps.md)
 - **Contributor and agent rules** (clean-room, asset policy, quality gates): [`AGENTS.md`](AGENTS.md)
 - **Bundled assets:** every one is listed with its licence in [`ASSETS.md`](ASSETS.md)
 - **App icon and colour:** a calico cat in a polka-dot scarf on DesignCraft green `#7bb51c`; see [`assets/app-icon/`](assets/app-icon/README.md)
@@ -220,6 +223,8 @@ Installers and executables are code-signed.
 | Debian/Ubuntu | `designcraft-<ver>-linux-x86_64.deb` | `designcraft-<ver>-linux-aarch64.deb` | |
 | Fedora/RHEL/openSUSE | `designcraft-<ver>-linux-x86_64.rpm` | `designcraft-<ver>-linux-aarch64.rpm` | |
 | Tarball | `designcraft-<ver>-linux-x86_64.tar.gz` | `designcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
+
+RISC-V (riscv64): `designcraft-<ver>-linux-riscv64.tar.gz` only, cross-compiled; needs glibc 2.39+ (Ubuntu 24.04 or newer).
 
 ### FreeBSD
 

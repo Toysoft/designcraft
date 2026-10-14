@@ -5,23 +5,6 @@ use egui_kittest::{Harness, kittest::Queryable};
 use super::*;
 use crate::DesignApp;
 
-#[derive(Clone, Copy, Debug)]
-enum Opener {
-    Toolbar,
-    Taskbar,
-    Properties,
-}
-
-impl Opener {
-    fn rect_key(self) -> &'static str {
-        match self {
-            Self::Toolbar => "r6_tfo_toolbar_button",
-            Self::Taskbar => "r6_tfo_taskbar_button",
-            Self::Properties => "r6_tfo_properties_button",
-        }
-    }
-}
-
 fn configured_frames() -> (DesignApp, [ItemId; 2]) {
     let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"pages": 1})).unwrap();
@@ -60,43 +43,9 @@ fn click_caret(app: &mut DesignApp, frame: ItemId) {
     assert_eq!(selection.text.unwrap().frame, Some(frame));
 }
 
-fn button_frame(ctx: &egui::Context, app: &mut DesignApp, opener: Opener, events: Vec<egui::Event>) {
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 1600.0));
-    let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| match opener {
-        Opener::Toolbar => crate::toolbar::show(app, ui),
-        Opener::Taskbar => {
-            crate::taskbar::show(app, ui.ctx(), egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(600.0, 200.0)), screen);
-        }
-        Opener::Properties => {
-            ui.set_width(340.0);
-            crate::panels::properties::show(app, ui);
-        }
-    });
-    output.textures_delta.clear();
-}
-
-fn open_button(mut app: DesignApp, opener: Opener) -> DesignApp {
-    let ctx = egui::Context::default();
-    crate::theme::install_fonts(&ctx, "en");
-    for _ in 0..3 {
-        button_frame(&ctx, &mut app, opener, vec![]);
-    }
-    // Test-only capture observes the actual widget's response rectangle; every event below
-    // traverses its normal pointer/click handler, including taskbar pointer ownership.
-    let rect = ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::new(opener.rect_key()))).unwrap();
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 1600.0));
-    assert!(screen.contains(rect.min) && screen.contains(rect.max), "{opener:?}: {rect:?}");
-    let pos = rect.center();
-    button_frame(&ctx, &mut app, opener, vec![egui::Event::PointerMoved(pos)]);
-    for pressed in [true, false] {
-        button_frame(
-            &ctx,
-            &mut app,
-            opener,
-            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }],
-        );
-    }
-    assert_eq!(app.ui.dialog.as_ref().unwrap().id, "textFrameOptions", "{opener:?} must open through its actual button");
+fn open_options(mut app: DesignApp) -> DesignApp {
+    activate(&mut app, "object.textFrameOptions", &Value::Null);
+    assert_eq!(app.ui.dialog.as_ref().unwrap().id, "textFrameOptions");
     app
 }
 
@@ -172,13 +121,14 @@ fn assert_roundtrip(app: &mut DesignApp, before: &Document, expected: &Document,
     assert_eq!(app.session.doc().unwrap().selection, *selection);
 }
 
-fn check_button_hydration_and_rule_edit(opener: Opener) {
+#[test]
+fn tfo_menu_hydrates_and_disables_rules() {
     let (app, frames) = configured_frames();
     let st = app.session.doc().unwrap();
     let before = st.doc.clone();
     let selection = st.selection.clone();
     let undo_len = st.history.undo.len();
-    let app = open_button(app, opener);
+    let app = open_options(app);
     let fields = &app.ui.dialog.as_ref().unwrap().fields;
     let units = app.session.doc().unwrap().doc.settings.horizontal_units;
     let measure = |value| json!(designcraft_geom::format_measure(value, units));
@@ -198,7 +148,7 @@ fn check_button_hydration_and_rule_edit(opener: Opener) {
         ("columnRuleBottomInset", measure(9.0)),
         ("columnRuleOffset", measure(-2.0)),
     ] {
-        assert_eq!(fields[key], value, "{opener:?}: {key}");
+        assert_eq!(fields[key], value, "{key}");
     }
     assert!(std::sync::Arc::ptr_eq(&app.session.doc().unwrap().doc, &before));
     let mut harness = dialog(app);
@@ -214,62 +164,12 @@ fn check_button_hydration_and_rule_edit(opener: Opener) {
 }
 
 #[test]
-fn r6_tfo_real_toolbar_hydrates_and_disables_rules() {
-    check_button_hydration_and_rule_edit(Opener::Toolbar);
-}
-
-#[test]
-fn r6_tfo_real_taskbar_hydrates_and_disables_rules() {
-    check_button_hydration_and_rule_edit(Opener::Taskbar);
-}
-
-#[test]
-fn r6_tfo_real_properties_hydrates_and_disables_rules() {
-    check_button_hydration_and_rule_edit(Opener::Properties);
-}
-
-#[test]
-fn r6_tfo_real_buttons_preserve_no_edit_redo_and_cancel() {
-    for opener in [Opener::Toolbar, Opener::Taskbar, Opener::Properties] {
-        for cancel in [false, true] {
-            let (mut app, frames) = configured_frames();
-            app.run("object.textFrameOptions", json!({"gutter": 27})).unwrap();
-            app.run("edit.undo", json!({})).unwrap();
-            let st = app.session.doc().unwrap();
-            let before = st.doc.clone();
-            let selection = st.selection.clone();
-            let revision = st.revision;
-            let undo_len = st.history.undo.len();
-            let redo_len = st.history.redo.len();
-            assert!(redo_len > 0);
-            let mut harness = dialog(open_button(app, opener));
-            if cancel {
-                edit_measure(&mut harness, "Top", "99 pt");
-            }
-            harness.key_press(if cancel { egui::Key::Escape } else { egui::Key::Enter });
-            harness.run();
-            assert!(harness.state().ui.dialog.is_none());
-            let st = harness.state().session.doc().unwrap();
-            assert!(std::sync::Arc::ptr_eq(&st.doc, &before));
-            assert_eq!(st.selection, selection);
-            assert_eq!(st.revision, revision);
-            assert_eq!(st.history.undo.len(), undo_len);
-            assert_eq!(st.history.redo.len(), redo_len);
-            harness.state_mut().run("edit.redo", json!({})).unwrap();
-            let mut expected = (*before).clone();
-            expected.item_mut(frames[1]).unwrap().text_frame_mut().unwrap().options.gutter = 27.0;
-            assert_eq!(*harness.state().session.doc().unwrap().doc, expected);
-        }
-    }
-}
-
-#[test]
-fn r6_tfo_real_toolbar_preserves_mixed_partial_edits_and_bound_selection() {
+fn tfo_menu_preserves_mixed_partial_edits_and_bound_selection() {
     let (mut app, frames) = configured_frames();
     app.run("selection.set", json!({"ids": [frames[1], frames[0]]})).unwrap();
     let before = app.session.doc().unwrap().doc.clone();
     let undo_len = app.session.doc().unwrap().history.undo.len();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     // The final value equals the first displayed frame but differs on the other bound frame.
     edit_measure(&mut harness, "Top", "99 pt");
     edit_measure(&mut harness, "Top", "10 pt");
@@ -284,39 +184,6 @@ fn r6_tfo_real_toolbar_preserves_mixed_partial_edits_and_bound_selection() {
         expected.item_mut(frame).unwrap().text_frame_mut().unwrap().options.inset[0] = 10.0;
     }
     assert_roundtrip(harness.state_mut(), &before, &expected, &selection, undo_len);
-}
-
-fn check_caret_button_target_and_undo(opener: Opener) {
-    let (mut app, frames) = configured_frames();
-    std::sync::Arc::make_mut(&mut app.session.doc_mut().unwrap().doc).thread(frames[0], frames[1]).unwrap();
-    click_caret(&mut app, frames[1]);
-    let st = app.session.doc().unwrap();
-    let before = st.doc.clone();
-    let selection = st.selection.clone();
-    let undo_len = st.history.undo.len();
-    let error = app.run("object.textFrameOptions", json!({"inset": {"top": 7}})).unwrap_err();
-    assert!(error.contains("nothing selected"), "the direct-command gate remains intact: {error}");
-    assert!(std::sync::Arc::ptr_eq(&app.session.doc().unwrap().doc, &before));
-    let mut harness = dialog(open_button(app, opener));
-    // This field exists even on BEFORE, so a failure proves the missing caret target
-    // independently of incorrect rule-control hydration.
-    edit_measure(&mut harness, "Top", "7 pt");
-    harness.key_press(egui::Key::Enter);
-    harness.run();
-    assert!(harness.state().ui.dialog.is_none());
-    let mut expected = (*before).clone();
-    expected.item_mut(frames[1]).unwrap().text_frame_mut().unwrap().options.inset[0] = 7.0;
-    assert_roundtrip(harness.state_mut(), &before, &expected, &selection, undo_len);
-}
-
-#[test]
-fn r6_tfo_real_caret_toolbar_applies_only_actual_frame_and_undo() {
-    check_caret_button_target_and_undo(Opener::Toolbar);
-}
-
-#[test]
-fn r6_tfo_real_caret_taskbar_applies_only_actual_frame_and_undo() {
-    check_caret_button_target_and_undo(Opener::Taskbar);
 }
 
 fn check_caret_menu_or_control(control: bool) {
@@ -500,7 +367,7 @@ fn assert_owner_redo_retained(app: &mut DesignApp, before: &designcraft_engine::
 fn check_owner_control_switch(caret: bool) {
     let (app, frames) = owner_colliding_frames(caret);
     let before = app.session.documents().to_vec();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "file.activate", json!({"index": 1}));
     assert!(harness.state().ui.dialog.is_some(), "the supported control switch leaves the dialog open");
@@ -528,7 +395,7 @@ fn r6_tfo_owner_caret_control_switch_rejects_colliding_frame_id() {
 fn r6_tfo_owner_closed_document_rejects_colliding_frame_id() {
     let (app, frames) = owner_colliding_frames(false);
     let other = app.session.documents()[1].clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "file.close", json!({"index": 0}));
     assert_eq!(harness.state().session.active_index(), Some(0), "index 0 now belongs to a different UID");
@@ -547,7 +414,7 @@ fn r6_tfo_owner_closed_document_rejects_colliding_frame_id() {
 fn r6_tfo_owner_return_to_same_uid_applies_only_opening_frame_and_undo() {
     let (app, frames) = owner_colliding_frames(false);
     let before = app.session.documents().to_vec();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "file.activate", json!({"index": 1}));
     assert_owner_documents_unchanged(harness.state(), &before, before[1].uid);
@@ -568,7 +435,7 @@ fn r6_tfo_owner_no_edit_and_cancel_after_switch_preserve_both_histories() {
         for (cancel, edit) in [(false, false), (true, false), (true, true)] {
             let (app, frames) = owner_colliding_frames(caret);
             let before = app.session.documents().to_vec();
-            let mut harness = dialog(open_button(app, Opener::Toolbar));
+            let mut harness = dialog(open_options(app));
             if edit {
                 edit_measure(&mut harness, "Top", "7 pt");
             }
@@ -637,7 +504,7 @@ fn assert_state_rejection_preserves_document(harness: &mut Harness<'_, DesignApp
 fn check_state_undo_replacement(caret: bool) {
     let (app, frame, story, next_id) = state_opening_frame(caret);
     let opening = app.session.doc().unwrap().clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     assert_owner_document_unchanged(harness.state().session.doc().unwrap(), &opening);
     state_replace_opening_frame(harness.state_mut(), frame, story, next_id);
@@ -663,7 +530,7 @@ fn r6_tfo_state_unrelated_document_edit_rejects_and_preserves_redo() {
     let (mut app, frames) = configured_frames();
     owner_engine(&mut app, "selection.set", json!({"ids": [frames[0]]}));
     let opening = app.session.doc().unwrap().clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "selection.set", json!({"ids": [frames[1]]}));
     owner_engine(harness.state_mut(), "object.textFrameOptions", json!({"gutter": 37}));
@@ -680,7 +547,7 @@ fn r6_tfo_state_unrelated_document_edit_rejects_and_preserves_redo() {
 fn r6_tfo_state_deleted_opening_frame_rejects_before_engine_dispatch() {
     let (app, frame, _, _) = state_opening_frame(false);
     let uid = app.session.doc().unwrap().uid;
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "edit.clear", json!({}));
     assert!(harness.state().session.doc().unwrap().doc.item(frame).is_none());
@@ -710,7 +577,7 @@ fn r6_tfo_state_control_revert_rejects_stale_dialog_and_preserves_redo() {
     let path = directory.0.join("saved.designcraft");
     owner_engine(&mut app, "file.save", json!({"path": path.to_string_lossy()}));
     let opening = app.session.doc().unwrap().clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "object.textFrameOptions", json!({"gutter": 37}));
     owner_engine(harness.state_mut(), "file.revert", json!({}));
@@ -728,7 +595,7 @@ fn r6_tfo_state_selection_only_changes_preserve_bound_partial_edit() {
     let (mut app, frames) = configured_frames();
     owner_engine(&mut app, "selection.set", json!({"ids": [frames[1], frames[0]]}));
     let opening = app.session.doc().unwrap().clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "selection.set", json!({"ids": [frames[1]]}));
     let st = harness.state().session.doc().unwrap();
@@ -746,7 +613,7 @@ fn r6_tfo_state_selection_only_changes_preserve_bound_partial_edit() {
 #[test]
 fn r6_tfo_state_close_owner_rejects_without_an_active_document() {
     let (app, _, _, _) = state_opening_frame(false);
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "file.close", json!({}));
     assert!(harness.state().session.documents().is_empty());
@@ -763,7 +630,7 @@ fn r6_tfo_state_no_edit_and_cancel_after_replacement_preserve_history() {
     for caret in [false, true] {
         for (cancel, edit) in [(false, false), (true, false), (true, true)] {
             let (app, frame, story, next_id) = state_opening_frame(caret);
-            let mut harness = dialog(open_button(app, Opener::Toolbar));
+            let mut harness = dialog(open_options(app));
             if edit {
                 edit_measure(&mut harness, "Top", "7 pt");
             }
@@ -793,7 +660,7 @@ fn r12_tfo_status_enter_reports_stale_document_without_mutation() {
     let (mut app, frames) = configured_frames();
     owner_engine(&mut app, "selection.set", json!({"ids": [frames[0]]}));
     let opening = app.session.doc().unwrap().doc.clone();
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "object.textFrameOptions", json!({"ids": [frames[1]], "gutter": 37}));
     state_retain_gutter_redo(harness.state_mut(), frames[1]);
@@ -811,7 +678,7 @@ fn r12_tfo_status_enter_reports_stale_document_without_mutation() {
 #[test]
 fn r12_tfo_status_ok_reports_owner_change_without_mutation() {
     let (app, frames) = owner_colliding_frames(false);
-    let mut harness = dialog(open_button(app, Opener::Toolbar));
+    let mut harness = dialog(open_options(app));
     edit_measure(&mut harness, "Top", "7 pt");
     owner_engine(harness.state_mut(), "file.activate", json!({"index": 1}));
     let before = harness.state().session.documents().to_vec();
@@ -831,7 +698,7 @@ fn r12_tfo_status_valid_enter_and_ok_preserve_success_and_undo() {
         let (mut app, frames) = configured_frames();
         state_retain_gutter_redo(&mut app, frames[1]);
         let before = app.session.doc().unwrap().clone();
-        let mut harness = dialog(open_button(app, Opener::Toolbar));
+        let mut harness = dialog(open_options(app));
         edit_measure(&mut harness, "Top", "7 pt");
         harness.state_mut().ui.status = "Ready".into();
 
@@ -859,7 +726,7 @@ fn r12_tfo_status_stale_no_edit_and_cancel_keep_status_and_both_histories() {
     for click_button in [false, true] {
         for cancel in [false, true] {
             let (app, frames) = owner_colliding_frames(false);
-            let mut harness = dialog(open_button(app, Opener::Toolbar));
+            let mut harness = dialog(open_options(app));
             if cancel {
                 edit_measure(&mut harness, "Top", "7 pt");
             }

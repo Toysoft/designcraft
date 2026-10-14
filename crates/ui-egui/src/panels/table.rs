@@ -69,32 +69,18 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         for (label, kind, names, cur) in [("Table Style", "table", tnames, tcur), ("Cell Style", "cell", cnames, ccur)] {
             ui.horizontal(|ui| {
                 caption(ui, crate::i18n::tr(&app.ui.language, label));
-                let combo = egui::ComboBox::from_id_salt(("tp_style", kind)).selected_text(&cur).width(130.0).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("tp_style", kind)).selected_text(&cur).width(130.0).show_ui(ui, |ui| {
                     for n in &names {
                         if ui.selectable_label(*n == cur, n).clicked() {
-                            let params = if kind == "cell" {
-                                json!({"name": n, "table": tid, "rows": [range["r0"], range["r1"]], "cols": [range["c0"], range["c1"]]})
-                            } else {
-                                json!({"name": n, "table": tid})
-                            };
-                            run(app, &format!("style.{kind}.apply"), params);
+                            run(app, &format!("style.{kind}.apply"), json!({"name": n, "table": tid}));
                         }
                     }
                 });
-                combo.response.widget_info(|| {
-                    let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), crate::i18n::tr(&app.ui.language, label));
-                    info.current_text_value = Some(cur.clone());
-                    info
-                });
-                let tip = format!("New {label}");
-                let add = crate::icons::button(ui, "plus", 20.0, false, &tip);
-                add.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &tip));
-                if add.clicked() {
+                if crate::icons::button(ui, "plus", 20.0, false, &format!("New {label}")).clicked() {
                     if kind == "cell" {
                         run(app, "style.cell.create", json!({"name": "Cell Style 1", "fromSelection": true}));
                     } else {
-                        let params = table_style_params(app, &info);
-                        run(app, "style.table.create", params);
+                        run(app, "style.table.create", json!({"name": "Table Style 1"}));
                     }
                 }
             });
@@ -243,39 +229,3 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         }
     });
 }
-
-// Capture the fields the existing table-style command supports. Keep the applied style's
-// region bindings; mixed direct cell formatting has no single table-style representation.
-fn table_style_params(app: &DesignApp, info: &Value) -> Value {
-    let options = &info["options"];
-    let border = &options["border"];
-    // Null leaves a style's fills unspecified; zero counts explicitly capture disabled fills.
-    let alt_rows = if options["altRows"].is_null() { json!({"first": 0, "next": 0}) } else { options["altRows"].clone() };
-    let mut params = json!({
-        "name": "Table Style 1",
-        "border": {"weight": border["weight"], "color": border["color"], "tint": border["tint"]},
-        "altRows": alt_rows,
-        "spaceBefore": options["spaceBefore"],
-        "spaceAfter": options["spaceAfter"],
-    });
-    let name = info["style"].as_str().filter(|s| !s.is_empty()).unwrap_or(designcraft_doc::BASIC_TABLE);
-    if let Some(style) = app.session.active().map(|st| st.doc.styles.resolve_table_style(name)) {
-        // Store effective bindings, including inherited "same as body" regions, as a standalone style.
-        let region = |same, value: &Option<String>| if same == Some(true) { style.body.clone() } else { value.clone() };
-        for (key, value) in [
-            ("header", region(style.header_same_as_body, &style.header)),
-            ("body", style.body.clone()),
-            ("footer", region(style.footer_same_as_body, &style.footer)),
-            ("leftColumn", region(style.left_column_same_as_body, &style.left_column)),
-            ("rightColumn", region(style.right_column_same_as_body, &style.right_column)),
-        ] {
-            if let Some(value) = value {
-                params[key] = json!(value);
-            }
-        }
-    }
-    params
-}
-
-#[cfg(test)]
-mod tests;
