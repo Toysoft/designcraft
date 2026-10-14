@@ -94,6 +94,55 @@ impl Default for Marks {
     }
 }
 
+/// Export PDF › Compression, for one class of raster images (colour, greyscale or monochrome).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageClass {
+    /// Bicubic-downsample to this resolution (ppi) the images whose effective resolution (pixels
+    /// over the narrowest placement) is above `above`; `None` keeps every pixel.
+    pub downsample_to: Option<f64>,
+    /// The resolution (ppi) above which `downsample_to` applies.
+    pub above: f64,
+    /// JPEG quality 1–100; `None` = lossless (Flate). Images with transparency and monochrome
+    /// images are always lossless.
+    pub quality: Option<u8>,
+}
+
+impl ImageClass {
+    /// Every pixel, lossless.
+    pub const LOSSLESS: ImageClass = ImageClass { downsample_to: None, above: 0.0, quality: None };
+    /// JPEG quality names as InDesign's Image Quality menu lists them.
+    pub fn quality_named(name: &str) -> Option<u8> {
+        match name {
+            "maximum" => Some(100),
+            "high" => Some(80),
+            "medium" => Some(60),
+            "low" => Some(40),
+            "minimum" => Some(20),
+            _ => None,
+        }
+    }
+}
+
+/// Export PDF › Compression: downsampling and compression per image class.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageCompression {
+    pub color: ImageClass,
+    pub gray: ImageClass,
+    /// Monochrome (1-bit) images: `quality` is ignored, they are always lossless.
+    pub mono: ImageClass,
+}
+
+impl ImageCompression {
+    /// Every pixel of every image, lossless (`PdfOptions::compress_images` may still add JPEG).
+    pub const NONE: ImageCompression = ImageCompression { color: ImageClass::LOSSLESS, gray: ImageClass::LOSSLESS, mono: ImageClass::LOSSLESS };
+}
+
+impl Default for ImageCompression {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// Export options.
 #[derive(Clone, Debug)]
 pub struct PdfOptions {
@@ -101,13 +150,22 @@ pub struct PdfOptions {
     pub pages: Option<Vec<usize>>,
     /// One PDF page per spread (spreads containing any chosen page) instead of per page.
     pub spreads: bool,
-    /// Include the document bleed (`DocSettings::bleed`) around each page.
+    /// Include the bleed around each page: the document bleed (`DocSettings::bleed`), or
+    /// `bleed_override`.
     pub bleed: bool,
+    /// Bleed amounts (top, bottom, inside, outside) in points used instead of the document's
+    /// (Marks and Bleeds › Use Document Bleed Settings off). Only with `bleed`.
+    pub bleed_override: Option<[f64; 4]>,
+    /// Include the slug area (`DocSettings::slug`) in the page's media box.
+    pub slug: bool,
     pub marks: Marks,
     pub standard: Standard,
-    /// Re-encode non-JPEG raster images as JPEG (quality 90) when they have no transparency.
-    /// Off = lossless (JPEG data is always passed through unchanged).
+    /// Re-encode raster images with no JPEG quality of their own (`images`) as JPEG quality 90
+    /// when they have no transparency. Off = lossless (JPEG data is passed through unchanged
+    /// unless it is downsampled).
     pub compress_images: bool,
+    /// Compression: downsampling and JPEG quality per image class.
+    pub images: ImageCompression,
     /// Flate-compress content streams.
     pub compress: bool,
     /// Title for the metadata; `None` = the document title.
@@ -122,15 +180,37 @@ pub struct PdfOptions {
     pub media: bool,
 }
 
+impl PdfOptions {
+    /// The bleed around each page (top, bottom, inside, outside): the override, else the
+    /// document's; none without `bleed`. Negative or non-finite values count as 0.
+    pub fn bleed_amounts(&self, doc: &designcraft_doc::Document) -> [f64; 4] {
+        if !self.bleed {
+            return [0.0; 4];
+        }
+        self.bleed_override.unwrap_or(doc.settings.bleed).map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+    }
+
+    /// The slug area (top, bottom, inside, outside) added to the media box; none without `slug`.
+    pub fn slug_amounts(&self, doc: &designcraft_doc::Document) -> [f64; 4] {
+        if !self.slug {
+            return [0.0; 4];
+        }
+        doc.settings.slug.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+    }
+}
+
 impl Default for PdfOptions {
     fn default() -> Self {
         Self {
             pages: None,
             spreads: false,
             bleed: false,
+            bleed_override: None,
+            slug: false,
             marks: Marks::NONE,
             standard: Standard::None,
             compress_images: false,
+            images: ImageCompression::NONE,
             compress: true,
             title: None,
             author: None,

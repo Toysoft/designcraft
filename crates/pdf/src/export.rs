@@ -62,34 +62,43 @@ fn sheets(doc: &Document, opts: &PdfOptions) -> Result<Vec<Sheet>> {
     if let Some(bad) = pages.iter().find(|p| **p >= count) {
         return Err(PdfError::BadPage(bad.saturating_add(1)));
     }
-    let b = doc.settings.bleed.map(|v| if opts.bleed { v.max(0.0) } else { 0.0 });
+    let b = opts.bleed_amounts(doc);
+    let slug = opts.slug_amounts(doc);
     let mut out: Vec<Sheet> = Vec::new();
     let mut seen_spreads: Vec<usize> = Vec::new();
     for abs in pages {
         let (si, pi) = doc.page_loc(abs).ok_or(PdfError::BadPage(abs.saturating_add(1)))?;
         let sp: &Spread = &doc.spreads[si];
-        let (trim, l, r, label) = if opts.spreads {
+        // The trim and the page sides at its left and right edges (inside/outside amounts
+        // depend on them).
+        let (trim, left_side, right_side, label) = if opts.spreads {
             if seen_spreads.contains(&si) {
                 continue;
             }
             seen_spreads.push(si);
             let first = doc.first_page_of_spread(si);
-            let (l, _) = sp.pages.first().map(|p| bleed_lr(p.side, b)).unwrap_or((b[2], b[3]));
-            let (_, r) = sp.pages.last().map(|p| bleed_lr(p.side, b)).unwrap_or((b[2], b[3]));
+            let left = sp.pages.first().map(|p| p.side).unwrap_or(PageSide::Single);
+            let right = sp.pages.last().map(|p| p.side).unwrap_or(PageSide::Single);
             let names: Vec<String> = (0..sp.pages.len()).map(|i| doc.page_name(first + i)).collect();
-            (sp.bounds(), l, r, names.join("–"))
+            (sp.bounds(), left, right, names.join("–"))
         } else {
             let p = &sp.pages[pi];
-            let (l, r) = bleed_lr(p.side, b);
-            (p.bounds(), l, r, doc.page_name(abs))
+            (p.bounds(), p.side, p.side, doc.page_name(abs))
         };
-        let bleed = Rect::new(trim.x0 - l, trim.y0 - b[0], trim.x1 + r, trim.y1 + b[1]);
+        let around = |amounts: [f64; 4]| {
+            let (l, _) = bleed_lr(left_side, amounts);
+            let (_, r) = bleed_lr(right_side, amounts);
+            Rect::new(trim.x0 - l, trim.y0 - amounts[0], trim.x1 + r, trim.y1 + amounts[1])
+        };
+        let bleed = around(b);
         let media = if opts.marks.any() {
             let m = mark_start(opts, b) + MARK_LEN + 6.0;
             trim.inflate(m, m)
         } else {
             bleed
         };
+        // The slug area, when included, extends the media box (marks may already reach it).
+        let media = if opts.slug { media.union(around(slug)) } else { media };
         out.push(Sheet { spread: si, trim, bleed, media, label });
     }
     Ok(out)
@@ -134,6 +143,7 @@ fn export_pdf_with_report_inner(doc: &Document, cache: &Cache, opts: &PdfOptions
         opts,
         clip: Rect::ZERO,
         warnings,
+        placed_widths: placed_widths(doc),
         images: HashMap::new(),
         images_by_content: ImageContentCache::default(),
         #[cfg(test)]
@@ -321,6 +331,7 @@ fn export_booklet_inner(doc: &Document, cache: &Cache, opts: &BookletOptions) ->
         opts: &pdf_opts,
         clip: Rect::ZERO,
         warnings: Vec::new(),
+        placed_widths: placed_widths(doc),
         images: HashMap::new(),
         images_by_content: ImageContentCache::default(),
         #[cfg(test)]
@@ -456,6 +467,9 @@ pub(crate) struct Exporter<'a> {
     /// Current sheet's visible area (spread space) for culling.
     pub clip: Rect,
     pub warnings: Vec<String>,
+    /// The narrowest placement of each raster asset, in points: with the asset's pixel width it
+    /// gives the effective resolution that Compression › downsampling compares.
+    placed_widths: HashMap<AssetId, f64>,
     images: HashMap<AssetId, Option<Image>>,
     // Immutable export options (including rgb_only) make bytes the complete conversion key.
     // PDF-page/SVG/media routing precedes this path. Failures remain per AssetId.
@@ -1275,20 +1289,22 @@ impl Exporter<'_> {
         let mut warning = None;
         let mut mode = RasterMode::for_standard(self.opts.standard);
         mode.interpolate &= self.interpolate;
+        let placed = self.placed_widths.get(&id).copied();
+        let compression = Compression { classes: self.opts.images, legacy_jpeg: self.opts.compress_images, placed };
         let img = match fmt {
-            Some(image::ImageFormat::Jpeg) => jpeg(data.clone().into(), || embedded_icc(&data), mode),
             // A CMYK TIFF keeps its ink values (`image` decodes it to RGB, and 100% K would print
             // as four-colour black). PDF/A exports are RGB only.
-            Some(image::ImageFormat::Tiff) if !self.rgb_only && designcraft_images::is_cmyk_tiff(&data) => match cmyk_tiff(&data, mode) {
+            Some(image::ImageFormat::Tiff) if !self.rgb_only && designcraft_images::is_cmyk_tiff(&data) => match cmyk_tiff(&data, mode, &compression)
+            {
                 Some(img) => Some(img),
                 None => {
                     warning = Some(CMYK_FALLBACK_WARNING);
                     self.warn(format!("{}: {CMYK_FALLBACK_WARNING}", asset.name));
-                    lossless(&data, fmt, mode)
+                    // The fallback keeps the samples exact (no JPEG), as before.
+                    raster(&data, fmt, mode, &compression.lossless())
                 }
             },
-            _ if self.opts.compress_images => recompress(&data, mode).or_else(|| lossless(&data, fmt, mode)),
-            _ => lossless(&data, fmt, mode),
+            _ => raster(&data, fmt, mode, &compression),
         };
         if img.is_none() {
             if data.is_empty() {
@@ -1570,28 +1586,172 @@ impl krilla::image::CustomImage for CmykImage {
 }
 
 /// A CMYK TIFF as a DeviceCMYK image. `None` when it can't be read as CMYK.
-fn cmyk_tiff(data: &[u8], mode: RasterMode) -> Option<Image> {
-    let r = designcraft_images::decode_cmyk_tiff(data)?;
+/// A CMYK TIFF as a DeviceCMYK image, downsampled when its colour class asks for it (always
+/// lossless: the inks are kept exactly).
+fn cmyk_tiff(data: &[u8], mode: RasterMode, compression: &Compression) -> Option<Image> {
+    let mut r = designcraft_images::decode_cmyk_tiff(data)?;
     // krilla panics when the channel lengths don't match the size.
     let pixels = usize::try_from(r.width).ok()?.checked_mul(usize::try_from(r.height).ok()?)?;
     if r.cmyk.len() != pixels.checked_mul(4)? || r.alpha.as_ref().is_some_and(|a| a.len() != pixels) {
         return None;
     }
+    if let Some((w, h)) = compression.plan(compression.classes.color, false, (r.width, r.height)).size {
+        // Four 8-bit channels resample like RGBA; alpha like a grey image.
+        let cmyk = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(r.width, r.height, std::mem::take(&mut r.cmyk))?;
+        let alpha = match r.alpha.take() {
+            Some(a) => Some(
+                image::imageops::resize(&image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(r.width, r.height, a)?, w, h, DOWNSAMPLE)
+                    .into_raw(),
+            ),
+            None => None,
+        };
+        r = designcraft_images::CmykRaster { width: w, height: h, cmyk: image::imageops::resize(&cmyk, w, h, DOWNSAMPLE).into_raw(), alpha };
+    }
     Image::from_custom(CmykImage(Arc::new(r)), mode.interpolate).ok()
 }
 
-/// Opaque raster → JPEG (quality 90). `None` when the image has transparency or can't be decoded.
-/// With `tag_rgb`, the JPEG keeps the source's RGB profile, or gets sRGB.
-fn recompress(data: &[u8], mode: RasterMode) -> Option<Image> {
-    let img = image::load_from_memory(data).ok()?;
-    if img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p[3] < 255) {
-        return None;
+/// InDesign's "Bicubic Downsampling".
+const DOWNSAMPLE: image::imageops::FilterType = image::imageops::FilterType::CatmullRom;
+
+/// Export PDF › Compression as it applies to one asset.
+struct Compression {
+    classes: crate::ImageCompression,
+    /// `PdfOptions::compress_images`: JPEG quality 90 for classes without a quality of their own.
+    legacy_jpeg: bool,
+    /// The asset's narrowest placement in points (`None`: not placed, so never downsampled).
+    placed: Option<f64>,
+}
+
+/// How a raster goes into the PDF: resized to `size` (when downsampling applies) and JPEG at
+/// `quality` (`None` = lossless).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RasterPlan {
+    size: Option<(u32, u32)>,
+    quality: Option<u8>,
+}
+
+impl Compression {
+    /// The same downsampling without any JPEG.
+    fn lossless(&self) -> Compression {
+        let keep = |c: crate::ImageClass| crate::ImageClass { quality: None, ..c };
+        let classes = crate::ImageCompression { color: keep(self.classes.color), gray: keep(self.classes.gray), mono: keep(self.classes.mono) };
+        Compression { classes, legacy_jpeg: false, placed: self.placed }
     }
-    let rgb = img.to_rgb8();
-    let mut buf = Vec::new();
-    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
-    image::ImageEncoder::write_image(enc, rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
-    jpeg(buf.into(), || embedded_icc(data).filter(|p| is_rgb_icc(p)), mode)
+
+    /// The plan for a raster of `px` pixels in `class`; `lossy` allows JPEG (not for monochrome).
+    fn plan(&self, class: crate::ImageClass, lossy: bool, px: (u32, u32)) -> RasterPlan {
+        let quality = if lossy { class.quality.or(self.legacy_jpeg.then_some(90)).map(|q| q.clamp(1, 100)) } else { None };
+        let size = (|| {
+            let to = class.downsample_to.filter(|t| t.is_finite() && *t > 0.0)?;
+            let placed = self.placed.filter(|w| w.is_finite() && *w > 1e-6)?;
+            let ppi = f64::from(px.0) / (placed / 72.0);
+            if !ppi.is_finite() || ppi <= class.above.max(to) {
+                return None;
+            }
+            let k = to / ppi;
+            let w = ((f64::from(px.0) * k).round() as u32).max(1);
+            let h = ((f64::from(px.1) * k).round() as u32).max(1);
+            (w < px.0 || h < px.1).then_some((w, h))
+        })();
+        RasterPlan { size, quality }
+    }
+}
+
+/// The narrowest placement of each graphic asset in points (parent transforms included), over
+/// spreads and parent pages.
+fn placed_widths(doc: &Document) -> HashMap<AssetId, f64> {
+    fn walk(items: &[Arc<Item>], xf: Affine, out: &mut HashMap<AssetId, f64>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        for it in items {
+            let m = xf * it.xf;
+            match &it.content {
+                Content::Graphic(g) => {
+                    let [a, b, c, d, ..] = (m * g.xf).as_coeffs();
+                    let w = g.size.0 * (a * d - b * c).abs().sqrt();
+                    if w.is_finite() && w > 0.0 {
+                        out.entry(g.asset).and_modify(|v| *v = v.min(w)).or_insert(w);
+                    }
+                }
+                Content::Group { items } => walk(items, m, out, depth + 1),
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for sp in doc.spreads.iter().chain(doc.parents.iter()) {
+        walk(&sp.items, Affine::IDENTITY, &mut out, 0);
+    }
+    out
+}
+
+/// Whether every pixel is black or white (a 1-bit image decoded to grey).
+fn is_mono(img: &image::DynamicImage) -> bool {
+    !img.color().has_alpha() && img.to_luma8().pixels().all(|p| p[0] == 0 || p[0] == 255)
+}
+
+/// A raster (anything but a CMYK TIFF) per its Compression plan: a JPEG is passed through
+/// unchanged unless downsampled; otherwise the image is decoded, downsampled when its class
+/// asks for it, and written as JPEG at the class's quality (opaque colour and grey images) or
+/// lossless. `None` when it can't be decoded.
+fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode, compression: &Compression) -> Option<Image> {
+    use image::ImageDecoder;
+    let (px, gray, typed_alpha) = {
+        let dec = image::ImageReader::new(std::io::Cursor::new(&data[..])).with_guessed_format().ok()?.into_decoder().ok()?;
+        let ct = dec.color_type();
+        let gray = matches!(ct, image::ColorType::L8 | image::ColorType::La8 | image::ColorType::L16 | image::ColorType::La16);
+        (dec.dimensions(), gray, ct.has_alpha())
+    };
+    // Monochrome is told from the pixels, so a grey image starts in the grey class.
+    let classes = &compression.classes;
+    let plan = compression.plan(if gray { classes.gray } else { classes.color }, true, px);
+    // Decoding is needed to downsample or to (re)compress; a grey image may turn out to be
+    // monochrome, whose class may downsample when the grey class doesn't.
+    let mono_may_shrink = gray && compression.plan(classes.mono, false, px).size.is_some();
+    if plan.size.is_none() && !mono_may_shrink {
+        // A JPEG is never re-encoded (a second lossy generation) unless it is downsampled.
+        if fmt == Some(image::ImageFormat::Jpeg) {
+            return jpeg(data.clone().into(), || embedded_icc(data), mode);
+        }
+        if plan.quality.is_none() {
+            return lossless(data, fmt, mode);
+        }
+    }
+    let img = image::load_from_memory(data).ok()?;
+    let plan = if gray && is_mono(&img) { compression.plan(classes.mono, false, px) } else { plan };
+    if plan.size.is_none() && plan.quality.is_none() {
+        return lossless(data, fmt, mode);
+    }
+    let img = match plan.size {
+        Some((w, h)) => img.resize_exact(w, h, DOWNSAMPLE),
+        None => img,
+    };
+    let transparent = typed_alpha && img.to_rgba8().pixels().any(|p| p[3] < 255);
+    if let Some(q) = plan.quality.filter(|_| !transparent) {
+        let mut buf = Vec::new();
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, q);
+        let written = if gray {
+            let l = img.to_luma8();
+            image::ImageEncoder::write_image(enc, l.as_raw(), l.width(), l.height(), image::ExtendedColorType::L8)
+        } else {
+            let rgb = img.to_rgb8();
+            image::ImageEncoder::write_image(enc, rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        };
+        if written.is_ok() {
+            return jpeg(buf.into(), || embedded_icc(data).filter(|p| is_rgb_icc(p)), mode);
+        }
+    }
+    // Not downsampled (transparent, or lossless by choice): the file goes in as it is.
+    if plan.size.is_none() {
+        return lossless(data, fmt, mode);
+    }
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    if mode.tag_rgb {
+        return SrgbImage::new(rgba).and_then(|i| Image::from_custom(i, mode.interpolate).ok());
+    }
+    Some(Image::from_rgba8(rgba.into_raw(), w, h))
 }
 
 #[cfg(test)]
@@ -1620,6 +1780,7 @@ mod image_content_cache_tests {
             opts,
             clip: Rect::ZERO,
             warnings: Vec::new(),
+            placed_widths: placed_widths(doc),
             images: HashMap::new(),
             images_by_content: ImageContentCache::default(),
             image_conversions: 0,

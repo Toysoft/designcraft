@@ -568,3 +568,111 @@ fn empty_and_populated_export_metadata_preserve_key_presence() {
     }
     assert!(s.contains("Synthetic title") && s.contains("Test author"));
 }
+
+/// Width, height and filter of each image XObject.
+fn image_dicts(bytes: &[u8]) -> Vec<(i32, i32, String)> {
+    use hayro_syntax::object::Name;
+    let pdf = hayro_syntax::Pdf::new(bytes.to_vec()).expect("parse");
+    pdf.objects()
+        .into_iter()
+        .filter_map(|o| o.into_stream())
+        .filter(|s| s.dict().get::<Name>("Subtype").is_some_and(|n| n.as_str() == "Image") && s.dict().get::<Name>("SMask").is_none())
+        .map(|s| {
+            let d = s.dict();
+            (
+                d.get::<i32>("Width").unwrap_or(-1),
+                d.get::<i32>("Height").unwrap_or(-1),
+                d.get::<Name>("Filter").map_or("none".into(), |n| n.as_str().to_string()),
+            )
+        })
+        .collect()
+}
+
+/// Marks and Bleeds: the export's own bleed amounts replace the document's, and the slug area
+/// can be included in the media box.
+#[test]
+fn bleed_override_and_slug_area() {
+    let mut d = doc_with_text("x");
+    d.settings.bleed = [9.0; 4];
+    d.settings.slug = [0.0, 36.0, 0.0, 0.0];
+    let s = uncompressed(&d, PdfOptions { bleed: true, bleed_override: Some([18.0; 4]), ..Default::default() });
+    assert!(s.contains("/TrimBox[18 18 630 810]"), "{}", &s[..s.len().min(3000)]);
+    assert!(s.contains("/BleedBox[0 0 648 828]"));
+    assert!(s.contains("/MediaBox[0 0 648 828]"));
+    // The override needs `bleed`; a negative amount counts as none.
+    let s = uncompressed(&d, PdfOptions { bleed: false, bleed_override: Some([18.0; 4]), ..Default::default() });
+    assert!(s.contains("/MediaBox[0 0 612 792]"), "{}", &s[..s.len().min(3000)]);
+    let s = uncompressed(&d, PdfOptions { bleed: true, bleed_override: Some([-5.0, 0.0, 0.0, 0.0]), ..Default::default() });
+    assert!(s.contains("/MediaBox[0 0 612 792]"), "{}", &s[..s.len().min(3000)]);
+    // Slug (36 pt below the page) widens the media box only; trim and bleed stay.
+    let s = uncompressed(&d, PdfOptions { bleed: true, slug: true, ..Default::default() });
+    assert!(s.contains("/TrimBox[9 36 621 828]"), "{}", &s[..s.len().min(3000)]);
+    assert!(s.contains("/BleedBox[0 27 630 837]"));
+    assert!(s.contains("/MediaBox[0 0 630 837]"));
+}
+
+/// Compression: images above the class's threshold are downsampled to its resolution (also a
+/// CMYK TIFF, kept lossless); a JPEG quality makes DCT streams; a JPEG that is not downsampled
+/// is passed through.
+#[test]
+fn compression_downsamples_per_class_and_sets_jpeg_quality() {
+    use crate::{ImageClass, ImageCompression};
+    // A 4×2 raster placed 200 pt wide = 1.44 ppi (the test placement scales 50×).
+    let class = |to: f64, above: f64, quality: Option<u8>| ImageClass { downsample_to: Some(to), above, quality };
+    let mut d = doc_with_text("x");
+    place(&mut d, raster(image::ImageFormat::Png, false), (8, 8));
+    let export = |d: &Document, color: ImageClass| {
+        let opts = PdfOptions { images: ImageCompression { color, ..ImageCompression::NONE }, ..Default::default() };
+        image_dicts(&export_pdf(d, &Cache::new(), &opts).unwrap())
+    };
+    // 8×8 placed 400 pt wide = 1.44 ppi: above 1.2 → down to 0.72 ppi = 4×4, lossless.
+    assert_eq!(export(&d, class(0.72, 1.2, None)), vec![(4, 4, "FlateDecode".into())]);
+    // The threshold is not reached: every pixel stays.
+    assert_eq!(export(&d, class(0.72, 2.0, None)), vec![(8, 8, "FlateDecode".into())]);
+    // A quality makes a JPEG, downsampled or not.
+    assert_eq!(export(&d, class(0.72, 1.2, Some(60))), vec![(4, 4, "DCTDecode".into())]);
+    assert_eq!(export(&d, ImageClass { downsample_to: None, above: 0.0, quality: Some(60) }), vec![(8, 8, "DCTDecode".into())]);
+    // A placed JPEG is passed through unless downsampled.
+    let mut j = doc_with_text("x");
+    let bytes = raster(image::ImageFormat::Jpeg, false);
+    place(&mut j, bytes.clone(), (8, 8));
+    let opts = PdfOptions {
+        images: ImageCompression { color: ImageClass { downsample_to: None, above: 0.0, quality: Some(20) }, ..ImageCompression::NONE },
+        ..Default::default()
+    };
+    let pdf = export_pdf(&j, &Cache::new(), &opts).unwrap();
+    assert!(pdf.windows(bytes.len()).any(|w| w == bytes.as_slice()), "original JPEG bytes embedded");
+    assert_eq!(export(&j, class(0.72, 1.2, Some(60))), vec![(4, 4, "DCTDecode".into())]);
+    // A CMYK TIFF is downsampled too, lossless and still CMYK.
+    let (tif, _) = cmyk_tiff();
+    let mut c = doc_with_text("x");
+    place(&mut c, tif, (4, 2));
+    let opts = PdfOptions { images: ImageCompression { color: class(0.72, 1.2, Some(60)), ..ImageCompression::NONE }, ..Default::default() };
+    let pdf = export_pdf(&c, &Cache::new(), &opts).unwrap();
+    assert_eq!(image_dicts(&pdf), vec![(2, 1, "FlateDecode".into())]);
+    assert_eq!(image_xobjects(&pdf)[0].0, "DeviceCMYK");
+    // The grey class governs grey images; monochrome ones are never JPEG.
+    let mut g = doc_with_text("x");
+    let grey = {
+        let img = image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 { 40 } else { 200 }]));
+        let mut b = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png).unwrap();
+        b
+    };
+    place(&mut g, grey, (8, 8));
+    let opts = PdfOptions { images: ImageCompression { gray: class(0.72, 1.2, Some(60)), ..ImageCompression::NONE }, ..Default::default() };
+    assert_eq!(image_dicts(&export_pdf(&g, &Cache::new(), &opts).unwrap()), vec![(4, 4, "DCTDecode".into())]);
+    let mut m = doc_with_text("x");
+    let mono = {
+        let img = image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 { 0 } else { 255 }]));
+        let mut b = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png).unwrap();
+        b
+    };
+    place(&mut m, mono, (8, 8));
+    let opts = PdfOptions {
+        images: ImageCompression { gray: class(0.72, 1.2, Some(60)), mono: class(0.36, 1.2, Some(60)), ..ImageCompression::NONE },
+        ..Default::default()
+    };
+    assert_eq!(image_dicts(&export_pdf(&m, &Cache::new(), &opts).unwrap()), vec![(2, 2, "FlateDecode".into())]);
+}

@@ -1,6 +1,6 @@
 //! File › Export PDF (Print).
 
-use designcraft_pdf::{Marks, PdfOptions, Standard};
+use designcraft_pdf::{ImageClass, ImageCompression, Marks, PdfOptions, Standard};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, cmd, has_doc, str_param};
@@ -9,7 +9,7 @@ use crate::{EngineError, Result, Session};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "file.exportPdf", "Export PDF…", ["File"], None,
-        "{path?, pages?: \"1-3,5\" | [1,3] (1-based positions; default all), flatten?: high|medium|low|ppi (Transparency Flattener: spreads with transparency are rasterised), spreads?: bool, fullScreen?: bool, bookmarksPanel?: bool, pageLayout?: single|continuous|twoUp|twoUpCover|twoUpContinuous, view?: fitPage|fitWidth|actual, advanceSeconds?: number (interactive PDF), bleed?: bool (document bleed), marks?: bool | {crop?, bleed?, pageInfo?, weight?, offset?}, standard?: \"none\"|\"x4\"|\"a2b\", compressImages?: bool, tagged?: bool (structure tree: stories as paragraphs, figures with alt text), media?: bool (interactive: embed placed video and sound), title?, author?} → {path, bytes, pages, warnings} (no path: {base64, …})",
+        "{path?, pages?: \"1-3,5\" | [1,3] (1-based positions; default all), flatten?: high|medium|low|ppi (Transparency Flattener: spreads with transparency are rasterised), spreads?: bool, fullScreen?: bool, bookmarksPanel?: bool, pageLayout?: single|continuous|twoUp|twoUpCover|twoUpContinuous, view?: fitPage|fitWidth|actual, advanceSeconds?: number (interactive PDF), bleed?: bool (the document bleed) | number | [top, bottom, inside, outside] (the export's own bleed, pt), slug?: bool (include the slug area in the media box), marks?: bool | {crop?, bleed?, pageInfo?, weight?, offset?}, standard?: \"none\"|\"x4\"|\"a2b\", compressImages?: bool (JPEG quality 90 for images without a quality in `images`), images?: {color?, gray?, mono?: {downsample?: ppi (bicubic, for images above `above` ppi; default 1.5× the target), above?: ppi, quality?: maximum|high|medium|low|minimum|lossless|1–100 (JPEG; monochrome is always lossless)}} (Compression; images are passed through or lossless unless asked), tagged?: bool (structure tree: stories as paragraphs, figures with alt text), media?: bool (interactive: embed placed video and sound), title?, author?} → {path, bytes, pages, warnings} (no path: {base64, …})",
         has_doc, export_pdf),
         cmd!(noundo "file.exportEpub", "Export EPUB (Reflowable)…", ["File"], None,
         "{path?, title?, author?, language?: \"en\", identifier?: str (dc:identifier; a stable urn:uuid by default), coverImage?: path (a PNG or JPEG as the cover), tocTitle?: str (the table of contents' title; from the language by default), cover?: bool (the first page as the cover image), embedFonts?: bool (package the stylesheet's fonts whose licence allows it, whole files), fixedLayout?: bool (pre-paginated: each page as an image with its text)} → {path, bytes, warnings} (no path: {base64, bytes, warnings}); warnings name images without alt text, exported as decorative, and fonts that could not be embedded",
@@ -306,7 +306,63 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
 
     let pages = pages_param(ID, p, page_count)?;
     let spreads = p.get("spreads").and_then(Value::as_bool).unwrap_or(false);
-    let bleed = p.get("bleed").and_then(Value::as_bool).unwrap_or(false);
+    // `bleed`: the document's (true), none (false), or the export's own amounts: one for every
+    // side, or [top, bottom, inside, outside].
+    let (bleed, bleed_override) = match p.get("bleed") {
+        None | Some(Value::Null) => (false, None),
+        Some(Value::Bool(b)) => (*b, None),
+        Some(Value::Number(n)) => {
+            let v = n.as_f64().filter(|v| v.is_finite() && *v >= 0.0).ok_or_else(|| bad(ID, format!("bad `bleed` {n}")))?;
+            (true, Some([v; 4]))
+        }
+        Some(Value::Array(a)) => {
+            let sides: Vec<f64> = a.iter().map(|v| v.as_f64().filter(|v| v.is_finite() && *v >= 0.0)).collect::<Option<_>>().unwrap_or_default();
+            let [t, b, i, o] = sides[..] else {
+                return Err(bad(ID, "`bleed` as a list needs four non-negative numbers: [top, bottom, inside, outside]"));
+            };
+            (true, Some([t, b, i, o]))
+        }
+        Some(v) => return Err(bad(ID, format!("bad `bleed`: {v} (true, false, a number or [top, bottom, inside, outside])"))),
+    };
+    let slug = p.get("slug").and_then(Value::as_bool).unwrap_or(false);
+    let images = match p.get("images") {
+        None | Some(Value::Null) => ImageCompression::NONE,
+        Some(Value::Object(m)) => {
+            let class = |key: &str, lossy: bool| -> Result<ImageClass> {
+                let Some(c) = m.get(key) else { return Ok(ImageClass::LOSSLESS) };
+                let Value::Object(c) = c else { return Err(bad(ID, format!("`images.{key}` must be an object"))) };
+                let ppi = |k: &str| -> Result<Option<f64>> {
+                    match c.get(k) {
+                        None | Some(Value::Null) => Ok(None),
+                        Some(v) => v
+                            .as_f64()
+                            .filter(|v| v.is_finite() && *v > 0.0)
+                            .map(Some)
+                            .ok_or_else(|| bad(ID, format!("`images.{key}.{k}` must be a positive number of ppi"))),
+                    }
+                };
+                let downsample_to = ppi("downsample")?;
+                let above = ppi("above")?.unwrap_or_else(|| downsample_to.map_or(0.0, |t| t * 1.5));
+                let quality = match c.get("quality") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(s)) if s == "lossless" || s == "zip" => None,
+                    Some(Value::String(s)) => Some(ImageClass::quality_named(s).ok_or_else(|| {
+                        bad(ID, format!("unknown `images.{key}.quality` `{s}` (maximum, high, medium, low, minimum, lossless or 1–100)"))
+                    })?),
+                    Some(Value::Number(n)) => Some(
+                        n.as_u64()
+                            .filter(|q| (1..=100).contains(q))
+                            .map(|q| q as u8)
+                            .ok_or_else(|| bad(ID, format!("`images.{key}.quality` must be 1–100")))?,
+                    ),
+                    Some(v) => return Err(bad(ID, format!("bad `images.{key}.quality`: {v}"))),
+                };
+                Ok(ImageClass { downsample_to, above, quality: quality.filter(|_| lossy) })
+            };
+            ImageCompression { color: class("color", true)?, gray: class("gray", true)?, mono: class("mono", false)? }
+        }
+        Some(v) => return Err(bad(ID, format!("bad `images`: {v} (an object with color, gray and mono classes)"))),
+    };
     let marks = match p.get("marks") {
         Some(Value::Bool(true)) => Marks::ALL,
         Some(Value::Object(m)) => {
@@ -329,9 +385,12 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
         pages,
         spreads,
         bleed,
+        bleed_override,
+        slug,
         marks,
         standard,
         compress_images: p.get("compressImages").and_then(Value::as_bool).unwrap_or(false),
+        images,
         title: str_param(p, "title").map(str::to_string),
         author: str_param(p, "author").map(str::to_string),
         tagged: p.get("tagged").and_then(Value::as_bool).unwrap_or(false),
@@ -1191,5 +1250,49 @@ mod pptx_tests {
         s.execute("object.exportOptions", &json!({"ids": [r["id"]], "rasterize": true})).unwrap();
         let x = shapes(&mut s);
         assert!(x.contains("<p:pic>") && !x.contains("prst=\"ellipse\""), "{x}");
+    }
+}
+
+#[cfg(test)]
+mod pdf_option_tests {
+    use designcraft_pdf::ImageClass;
+    use serde_json::json;
+
+    use super::*;
+
+    fn opts(p: serde_json::Value) -> Result<PdfOptions> {
+        options(&p, 1)
+    }
+
+    /// `bleed` as a flag, one amount or four; `slug`; `images` per class with named or numeric
+    /// quality, monochrome always lossless; bad values are errors.
+    #[test]
+    fn bleed_slug_and_images_parameters() {
+        let o = opts(json!({"bleed": true})).unwrap();
+        assert!(o.bleed && o.bleed_override.is_none() && !o.slug);
+        let o = opts(json!({"bleed": 9, "slug": true})).unwrap();
+        assert_eq!((o.bleed, o.bleed_override, o.slug), (true, Some([9.0; 4]), true));
+        let o = opts(json!({"bleed": [1, 2, 3, 4]})).unwrap();
+        assert_eq!(o.bleed_override, Some([1.0, 2.0, 3.0, 4.0]));
+        assert!(opts(json!({"bleed": [1, 2]})).is_err());
+        assert!(opts(json!({"bleed": -1})).is_err());
+        assert!(opts(json!({"bleed": "yes"})).is_err());
+
+        let o = opts(json!({"images": {
+            "color": {"downsample": 300, "above": 450, "quality": "high"},
+            "gray": {"downsample": 150, "quality": 55},
+            "mono": {"downsample": 1200, "above": 1800, "quality": "high"}
+        }}))
+        .unwrap();
+        assert_eq!(o.images.color, ImageClass { downsample_to: Some(300.0), above: 450.0, quality: Some(80) });
+        assert_eq!(o.images.gray, ImageClass { downsample_to: Some(150.0), above: 225.0, quality: Some(55) });
+        assert_eq!(o.images.mono, ImageClass { downsample_to: Some(1200.0), above: 1800.0, quality: None });
+        let o = opts(json!({"images": {"color": {"quality": "lossless"}}})).unwrap();
+        assert_eq!(o.images.color, ImageClass::LOSSLESS);
+        assert_eq!(o.images.gray, ImageClass::LOSSLESS);
+        assert!(opts(json!({"images": {"color": {"quality": "best"}}})).is_err());
+        assert!(opts(json!({"images": {"color": {"quality": 0}}})).is_err());
+        assert!(opts(json!({"images": {"color": {"downsample": -300}}})).is_err());
+        assert!(opts(json!({"images": []})).is_err());
     }
 }
