@@ -129,19 +129,21 @@ pub(crate) fn parse(xml: &str) -> Result<El, ImportError> {
 /// Largest decompressed zip part read (a small file can inflate to gigabytes).
 pub(crate) const PART_LIMIT: u64 = 64 * 1024 * 1024;
 
-/// A zip part as text. `Ok(None)` when the part is missing or isn't text; an error when it
-/// decompresses to more than [`PART_LIMIT`].
+/// A zip part as text. `Ok(None)` when the part is missing; an error when it is present but
+/// unreadable (bad compression, CRC or UTF-8) or decompresses to more than [`PART_LIMIT`].
 pub(crate) fn part(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Result<Option<String>, ImportError> {
     part_capped(zip, name, PART_LIMIT)
 }
 
 pub(crate) fn part_capped(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str, limit: u64) -> Result<Option<String>, ImportError> {
-    let Ok(f) = zip.by_name(name) else { return Ok(None) };
+    let f = match zip.by_name(name) {
+        Ok(f) => f,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(ImportError::Corrupt(format!("{name} is unreadable: {e}"))),
+    };
     let mut s = String::new();
     // Read one byte past the limit to tell "exactly at the limit" from "over it".
-    if f.take(limit.saturating_add(1)).read_to_string(&mut s).is_err() {
-        return Ok(None);
-    }
+    f.take(limit.saturating_add(1)).read_to_string(&mut s).map_err(|e| ImportError::Corrupt(format!("{name} is unreadable: {e}")))?;
     if s.len() as u64 > limit {
         return Err(ImportError::Corrupt(format!("{name} is larger than {} MiB uncompressed", limit / (1024 * 1024))));
     }
@@ -526,6 +528,24 @@ mod tests {
         // At or under the cap reads fine; a missing part is `None`.
         assert_eq!(part_capped(&mut zip, "word/document.xml", 64 * 1024).unwrap().map(|s| s.len()), Some(64 * 1024));
         assert_eq!(part_capped(&mut zip, "word/missing.xml", 4096).unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_styles_part_is_an_error_not_absent() {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let body = format!(r#"<w:document {W}><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>"#);
+        w.start_file("word/document.xml", o).unwrap();
+        w.write_all(body.as_bytes()).unwrap();
+        w.start_file("word/styles.xml", o).unwrap();
+        w.write_all(format!("<w:styles {W}>\u{1}STYLESMARK</w:styles>").as_bytes()).unwrap();
+        let mut bytes = w.finish().unwrap().into_inner();
+        // Invalid UTF-8 inside the stored styles part.
+        let at = bytes.windows(10).position(|x| x == b"STYLESMARK").unwrap();
+        bytes[at - 1] = 0xFF;
+        assert!(matches!(import(&bytes), Err(ImportError::Corrupt(_))));
+        // Without a styles part the document still imports.
+        assert!(import(&docx(&body, "", "")).is_ok());
     }
 
     #[test]
