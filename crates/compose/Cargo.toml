@@ -12,6 +12,7 @@ workspace = true
 unicode-bidi = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-bidi-mirroring = { workspace = true }
+icu_segmenter = { workspace = true }
 designcraft-geom = { workspace = true }
 designcraft-color = { workspace = true }
 designcraft-doc = { workspace = true }

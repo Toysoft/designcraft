@@ -50,6 +50,9 @@ pub struct Spacing {
     pub optical: bool,
     /// Korean text breaks between syllables instead of at spaces.
     pub korean_char_breaks: bool,
+    /// Justified text written without spaces between words (Thai, Lao, Khmer, Myanmar): how far the
+    /// gap between two words stretches, as a fraction of the space width. It never shrinks.
+    pub sea_gap_stretch: f64,
 }
 
 impl Default for Spacing {
@@ -71,6 +74,7 @@ impl Default for Spacing {
             hyph_zone: 0.0,
             optical: false,
             korean_char_breaks: false,
+            sea_gap_stretch: 0.5,
         }
     }
 }
@@ -93,6 +97,11 @@ impl Spacing {
             return (0.0, 0.0);
         }
         (g.space * (self.word_max - self.word_desired).max(0.0), g.space * (self.word_desired - self.word_min).max(0.0))
+    }
+    /// Word-space stretch of the gap after glyph `g` when a word ends there without a space
+    /// ([`Glyph::word_gap`]).
+    pub(crate) fn gap_stretch(&self, g: &Glyph) -> f64 {
+        if g.word_gap { g.space * self.sea_gap_stretch.max(0.0) } else { 0.0 }
     }
 }
 
@@ -358,7 +367,16 @@ fn items(glyphs: &[Glyph], hyph_after: &[bool], emergency_after: &[bool], sp: &S
         ig.push(i);
         let next_is_space = glyphs.get(i + 1).is_none_or(|n| n.is_space());
         if i + 1 < n && !next_is_space && !g.no_break && g.break_after != Some(false) {
-            if matches!(g.ch, '-' | '\u{2010}') {
+            if sp.justify && g.word_gap {
+                // A word end without a space (Thai…): a word space of no width that only stretches.
+                // Like the space glue it is filed under the glyph the break comes before, which
+                // here is the next one: the line ends after `g` and no glyph is skipped.
+                let mut gl = Item::glue(0.0, sp.gap_stretch(g), 0.0);
+                gl.hang = right_hang(g, sp);
+                last_space = it.len();
+                it.push(gl);
+                ig.push(i + 1);
+            } else if matches!(g.ch, '-' | '\u{2010}') {
                 let mut p = Item::penalty(0.0, 50.0, true);
                 p.hang = right_hang(g, sp);
                 push_inword(&mut it, &mut ig, p, i + 1, sp);
