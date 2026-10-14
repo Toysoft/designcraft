@@ -1362,6 +1362,8 @@ impl<'r> Importer<'r> {
             "CenterAlignment" => Some(false),
             _ => None,
         });
+        a.stroke_join = e.prop("EndJoin").map(|v| names::join_in(v.trim()));
+        a.stroke_miter_limit = e.num("MiterLimit");
         a.capitalization = e.prop("Capitalization").and_then(|v| names::caps_in(v.trim()));
         a.position = e.prop("Position").and_then(|v| names::position_in(v.trim()));
         a.underline = e.boolean("Underline");

@@ -1167,6 +1167,12 @@ impl<'a> Ex<'a> {
         if let Some(v) = a.stroke_behind_fill {
             el.set("StrokeAlignment", if v { "OutsideAlignment" } else { "CenterAlignment" });
         }
+        if let Some(v) = a.stroke_join {
+            el.set("EndJoin", names::join_out(v));
+        }
+        if let Some(v) = a.stroke_miter_limit {
+            el.set("MiterLimit", num(v));
+        }
         if let Some(v) = a.capitalization {
             el.set("Capitalization", names::caps_out(v));
         }

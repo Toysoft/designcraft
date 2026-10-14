@@ -815,6 +815,10 @@ attr_set! {
         /// Stroke behind fill: the stroke is painted under the fill and lies wholly outside the
         /// letters at its full weight, so the letters keep their shape. Off, it straddles the outline.
         stroke_behind_fill: bool = false,
+        /// The corners of the text stroke and, for miter joins, how far a corner may reach (in
+        /// stroke widths) before it is bevelled.
+        stroke_join: crate::item::Join = crate::item::Join::Miter,
+        stroke_miter_limit: f64 = 4.0,
         capitalization: Capitalization = Capitalization::Normal,
         position: Position = Position::Normal,
         underline: bool = false,

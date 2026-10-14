@@ -136,6 +136,28 @@ fn nested_parent_items_export() {
     assert!(uncompressed(&d, PdfOptions::default()).contains("1 0 0 0 k"), "the deepest parent's item is missing");
 }
 
+/// A text stroke has the run's join and miter limit, over the fill or behind it.
+#[test]
+fn text_stroke_keeps_its_join_and_miter_limit() {
+    let mut d = doc_with_text("Outlined");
+    let sid = *d.stories.keys().next().unwrap();
+    d.story_mut(sid).unwrap().format_chars(0.."Outlined".len(), |f| {
+        f.over.stroke = Some("C=100 M=0 Y=0 K=0".into());
+        f.over.stroke_weight = Some(3.0);
+        f.over.stroke_join = Some(designcraft_doc::Join::Round);
+    });
+    let s = uncompressed(&d, PdfOptions::default());
+    assert!(s.contains("2 Tr") && s.contains("3 w") && s.contains("1 j"), "fill and stroke in one pass, round join");
+    // Behind the fill: twice the weight, as outlines, with the join and miter limit.
+    d.story_mut(sid).unwrap().format_chars(0.."Outlined".len(), |f| {
+        f.over.stroke_behind_fill = Some(true);
+        f.over.stroke_join = Some(designcraft_doc::Join::Miter);
+        f.over.stroke_miter_limit = Some(2.5);
+    });
+    let s = uncompressed(&d, PdfOptions::default());
+    assert!(s.contains("6 w") && s.contains("2.5 M") && !s.contains("1 j"), "double weight, miter join with its limit");
+}
+
 /// [Paper] went into print PDFs as `1 1 1 rg`, DeviceRGB white.
 #[test]
 fn paper_prints_as_no_ink() {

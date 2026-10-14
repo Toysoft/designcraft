@@ -228,6 +228,32 @@ const ODD_PAGE_BREAK_STORY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </Story>
 </idPkg:Story>"#;
 
+/// A text stroke's join and miter limit come in from IDML and go back out; the alignment comes
+/// from the paragraph level too (InDesign books often carry `StrokeAlignment="OutsideAlignment"`
+/// on [No paragraph style]).
+#[test]
+fn text_stroke_join_and_miter_limit_round_trip() {
+    let story = r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="s1">
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text%3aBody" StrokeAlignment="OutsideAlignment">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" StrokeColor="Color/Brand" StrokeWeight="3.7" EndJoin="RoundEndJoin" MiterLimit="3.7"><Content>Title</Content></CharacterStyleRange>
+    </ParagraphStyleRange>
+  </Story>
+</idPkg:Story>"#;
+    let check = |d: &designcraft_doc::Document| {
+        let sid = *d.stories.keys().next().unwrap();
+        let cs = designcraft_compose::compose_story(d, sid, &Default::default());
+        let st = cs.styles.iter().find(|s| s.stroke_weight > 3.0).expect("the stroked run");
+        assert!(st.stroke_behind_fill);
+        assert_eq!(st.stroke_join, designcraft_doc::Join::Round);
+        assert!((st.stroke_miter_limit - 3.7).abs() < 1e-9);
+    };
+    let d = import_idml_with(&fixture_with_story(story), &|_| None).unwrap();
+    check(&d);
+    check(&import_idml(&export_idml(&d)).unwrap());
+}
+
 #[test]
 fn odd_page_break_ends_its_paragraph_and_keeps_its_parity() {
     let mut d = import_idml_with(&fixture_with_story(ODD_PAGE_BREAK_STORY), &|_| None).unwrap();

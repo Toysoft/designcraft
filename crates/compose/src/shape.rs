@@ -160,6 +160,8 @@ impl StyleTable<'_> {
             stroke_tint: p.stroke_tint,
             stroke_weight: p.stroke_weight,
             stroke_behind_fill: p.stroke_behind_fill,
+            stroke_join: p.stroke_join,
+            stroke_miter_limit: p.stroke_miter_limit,
             underline: p.underline,
             strikethrough: p.strikethrough,
             underline_rule: crate::Rule {
