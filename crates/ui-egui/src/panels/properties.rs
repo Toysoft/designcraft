@@ -1319,22 +1319,22 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
     egui::Grid::new("chargrid").num_columns(4).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         caption(ui, crate::i18n::tr(&app.ui.language, "Size"));
-        if let Some(v) = number(ui, "pcs", c["size"].as_f64(), " pt", 60.0, 2) {
+        if let Some(v) = number(ui, "pcs", c["size"].as_f64(), " pt", 56.0, 2) {
             let _ = app.run("type.char", json!({"attrs": {"size": v}}));
         }
         caption(ui, crate::i18n::tr(&app.ui.language, "Leading"));
         let auto = c["leading"]["kind"].as_str() != Some("points");
         let lv = if auto { c["size"].as_f64().map(|s| s * a["para"]["autoLeading"].as_f64().unwrap_or(1.2)) } else { c["leading"]["value"].as_f64() };
-        if let Some(v) = number(ui, "pcl", lv, if auto { crate::i18n::tr(&app.ui.language, " (auto)") } else { " pt" }, 70.0, 2) {
+        if let Some(v) = number(ui, "pcl", lv, if auto { crate::i18n::tr(&app.ui.language, " (auto)") } else { " pt" }, 64.0, 2) {
             let _ = app.run("type.char", json!({"attrs": {"leading": {"kind": "points", "value": v}}}));
         }
         ui.end_row();
         caption(ui, crate::i18n::tr(&app.ui.language, "Tracking"));
-        if let Some(v) = number(ui, "pct", c["tracking"].as_f64(), "", 60.0, 0) {
+        if let Some(v) = number(ui, "pct", c["tracking"].as_f64(), "", 56.0, 0) {
             let _ = app.run("type.char", json!({"attrs": {"tracking": v}}));
         }
         caption(ui, crate::i18n::tr(&app.ui.language, "Baseline"));
-        if let Some(v) = number(ui, "pcb", c["baselineShift"].as_f64(), " pt", 70.0, 2) {
+        if let Some(v) = number(ui, "pcb", c["baselineShift"].as_f64(), " pt", 64.0, 2) {
             let _ = app.run("type.char", json!({"attrs": {"baselineShift": v}}));
         }
         ui.end_row();
@@ -2251,20 +2251,61 @@ fn variable_font_axes(app: &mut DesignApp, ui: &mut egui::Ui, family: &str, styl
     let face = db.face(family, style);
     let cur = |tag: &str, default: f32| face.coords.iter().find(|(t, _)| t == tag.as_bytes()).map_or(default, |c| c.1);
     let mut values: Vec<(String, f32)> = axes.iter().map(|a| (a.0.clone(), cur(&a.0, a.3))).collect();
-    let mut changed = false;
     crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Variable Font")).size(11.0));
     egui::Grid::new("vf_axes").num_columns(2).spacing(vec2(6.0, 2.0)).show(ui, |ui| {
-        for (i, (_, name, min, _, max)) in axes.iter().enumerate() {
+        for (i, (tag, name, min, _, max)) in axes.iter().enumerate() {
             caption(ui, name);
-            if ui.add(egui::Slider::new(&mut values[i].1, *min..=*max).step_by(1.0)).drag_stopped() {
-                changed = true;
-            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = 80.0;
+                // The value field beside the slider takes typed values, so the slider's own is hidden.
+                let slider = ui.add(egui::Slider::new(&mut values[i].1, *min..=*max).step_by(1.0).show_value(false));
+                if slider.changed() {
+                    variable_font_preview(app, ui, &base, &values);
+                }
+                if !slider.dragged() {
+                    variable_font_commit(app, ui);
+                }
+                if let Some(v) = number(ui, &format!("vf{tag}"), Some(values[i].1 as f64), "", 46.0, 0) {
+                    values[i].1 = (v as f32).clamp(*min, *max).round();
+                    variable_font_preview(app, ui, &base, &values);
+                    variable_font_commit(app, ui);
+                }
+            });
             ui.end_row();
         }
     });
-    if changed {
-        let spec = values.iter().map(|(t, v)| format!("{t}:{}", v.round())).collect::<Vec<_>>().join(",");
-        let _ = app.run("type.char", json!({"attrs": {"fontStyle": format!("{base} {{{spec}}}")}}));
+}
+
+/// The style for the axis values: `base {tag:value,…}`.
+fn variable_font_style(base: &str, values: &[(String, f32)]) -> String {
+    let spec = values.iter().map(|(t, v)| format!("{t}:{}", v.round())).collect::<Vec<_>>().join(",");
+    format!("{base} {{{spec}}}")
+}
+
+/// Previews the axis values on the variable-font interaction, opening it when none is open. A drag
+/// previews on every frame, so the text changes as the slider moves.
+fn variable_font_preview(app: &mut DesignApp, ui: &mut egui::Ui, base: &str, values: &[(String, f32)]) {
+    let live = egui::Id::new("variable_font_live");
+    if !ui.data(|d| d.get_temp::<bool>(live)).unwrap_or(false) {
+        if let Err(e) = app.session.begin_interaction("Variable Font") {
+            app.status(e.to_string());
+            return;
+        }
+        ui.data_mut(|d| d.insert_temp(live, true));
+    }
+    if let Err(e) = app.session.preview("type.char", json!({"attrs": {"fontStyle": variable_font_style(base, values)}})) {
+        app.status(e.to_string());
+    }
+}
+
+/// Ends the open variable-font interaction as one undo step. Does nothing when none is open.
+fn variable_font_commit(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let live = egui::Id::new("variable_font_live");
+    if ui.data(|d| d.get_temp::<bool>(live)).unwrap_or(false) {
+        ui.data_mut(|d| d.remove::<bool>(live));
+        if let Err(e) = app.session.commit_interaction() {
+            app.status(e.to_string());
+        }
     }
 }
 
@@ -2276,6 +2317,12 @@ mod tests {
 
     fn language(app: &mut DesignApp) -> Value {
         text_attrs(app).unwrap()["chars"]["language"].clone()
+    }
+
+    #[test]
+    fn variable_font_style_rounds_each_axis_value() {
+        let values = [("wght".to_string(), 512.4_f32), ("wdth".to_string(), 99.6)];
+        assert_eq!(variable_font_style("Regular", &values), "Regular {wght:512,wdth:100}");
     }
 
     #[test]
