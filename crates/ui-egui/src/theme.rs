@@ -73,6 +73,8 @@ pub struct Tokens {
     pub border: Color32,
     /// Outline of fields and buttons.
     pub field_border: Color32,
+    /// Active widget outline; separate from ordinary field borders in standard Dark.
+    pub focus: Color32,
     /// Active tool / toggle well.
     pub well: Color32,
     pub well_rim: Color32,
@@ -121,6 +123,7 @@ impl Tokens {
             radius: 1,
             border: hex(0x1e1e1e),
             field_border: hex(0x5a5a5a),
+            focus: hex(0x5a5a5a),
             well: hex(0x1b1b1b),
             well_rim: hex(0x3a3a3a),
             ruler_text: hex(0xd8d8d8),
@@ -156,6 +159,7 @@ impl Tokens {
                 button: hex(0x1e1f22),
                 border: hex(0x36373a),
                 field_border: hex(0x77787c),
+                focus: hex(0x74aaff),
                 well: hex(0x1e1f22),
                 well_rim: hex(0x36373a),
                 section_divider: hex(0x36373a),
@@ -185,6 +189,7 @@ impl Tokens {
                 button: hex(0x535353),
                 border: hex(0x383838),
                 field_border: hex(0x747474),
+                focus: hex(0x747474),
                 well: hex(0x303030),
                 well_rim: hex(0x565656),
                 ruler_text: hex(0xffffff),
@@ -215,6 +220,7 @@ impl Tokens {
                 button: hex(0xb8b8b8),
                 border: hex(0x8c8c8c),
                 field_border: hex(0x7a7a7a),
+                focus: hex(0x7a7a7a),
                 well: hex(0x9a9a9a),
                 well_rim: hex(0x8a8a8a),
                 ruler_text: hex(0x1e1e1e),
@@ -245,6 +251,7 @@ impl Tokens {
                 button: hex(0xf0f0f0),
                 border: hex(0xc4c4c4),
                 field_border: hex(0xa8a8a8),
+                focus: hex(0xa8a8a8),
                 well: hex(0xcfcfcf),
                 well_rim: hex(0xbdbdbd),
                 ruler_text: hex(0x1e1e1e),
@@ -276,6 +283,7 @@ impl Tokens {
                 button: hex(0x000000),
                 border: hex(0xffffff),
                 field_border: hex(0xffffff),
+                focus: hex(0xffffff),
                 well: hex(0x5c5c00),
                 well_rim: hex(0xffeb3b),
                 ruler_text: hex(0xffffff),
@@ -374,7 +382,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.divider);
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.field_border);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.field_border);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, if t.standard_dark { hex(0x74aaff) } else { t.field_border });
+    v.widgets.active.bg_stroke = Stroke::new(1.0, t.focus);
     // InDesign buttons are outline-only.
     v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = t.input;
@@ -410,6 +418,10 @@ mod palette_tests {
         assert_eq!(dark.text, hex(0xf2f1ee));
         assert_eq!(dark.accent, hex(0x2d81ff));
         assert_eq!(dark.on_accent, hex(0x060607));
+        assert_eq!(dark.focus, hex(0x74aaff));
+        let ctx = egui::Context::default();
+        apply(&ctx, &dark);
+        assert_eq!(ctx.style_of(egui::Theme::Dark).visuals.widgets.active.bg_stroke.color, dark.focus);
         assert!(dark.standard_dark);
         assert_eq!(dark.row_selected, hex(0x203b65));
         assert_eq!(Tokens::for_brightness(Brightness::MediumDark).panel, hex(0x535353));
@@ -419,7 +431,11 @@ mod palette_tests {
         assert_eq!(high.accent, hex(0xffeb3b));
         assert_eq!(high.input_border, Color32::WHITE);
         assert!(!high.standard_dark);
-        assert_eq!(crate::UiState::default().brightness, Brightness::Dark);
+        for brightness in [Brightness::MediumDark, Brightness::MediumLight, Brightness::Light, Brightness::HighContrast] {
+            let alternative = Tokens::for_brightness(brightness);
+            assert_eq!(alternative.focus, alternative.field_border, "{brightness:?} focus changed");
+        }
+        assert_eq!(crate::UiState::default().brightness, Brightness::MediumDark);
     }
 }
 
