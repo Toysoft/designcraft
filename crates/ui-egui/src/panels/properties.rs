@@ -1325,16 +1325,17 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     let baseline = c["baselineShift"].as_f64();
     ui.columns(2, |cols| {
         if let [left, right] = cols {
-            if let Some(v) = char_field(app, left, "Size", "pcs", c_size, " pt", 2) {
+            if let Some(v) = char_field(app, left, "Size", NumField::number("pcs", c_size, " pt", 2)) {
                 let _ = app.run("type.char", json!({"attrs": {"size": v}}));
             }
-            if let Some(v) = char_field(app, left, "Tracking", "pct", tracking, "", 0) {
+            if let Some(v) = char_field(app, left, "Tracking", NumField::number("pct", tracking, "", 0)) {
                 let _ = app.run("type.char", json!({"attrs": {"tracking": v}}));
             }
-            if let Some(v) = char_field(app, right, "Leading", "pcl", lv, if auto { "" } else { " pt" }, 2) {
+            // Auto leading is shown in parentheses, as the paragraph panel shows it.
+            if let Some(v) = char_field(app, right, "Leading", NumField::number("pcl", lv, " pt", 2).parens(auto)) {
                 let _ = app.run("type.char", json!({"attrs": {"leading": {"kind": "points", "value": v}}}));
             }
-            if let Some(v) = char_field(app, right, "Baseline", "pcb", baseline, " pt", 2) {
+            if let Some(v) = char_field(app, right, "Baseline", NumField::number("pcb", baseline, " pt", 2)) {
                 let _ = app.run("type.char", json!({"attrs": {"baselineShift": v}}));
             }
         }
@@ -2279,13 +2280,13 @@ fn variable_font_axes(app: &mut DesignApp, ui: &mut egui::Ui, family: &str, styl
 const PANEL_LABEL_W: f32 = 52.0;
 const PANEL_FIELD_W: f32 = 52.0;
 
-/// A Character panel column row: a fixed-width caption, then a number field filling the rest of the
+/// A Character panel column row: a fixed-width caption, then the number field filling the rest of the
 /// column. Returns the value committed.
-fn char_field(app: &DesignApp, ui: &mut Ui, label: &str, id: &str, value: Option<f64>, suffix: &str, decimals: usize) -> Option<f64> {
+fn char_field(app: &DesignApp, ui: &mut Ui, label: &str, field: NumField<'_>) -> Option<f64> {
     ui.horizontal(|ui| {
         caption_cell(ui, crate::i18n::tr(&app.ui.language, label), PANEL_LABEL_W);
         let width = (ui.available_width() - ui.spacing().item_spacing.x).max(40.0);
-        number(ui, id, value, suffix, width, decimals)
+        field.width(width).show(ui)
     })
     .inner
 }
