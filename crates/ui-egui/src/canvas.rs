@@ -1073,11 +1073,54 @@ fn draw_cell_selection(
     }
 }
 
-/// InDesign darkens the selection background and leaves the selected glyphs in their original
-/// colour: a semi-transparent black highlight over the frame, with the glyph outlines rasterised
-/// by `vello_cpu` into a small screen-space texture over the selection. Keeping the original glyph
-/// colour (rather than inverting it) ensures white text on a dark frame stays visible when
-/// selected, matching InDesign's "darken the background, leave the text" behaviour.
+/// The colour painted under the selected text of composed frame `fi`: the text frame's own fill,
+/// else the topmost solid fill of an item painted below the frame that overlaps its bounds, else
+/// the paper. Gradient and graphic backgrounds fall through to whatever is beneath them.
+fn selection_background(doc: &Document, cs: &compose::ComposedStory, fi: usize) -> designcraft_color::Color {
+    let paper = designcraft_color::Color::WHITE;
+    let Some(ft) = cs.frames.get(fi) else { return paper };
+    let Some(frame) = doc.item(ft.frame) else { return paper };
+    if let Some(c) = doc.resolve_color(&frame.fill.swatch, frame.fill.tint) {
+        return c;
+    }
+    let bounds = frame.inner_bounds();
+    // Master items paint under page items, so scan parent spreads first, then spread items in
+    // paint order, stopping at the frame; the last overlapping fill seen is the topmost one.
+    let mut below = None;
+    let mut hit = false;
+    for sp in doc.parents.iter().chain(doc.spreads.iter()) {
+        for top in &sp.items {
+            let mut found = false;
+            top.walk(&mut |i| {
+                if found {
+                    return;
+                }
+                if i.id == ft.frame {
+                    found = true;
+                } else if let Some(c) = doc.resolve_color(&i.fill.swatch, i.fill.tint) {
+                    let r = i.inner_bounds();
+                    if r.x0 < bounds.x1 && bounds.x0 < r.x1 && r.y0 < bounds.y1 && bounds.y0 < r.y1 {
+                        below = Some(c);
+                    }
+                }
+            });
+            if found {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            break;
+        }
+    }
+    below.unwrap_or(paper)
+}
+
+/// InDesign draws selected text inverted: the highlight shows the inverse of the colour painted
+/// under the selected text (see `selection_background`), with the selected glyphs in the inverse
+/// of their colour — so white-on-black text selects as black-on-white and stays visible. The
+/// highlight and glyph outlines are rasterised with `vello_cpu` into a small screen-space texture
+/// over the selection.
 fn draw_inverse_highlight(
     app: &DesignApp,
     painter: &egui::Painter,
@@ -1120,8 +1163,12 @@ fn draw_inverse_highlight(
         _ => {
             let view = xf.affine(ppp as f64, bbox.min);
             let mut rc = vello_cpu::RenderContext::new_with(w as u16, h as u16, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
-            rc.set_paint(peniko::Color::from_rgba8(0, 0, 0, 160));
-            for (_, m, quads, _) in runs {
+            for (fi, m, quads, _) in runs {
+                // The highlight is the inverse of the colour under the selected text, so the
+                // glyphs (drawn below in their inverse colour) always contrast with it.
+                let under = selection_background(doc, cs, *fi);
+                let [ur, ug, ub, _] = under.to_rgba8(1.0);
+                rc.set_paint(peniko::Color::from_rgba8(255 - ur, 255 - ug, 255 - ub, 255));
                 rc.set_transform(view * *m);
                 for q in quads {
                     let mut bp = kurbo::BezPath::new();
@@ -1142,7 +1189,7 @@ fn draw_inverse_highlight(
                     let Some(style) = cs.styles.get(g.style as usize) else { continue };
                     let Some(c) = doc.resolve_color(&style.fill, style.fill_tint) else { continue };
                     let [r, gg, b, _] = c.to_rgba8(1.0);
-                    rc.set_paint(peniko::Color::from_rgba8(r, gg, b, 255));
+                    rc.set_paint(peniko::Color::from_rgba8(255 - r, 255 - gg, 255 - b, 255));
                     let outline = db.outline(&g.face, g.gid);
                     let skew =
                         if style.skew != 0.0 { Affine::new([1.0, 0.0, -style.skew.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
