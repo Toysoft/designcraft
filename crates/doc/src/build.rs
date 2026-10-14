@@ -558,12 +558,7 @@ impl Document {
     pub fn parent_page_for(&self, abs: usize) -> Option<(usize, usize)> {
         let page = self.page(abs)?;
         let pi = self.parent_index(page.parent?)?;
-        let ps = &self.parents[pi];
-        // A parent spread can come without pages from a file.
-        // A single-sided page takes the parent's first page, like a left-hand page.
-        let first = ps.pages.len() >= 2 && matches!(page.side, PageSide::Left | PageSide::Single);
-        let idx = if first { 0 } else { ps.pages.len().checked_sub(1)? };
-        Some((pi, idx))
+        Some((pi, shown_parent_page(&self.parents[pi], page.side)?))
     }
 
     /// Ruler guides document page `abs` inherits from its applied parent page. They are stored on
@@ -586,6 +581,68 @@ impl Document {
             })
             .collect()
     }
+
+    /// Every parent page behind document page `abs` (spread index, page index): the applied parent
+    /// and each parent it is based on, deepest first. At each level the document page's side picks
+    /// the page, as in [`Self::parent_page_for`]. The chain ends at a parent page that hides its own
+    /// parent's items, or at a cycle.
+    pub fn parent_chain_for(&self, abs: usize) -> Vec<(usize, usize)> {
+        let mut chain: Vec<(usize, usize)> = Vec::new();
+        let Some(page) = self.page(abs) else { return chain };
+        let mut next = page.parent;
+        while let Some(id) = next {
+            let Some(pi) = self.parent_index(id) else { break };
+            if chain.iter().any(|&(seen, _)| seen == pi) {
+                break;
+            }
+            let ps = &self.parents[pi];
+            let Some(idx) = shown_parent_page(ps, page.side) else { break };
+            chain.push((pi, idx));
+            if !ps.pages[idx].show_parent_items {
+                break;
+            }
+            next = ps.parent.as_ref().and_then(|info| info.based_on);
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// The parent items showing on document page `abs`, each with the x offset from parent spread
+    /// to document spread. Deepest parent first (bottom of the stack), z-order within a level.
+    /// Items overridden by the document page, or by a parent page higher in the chain, are left out.
+    pub fn shown_parent_items(&self, abs: usize) -> Vec<(&Arc<Item>, f64)> {
+        let Some(page) = self.page(abs) else { return Vec::new() };
+        if !page.show_parent_items {
+            return Vec::new();
+        }
+        let chain = self.parent_chain_for(abs);
+        let mut items = Vec::new();
+        for (level, &(pi, idx)) in chain.iter().enumerate() {
+            let parent = &self.parents[pi];
+            let dx = page.x - parent.pages[idx].x;
+            let above = chain.get(level + 1..).unwrap_or_default();
+            for it in &parent.items {
+                // Parent items belong to the parent page their centre sits on.
+                if parent.pages.len() > 1 && parent.page_at_x(it.bounds().center().x) != Some(idx) {
+                    continue;
+                }
+                let overridden =
+                    page.overridden.contains(&it.id) || above.iter().any(|&(api, aidx)| self.parents[api].pages[aidx].overridden.contains(&it.id));
+                if !overridden {
+                    items.push((it, dx));
+                }
+            }
+        }
+        items
+    }
+}
+
+/// The page of parent spread `ps` behind a document page on side `side`: the left page of a facing
+/// parent, otherwise the last. A single-sided page takes the parent's first page, like a left-hand
+/// page. A parent spread can come without pages from a file.
+fn shown_parent_page(ps: &Spread, side: PageSide) -> Option<usize> {
+    let first = ps.pages.len() >= 2 && matches!(side, PageSide::Left | PageSide::Single);
+    if first { Some(0) } else { ps.pages.len().checked_sub(1) }
 }
 
 #[cfg(test)]
@@ -664,6 +721,47 @@ mod tests {
         let b = d.item(id).unwrap().bounds();
         assert!((b.x0 - 100.0).abs() < 1e-9, "{b:?}");
         d.check().unwrap();
+    }
+
+    /// Parents A ← B ← C (C based on B, B on A): a page applying C shows the items of all three,
+    /// deepest at the bottom. An override on the page or higher in the chain hides an item; a cycle
+    /// in `based_on` doesn't loop forever.
+    #[test]
+    fn nested_parents_show_their_whole_chain() {
+        let mut d = Document::new(&NewDocument { pages: 3, ..Default::default() });
+        let lid = d.default_layer();
+        let a = d.parents[0].id;
+        let b = d.add_parent("B", "Parent", 1, 0.0, Margins::uniform(36.0));
+        let c = d.add_parent("C", "Parent", 1, 0.0, Margins::uniform(36.0));
+        Arc::make_mut(&mut d.parents[1]).parent.as_mut().unwrap().based_on = Some(a);
+        Arc::make_mut(&mut d.parents[2]).parent.as_mut().unwrap().based_on = Some(b);
+        // One box on each parent's right page (x 612–1224).
+        let mut ids = Vec::new();
+        for pi in 0..3 {
+            let id = ItemId(d.alloc());
+            let r = designcraft_geom::Rect::new(700.0, 100.0 + pi as f64 * 50.0, 800.0, 140.0 + pi as f64 * 50.0);
+            let it = Item::new(id, lid, crate::Shape::Rectangle, designcraft_geom::shapes::rectangle(r));
+            d.insert_item(crate::SpreadRef::Parent(pi), it, None).unwrap();
+            ids.push(id);
+        }
+        // Page 3 is a right page (spread [2 3]).
+        d.apply_parent(&[2], Some(c)).unwrap();
+        assert_eq!(d.parent_chain_for(2), vec![(0, 1), (1, 1), (2, 1)]);
+        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|(it, _)| it.id).collect();
+        assert_eq!(shown, ids);
+        // B overrides A's box; the page overrides C's.
+        Arc::make_mut(&mut d.parents[1]).pages[1].overridden.push(ids[0]);
+        let (si, pi) = d.page_loc(2).unwrap();
+        Arc::make_mut(&mut d.spreads[si]).pages[pi].overridden.push(ids[2]);
+        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|(it, _)| it.id).collect();
+        assert_eq!(shown, vec![ids[1]]);
+        // A parent hiding its own parent's items ends the chain.
+        Arc::make_mut(&mut d.parents[2]).pages[1].show_parent_items = false;
+        assert_eq!(d.parent_chain_for(2), vec![(2, 1)]);
+        // Cycle: A based on C.
+        Arc::make_mut(&mut d.parents[2]).pages[1].show_parent_items = true;
+        Arc::make_mut(&mut d.parents[0]).parent.as_mut().unwrap().based_on = Some(c);
+        assert_eq!(d.parent_chain_for(2), vec![(0, 1), (1, 1), (2, 1)]);
     }
 
     #[test]

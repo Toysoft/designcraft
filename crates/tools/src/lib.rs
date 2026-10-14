@@ -239,16 +239,13 @@ impl ToolContext<'_> {
         let spread = self.doc.spreads.get(si)?;
         let pi = spread.page_at_x(sp.x)?;
         let page = self.doc.first_page_of_spread(si) + pi;
-        let (ppi, ppg) = self.doc.parent_page_for(page)?;
-        let parent = &self.doc.parents[ppi];
-        let pg = &spread.pages[pi];
-        let at = sp - designcraft_geom::Vec2::new(pg.x - parent.pages[ppg].x, 0.0);
-        parent
-            .items
-            .iter()
+        // Topmost item first, across the whole parent chain.
+        self.doc
+            .shown_parent_items(page)
+            .into_iter()
             .rev()
-            .find(|it| !it.locked && !pg.overridden.contains(&it.id) && designcraft_doc::edit_hit(it, at, self.tol(4.0)))
-            .map(|it| (page, it.id))
+            .find(|(it, dx)| !it.locked && designcraft_doc::edit_hit(it, sp - designcraft_geom::Vec2::new(*dx, 0.0), self.tol(4.0)))
+            .map(|(it, _)| (page, it.id))
     }
 
     fn hit_parent(&self, sr: SpreadRef, sp: Point) -> Option<(SpreadRef, ItemId)> {

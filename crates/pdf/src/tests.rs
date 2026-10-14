@@ -111,6 +111,31 @@ fn colours_keep_their_space() {
     assert!(s.contains("/Separation") && s.contains("/PANTONE#20Test"), "spot as Separation");
 }
 
+/// A page applying parent C (based on B, based on A) exports A's items too. Only the first level
+/// used to be drawn, so backgrounds on a deeper parent went missing.
+#[test]
+fn nested_parent_items_export() {
+    use designcraft_doc::Margins;
+    let mut d = doc_with_text("x");
+    let lid = d.default_layer();
+    let a = d.parents[0].id;
+    let b = d.add_parent("B", "Parent", 1, 0.0, Margins::uniform(36.0));
+    let c = d.add_parent("C", "Parent", 1, 0.0, Margins::uniform(36.0));
+    std::sync::Arc::make_mut(&mut d.parents[1]).parent.as_mut().unwrap().based_on = Some(a);
+    std::sync::Arc::make_mut(&mut d.parents[2]).parent.as_mut().unwrap().based_on = Some(b);
+    // A cyan box on the right page of A, the deepest parent.
+    let mut it = Item::new(
+        ItemId(d.alloc()),
+        lid,
+        designcraft_doc::Shape::Rectangle,
+        designcraft_geom::shapes::rectangle(Rect::new(700.0, 400.0, 800.0, 500.0)),
+    );
+    it.fill = Fill::swatch("C=100 M=0 Y=0 K=0");
+    d.insert_item(SpreadRef::Parent(0), it, None).unwrap();
+    d.apply_parent(&[0], Some(c)).unwrap();
+    assert!(uncompressed(&d, PdfOptions::default()).contains("1 0 0 0 k"), "the deepest parent's item is missing");
+}
+
 /// [Paper] went into print PDFs as `1 1 1 rg`, DeviceRGB white.
 #[test]
 fn paper_prints_as_no_ink() {

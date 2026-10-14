@@ -356,9 +356,8 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
     let mut rr = designcraft_render::Renderer::new();
     rr.threads = designcraft_render::default_threads();
     let k = ppi / 72.0;
-    let parent_transparent = |pid: Option<designcraft_doc::SpreadId>| {
-        pid.and_then(|id| d.parents.iter().find(|p| p.id == id)).is_some_and(|p| p.items.iter().any(|it| transparent(it)))
-    };
+    // Parent items involving transparency, across the page's whole parent chain.
+    let parent_transparent = |abs: usize| d.shown_parent_items(abs).iter().any(|(it, _)| transparent(it));
     // An opaque image item showing `img` over `r`.
     let image_item =
         |out: &mut designcraft_doc::Document, r: designcraft_geom::Rect, img: designcraft_render::Rendered, layer: designcraft_doc::LayerId| {
@@ -390,7 +389,7 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
             it
         };
     for (si, sp) in d.spreads.iter().enumerate() {
-        let whole = sp.pages.iter().any(|pg| pg.show_parent_items && parent_transparent(pg.parent));
+        let whole = (0..sp.pages.len()).any(|pi| parent_transparent(d.first_page_of_spread(si) + pi));
         if whole {
             // Parent items involve transparency: every page of the spread as one image.
             let first = d.first_page_of_spread(si);

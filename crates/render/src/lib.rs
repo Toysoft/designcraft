@@ -465,24 +465,12 @@ impl Renderer {
             }
             if let SpreadRef::Doc(si) = sr {
                 let first = doc.first_page_of_spread(si);
-                for (pi, page) in sp.pages.iter().enumerate() {
-                    if !page.show_parent_items {
-                        continue;
-                    }
-                    let Some((ppi, ppage)) = doc.parent_page_for(first + pi) else { continue };
-                    let parent = &doc.parents[ppi];
-                    let dx = page.x - parent.pages[ppage].x;
-                    let pr = parent.pages[ppage].bounds();
-                    for it in &parent.items {
-                        if it.layer != layer.id || page.overridden.contains(&it.id) {
-                            continue;
+                for pi in 0..sp.pages.len() {
+                    // The whole parent chain, deepest parent at the bottom.
+                    for (it, dx) in doc.shown_parent_items(first + pi) {
+                        if it.layer == layer.id {
+                            self.draw_item(ctx, f, it, Affine::translate((dx, 0.0)), Some(first + pi));
                         }
-                        // Parent items belong to the parent page they sit on.
-                        if parent.page_at_x(it.bounds().center().x) != Some(ppage) && parent.pages.len() > 1 {
-                            continue;
-                        }
-                        let _ = pr;
-                        self.draw_item(ctx, f, it, Affine::translate((dx, 0.0)), Some(first + pi));
                     }
                 }
             }
