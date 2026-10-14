@@ -1124,6 +1124,7 @@ version = "0.7.1"
 dependencies = [
  "designcraft-doc",
  "quick-xml 0.38.4",
+ "unicode-general-category",
  "zip",
 ]
 

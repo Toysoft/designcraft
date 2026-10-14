@@ -23,6 +23,7 @@ const IMAGE_EXTS: &[&str] = &[
     "docx",
     "rtf",
     "md",
+    "markdown",
     "xlsx",
     "idml",
     "designcraft",
