@@ -8,6 +8,7 @@ use designcraft_geom::{Affine, Point, Rect as DRect, Vec2 as DVec2};
 use designcraft_tools::{CanvasLayout, Cursor, Mods, Overlay, PointerEvent, PointerKind, ToolKey};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::{DesignApp, ScreenMode, View, theme::Tokens};
 
@@ -137,6 +138,17 @@ pub fn current_slot(app: &DesignApp, layout: &CanvasLayout) -> Option<usize> {
             da.total_cmp(&db)
         })
         .map(|(i, _)| i)
+}
+
+/// The spread nearest the view centre and the centre in that spread's coordinates.
+pub fn view_centre(app: &DesignApp) -> Option<(SpreadRef, Point)> {
+    let st = app.session.active()?;
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let slot = layout.slots.get(current_slot(app, &layout)?)?;
+    let v = app.view()?;
+    let r = app.canvas_rect?;
+    let c = Point::new(v.origin.x + r.width() as f64 / 2.0 / v.zoom, v.origin.y + r.height() as f64 / 2.0 / v.zoom);
+    Some((slot.spread, slot.to_spread(c)))
 }
 
 /// Absolute page index under the view centre.
@@ -288,9 +300,12 @@ pub fn show_split(app: &mut DesignApp, ui: &mut egui::Ui, halves: [Rect; 2]) {
     for event in ui.input(|i| i.events.clone()) {
         // Preserve pane focus for secondary clicks and ruler gestures too, at their own event.
         if let egui::Event::PointerButton { pos, pressed: true, .. } = &event
-            && let Some((pane, ..)) = panes.iter().find(|(_, child, canvas, _)| owns_press(child, &canvas.response, *pos))
+            && let Some((pane, child, canvas, input)) = panes.iter_mut().find(|(_, child, canvas, _)| owns_press(child, &canvas.response, *pos))
         {
             app.focus_pane = *pane;
+            if let Some(input) = input {
+                input.keyboard = !child.ctx().text_edit_focused() || canvas.response.has_focus();
+            }
         }
         for (pane, child, canvas, input) in &mut panes {
             if let Some(input) = input {
@@ -417,6 +432,36 @@ fn paint(app: &mut DesignApp, ui: &mut egui::Ui, canvas: &PreparedCanvas) {
             app.session.cursor(xf.to_canvas(p), ui.input(|i| mods(i, false)), app.view_info())
         };
         ui.ctx().set_cursor_icon(cursor_icon(c));
+        draw_cursor_badge(&painter, p, c, &t);
+    }
+}
+
+/// The loaded text cursor's badge beside the system cursor: lines of text, a closed chain
+/// (a click threads) or a broken one (a click unthreads). Drawn in code.
+fn draw_cursor_badge(painter: &egui::Painter, p: Pos2, c: Cursor, t: &Tokens) {
+    if !matches!(c, Cursor::LoadedText | Cursor::ThreadLink | Cursor::Unthread) {
+        return;
+    }
+    let r = Rect::from_min_size(p + vec2(12.0, 12.0), vec2(20.0, 16.0));
+    painter.rect_filled(r, 3.0, t.measure_bg);
+    let ink = Stroke::new(1.5, t.measure_text);
+    let c0 = r.center();
+    match c {
+        Cursor::LoadedText => {
+            for (dy, w) in [(-4.0, 12.0), (0.0, 12.0), (4.0, 8.0)] {
+                painter.line_segment([pos2(c0.x - 6.0, c0.y + dy), pos2(c0.x - 6.0 + w, c0.y + dy)], ink);
+            }
+        }
+        _ => {
+            let gap = if c == Cursor::Unthread { 2.5 } else { -2.0 };
+            for side in [-1.0, 1.0] {
+                let link = Rect::from_center_size(pos2(c0.x + side * (3.5 + gap / 2.0), c0.y), vec2(9.0, 6.0));
+                painter.rect_stroke(link, 3.0, ink, StrokeKind::Middle);
+            }
+            if c == Cursor::Unthread {
+                painter.line_segment([pos2(c0.x + 2.0, c0.y - 6.0), pos2(c0.x - 2.0, c0.y + 6.0)], ink);
+            }
+        }
     }
 }
 
@@ -440,6 +485,8 @@ fn cursor_icon(c: Cursor) -> egui::CursorIcon {
         Cursor::ZoomOut => C::ZoomOut,
         Cursor::Eyedropper => C::Crosshair,
         Cursor::LoadedText | Cursor::LoadedGraphic => C::Copy,
+        Cursor::ThreadLink => C::Alias,
+        Cursor::Unthread => C::NoDrop,
         Cursor::NotAllowed => C::NotAllowed,
     }
 }
@@ -663,6 +710,17 @@ fn dashed(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, dash: f32, 
     painter.extend(egui::Shape::dashed_line(&[a, b], stroke, dash, gap));
 }
 
+/// The most baseline grid lines drawn on a page: one per point of the tallest page (216 in).
+const MAX_BASELINES: usize = 216 * 72;
+
+/// Baseline grid lines inside a page, measured from its top: `start + n * increment` for n >= 0 (the bottom
+/// edge is not a line). Lines above the page are skipped without walking them, however far up the start is.
+fn baseline_grid_lines(start: f64, increment: f64, height: f64) -> impl Iterator<Item = f64> {
+    let step = increment.max(1.0);
+    let first = if start < 0.0 { start.rem_euclid(step) } else { start };
+    (0..MAX_BASELINES).map(move |n| first + n as f64 * step).take_while(move |y| *y < height)
+}
+
 fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document, layout: &CanvasLayout, t: &Tokens) {
     let s = &doc.settings;
     for slot in &layout.slots {
@@ -691,13 +749,11 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             // Baseline grid.
             if app.ui.baseline_grid && xf.zoom >= s.baseline_grid.view_threshold {
                 let g = &s.baseline_grid;
-                let mut y = g.start;
-                while y < p.height {
+                for y in baseline_grid_lines(g.start, g.increment, p.height) {
                     painter.line_segment(
                         [pt(Point::new(pr.x0, pr.y0 + y)), pt(Point::new(pr.x1, pr.y0 + y))],
                         Stroke::new(hair(painter), c32(g.color).gamma_multiply(0.8)),
                     );
-                    y += g.increment.max(1.0);
                 }
             }
             // Margins (magenta) and columns (violet).
@@ -889,7 +945,7 @@ fn draw_selection(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Docum
         union = Some(union.map_or(b, |u| u.union(b)));
         // Text frame ports.
         if let Content::Text(tf) = &it.content {
-            draw_ports(app, painter, xf, doc, layout, it, tf.story, a, color);
+            draw_ports(app, painter, xf, doc, layout, it, tf.story, color);
         }
         if let Content::Graphic(g) = &it.content
             && sel.content
@@ -982,7 +1038,6 @@ fn draw_ports(
     layout: &CanvasLayout,
     it: &Item,
     sid: designcraft_doc::StoryId,
-    a: Affine,
     color: Color32,
 ) {
     let Some(story) = doc.story(sid) else { return };
@@ -990,14 +1045,11 @@ fn draw_ports(
     let is_last = pos + 1 == story.frames.len();
     let cs = app.session.cache.get(doc, sid, None);
     let overset = is_last && cs.is_overset();
-    let s = 8.5;
-    let _ = layout;
-    let r = it.inner_bounds();
-    let m = a * it.xf;
+    let s = designcraft_tools::thread::PORT_SIZE_PX as f32;
     // In port on the left edge below the top-left corner; out port on the right edge above the
-    // bottom-right corner (screen-space offsets).
-    let inp = xf.to_screen(m * Point::new(r.x0, r.y0)) + vec2(0.0, 14.5);
-    let outp = xf.to_screen(m * Point::new(r.x1, r.y1)) - vec2(0.0, 12.0);
+    // bottom-right corner. The Selection tool hit-tests the same places.
+    let port = |out: bool| designcraft_tools::thread::port_center(doc, layout, it.id, out, xf.zoom).map(|c| xf.to_screen(c));
+    let (Some(inp), Some(outp)) = (port(false), port(true)) else { return };
     for (c, has_link, is_out) in [(inp, pos > 0, false), (outp, !is_last, true)] {
         let pr = Rect::from_center_size(c, vec2(s, s));
         painter.rect_filled(pr, 0.0, Color32::WHITE);
@@ -1025,11 +1077,12 @@ fn draw_text_selection(
     let range = ts.range();
     // Selected table cells: tint every selected cell.
     if let Some(sel) = cells.filter(|c| c.story == ts.story) {
+        let selected = doc.story(sel.story).and_then(|s| s.tables.get(&sel.table)).map(|t| t.selected_owners(sel.range)).unwrap_or_default();
         for ft in &cs.frames {
             let (Some((a, _)), Some(it)) = (item_canvas_xf(doc, layout, ft.frame), doc.item(ft.frame)) else { continue };
             let m = a * doc.text_xf(it);
             for t in ft.tables.iter().filter(|t| t.table == sel.table) {
-                for c in t.cells.iter().filter(|c| sel.range.contains(c.row, c.col)) {
+                for c in t.cells.iter().filter(|c| selected.binary_search(&(c.row, c.col)).is_ok()) {
                     let q = [
                         xf.to_screen(m * Point::new(c.rect.x0, c.rect.y0)),
                         xf.to_screen(m * Point::new(c.rect.x1, c.rect.y0)),
@@ -1090,6 +1143,15 @@ fn draw_text_selection(
             }
             let past = e == l.range.end && range.end > l.range.end;
             quads.extend(compose::highlight_quads(l, s, e, past));
+            // A selected drop cap is highlighted down to its baseline.
+            if let Some(dc) = l.drop_cap {
+                let sel = l.glyphs.iter().filter(|g| g.len > 0 && g.byte < dc.end && g.byte >= s && g.byte < e);
+                let (a, b) = sel.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), g| (a.min(g.x), b.max(g.x + g.adv)));
+                if a < b {
+                    let r = dc.rect;
+                    quads.push([Point::new(a, r.y0), Point::new(b, r.y0), Point::new(b, r.y1), Point::new(a, r.y1)]);
+                }
+            }
             for (gi, g) in l.glyphs.iter().enumerate() {
                 if g.visible && g.len > 0 && g.byte >= s && g.byte < e {
                     glyphs.push((li, gi));
@@ -1445,19 +1507,6 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
-/// Presses in a row, this one included: each within egui's double-click delay and distance of the
-/// one before. Counted on the press, as text selection wants (egui counts releases, up to three).
-fn count_click(ui: &egui::Ui, id: egui::Id, at: Pos2, now: f64) -> u8 {
-    let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
-    let last: Option<(f64, Pos2, u8)> = ui.data(|d| d.get_temp(id));
-    let n = match last {
-        Some((t, p, n)) if now - t < delay && p.distance(at) < dist => n.saturating_add(1),
-        _ => 1,
-    };
-    ui.data_mut(|d| d.insert_temp(id, (now, at, n)));
-    n
-}
-
 struct CanvasInput {
     m: Mods,
     keyboard: bool,
@@ -1567,9 +1616,10 @@ impl CanvasInput {
                     if !space && (if xf.rot == 0 { rect.contains(p) } else { resp.rect.contains(p) }) && owns_press(ui, resp, p) {
                         app.focus_pane = app.pane;
                         let now = ui.input(|i| i.time);
-                        let clicks = count_click(ui, clicks_id, p, now);
-                        let kind = if clicks == 2 { PointerKind::DoubleClick } else { PointerKind::Down };
-                        send_pointer(app, rect, kind, p, self.m, clicks);
+                        let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
+                        let clicks = press_count(ui.data(|d| d.get_temp(clicks_id)), p, now, delay, dist);
+                        ui.data_mut(|d| d.insert_temp(clicks_id, Clicks { at: f64::NEG_INFINITY, pos: p, n: clicks }));
+                        send_pointer(app, rect, PointerKind::Down, p, self.m, clicks);
                         self.down = true;
                         self.origin = Some((p, now));
                         ui.data_mut(|d| d.remove::<(f64, bool)>(egui::Id::new(("canvas_hold", app.pane))));
@@ -1577,10 +1627,15 @@ impl CanvasInput {
                         resp.request_focus();
                         self.keyboard = true;
                     } else {
-                        ui.data_mut(|d| d.remove::<(f64, Pos2, u8)>(clicks_id));
+                        ui.data_mut(|d| d.remove::<Clicks>(clicks_id));
                         self.keyboard = false;
                     }
                 } else if self.down {
+                    if let Some(c) = ui.data(|d| d.get_temp::<Clicks>(clicks_id)) {
+                        let now = ui.input(|i| i.time);
+                        let dist = ui.ctx().options(|o| o.input_options.max_click_dist);
+                        ui.data_mut(|d| d.insert_temp(clicks_id, release_clicks(c, p, now, dist)));
+                    }
                     send_pointer(app, rect, PointerKind::Up, p, self.m, 0);
                     self.down = false;
                     self.origin = None;
@@ -1604,11 +1659,20 @@ impl CanvasInput {
                 let _ = app.run(id, json!({"text": t}));
             }
             egui::Event::Copy | egui::Event::Cut if keyboard && app.session.wants_text() => {
+                // `run` puts the copied text on the system clipboard.
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
-                if let Ok(r) = app.run(id, json!({}))
-                    && let Some(t) = r.get("text").and_then(serde_json::Value::as_str)
-                {
-                    ui.ctx().copy_text(t.to_string());
+                let _ = app.run(id, json!({}));
+            }
+            // Without a native menu bar the copy and paste keys arrive only as these events.
+            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if keyboard && !app.native_menu => {
+                let (id, params) = match e {
+                    egui::Event::Copy => ("edit.copy", serde_json::Value::Null),
+                    egui::Event::Cut => ("edit.cut", serde_json::Value::Null),
+                    egui::Event::Paste(t) => ("edit.paste", json!({"text": t})),
+                    _ => return,
+                };
+                if crate::menus::enabled(app, id) {
+                    crate::menus::activate(app, id, &params);
                 }
             }
             egui::Event::Key { key, pressed: true, modifiers, .. } if keyboard => {
@@ -1793,6 +1857,8 @@ const GUIDE_DRAG: &str = "canvas_guide_drag";
 /// A ruler guide being dragged: out of a ruler (`from` None) or an existing one.
 #[derive(Clone, Debug)]
 struct GuideDrag {
+    doc_uid: u64,
+    doc: Arc<Document>,
     pane: u8,
     orientation: designcraft_doc::Orientation,
     from: Option<(designcraft_doc::SpreadRef, usize, usize)>,
@@ -1803,10 +1869,13 @@ struct GuideDrag {
 // Called by the actual single/split drawing route, before any input suppression.
 // A surviving secondary window still owns pane 1; disappearing owners only cancel.
 fn cancel_missing_guide_owner(app: &DesignApp, ui: &egui::Ui, split: bool) {
+    let active = app.session.active();
     let secondary = split || (app.second_window && app.ui.screen_mode != ScreenMode::Presentation);
     let id = egui::Id::new(GUIDE_DRAG);
     ui.data_mut(|d| {
-        if d.get_temp::<GuideDrag>(id).is_some_and(|g| g.pane == 1 && !secondary) {
+        if d.get_temp::<GuideDrag>(id)
+            .is_some_and(|g| active.is_none_or(|st| st.uid != g.doc_uid || !Arc::ptr_eq(&st.doc, &g.doc)) || (g.pane == 1 && !secondary))
+        {
             d.remove::<GuideDrag>(id);
         }
     });
@@ -1854,7 +1923,14 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
         egui::Event::PointerMoved(pos) => (*pos, false, false),
         _ => return drag.is_some(),
     };
-    if drag.is_none() && pressed && can_start && owns_press(ui, resp, o) && app.ui.guides && !app.ui.guides_locked {
+    if drag.is_none()
+        && pressed
+        && can_start
+        && owns_press(ui, resp, o)
+        && app.ui.guides
+        && !app.ui.guides_locked
+        && let Some((doc_uid, doc)) = app.session.active().map(|st| (st.uid, st.doc.clone()))
+    {
         let full = resp.rect;
         if full.contains(o) && !rect.contains(o) {
             // In a ruler (not the corner).
@@ -1866,7 +1942,7 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
                 None
             };
             if let Some(orientation) = orientation {
-                drag = Some(GuideDrag { pane: app.pane, orientation, from: None, at: Some(o) });
+                drag = Some(GuideDrag { doc_uid, doc, pane: app.pane, orientation, from: None, at: Some(o) });
             }
         } else if rect.contains(o)
             && matches!(app.session.tool_id(), "selection" | "directSelection")
@@ -1881,7 +1957,7 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
                 })
             });
             if !over_item {
-                drag = Some(GuideDrag { pane: app.pane, orientation, from: Some((r, pi, gi)), at: Some(o) });
+                drag = Some(GuideDrag { doc_uid, doc, pane: app.pane, orientation, from: Some((r, pi, gi)), at: Some(o) });
             }
         }
     }
@@ -1929,12 +2005,54 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
     true
 }
 
+/// Presses in a row on the canvas: the last press's count, and where and when it was released
+/// (`at` is −∞ while the button is down).
+#[derive(Clone, Copy, Debug)]
+struct Clicks {
+    at: f64,
+    pos: Pos2,
+    n: u8,
+}
+
+/// The count of a press at `pos` at time `now`: one more than the last press when it comes within
+/// the double-click delay of the last release and near where that release was, else 1.
+fn press_count(last: Option<Clicks>, pos: Pos2, now: f64, delay: f64, dist: f32) -> u8 {
+    match last {
+        Some(c) if now - c.at <= delay && (pos - c.pos).length() <= dist => c.n.saturating_add(1),
+        _ => 1,
+    }
+}
+
+/// The record a release at `pos` leaves: a release away from its press ended a drag, which is
+/// not a click, so the next press counts from one.
+fn release_clicks(press: Clicks, pos: Pos2, now: f64, dist: f32) -> Clicks {
+    let n = if (pos - press.pos).length() <= dist { press.n } else { 0 };
+    Clicks { at: now, pos, n }
+}
+
 #[cfg(test)]
 mod tests {
     use designcraft_geom::Unit;
     use egui_kittest::{Harness, kittest::Queryable};
 
     use super::*;
+
+    #[test]
+    fn a_press_after_a_drag_is_not_a_double_click() {
+        let (delay, dist) = (0.3, 6.0);
+        let press = |last, x: f32, now| press_count(last, pos2(x, 0.0), now, delay, dist);
+        // Click, click: a double click.
+        let n = press(None, 0.0, 0.0);
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n }, pos2(0.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 1.0, 0.2), 2);
+        // A drag from 0 to 100, then a fast press where it started or where it ended: a single click.
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(100.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 0.0, 0.2), 1);
+        assert_eq!(press(Some(up), 100.0, 0.2), 1);
+        // Too slow: a single click.
+        let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(0.0, 0.0), 0.1, dist);
+        assert_eq!(press(Some(up), 0.0, 1.0), 1);
+    }
 
     fn harness(app: DesignApp) -> Harness<'static, DesignApp> {
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
@@ -1961,6 +2079,79 @@ mod tests {
     fn units(h: &Harness<'_, DesignApp>) -> (Unit, Unit) {
         let s = &h.state().session.doc().unwrap().doc.settings;
         (s.horizontal_units, s.vertical_units)
+    }
+
+    #[test]
+    fn selected_merged_owners_paint_the_same_row_and_column_targets() {
+        for column in [true, false] {
+            for merged in [false, true] {
+                let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+                app.run("file.new", json!({"pages": 1})).unwrap();
+                app.run("frame.create", json!({"rect": [36, 36, 300, 300], "content": "text"})).unwrap();
+                app.run("table.insert", json!({"rows": 2, "cols": 2})).unwrap();
+                if merged {
+                    let range = if column { json!({"rows": [0, 0], "cols": [0, 1]}) } else { json!({"rows": [0, 1], "cols": [0, 0]}) };
+                    app.run("table.select", range).unwrap();
+                    app.run("table.merge", json!({})).unwrap();
+                }
+                app.run("table.select", json!({"rows": [1, 1], "cols": [1, 1]})).unwrap();
+                app.run(if column { "table.selectColumn" } else { "table.selectRow" }, json!({})).unwrap();
+                let st = app.session.doc().unwrap();
+                let selection = st.selection.clone();
+                let ts = selection.text.unwrap();
+                let selected = selection.cells.unwrap();
+                assert_eq!(
+                    selected.range,
+                    if column { designcraft_doc::CellRange::new(0, 1, 1, 1) } else { designcraft_doc::CellRange::new(1, 0, 1, 1) }
+                );
+                let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+                let cs = app.session.cache.get(&st.doc, ts.story, None);
+                let ft = &cs.frames[0];
+                let table = ft.tables.iter().find(|t| t.table == selected.table).unwrap();
+                let (a, _) = item_canvas_xf(&st.doc, &layout, ft.frame).unwrap();
+                let m = a * st.doc.text_xf(st.doc.item(ft.frame).unwrap());
+                let xf = Xf { min: pos2(0.0, 0.0), origin: Point::new(0.0, 0.0), zoom: 1.0, rot: 0, pivot: pos2(0.0, 0.0) };
+                let owners = if merged {
+                    [(0, 0), (1, 1)]
+                } else if column {
+                    [(0, 1), (1, 1)]
+                } else {
+                    [(1, 0), (1, 1)]
+                };
+                let expected: Vec<_> = owners
+                    .into_iter()
+                    .map(|(r, c)| {
+                        let rect = table.cells.iter().find(|cell| cell.row == r && cell.col == c).unwrap().rect;
+                        vec![
+                            xf.to_screen(m * Point::new(rect.x0, rect.y0)),
+                            xf.to_screen(m * Point::new(rect.x1, rect.y0)),
+                            xf.to_screen(m * Point::new(rect.x1, rect.y1)),
+                            xf.to_screen(m * Point::new(rect.x0, rect.y1)),
+                        ]
+                    })
+                    .collect();
+                let ctx = egui::Context::default();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    draw_text_selection(&app, ui.painter(), &xf, &st.doc, &layout, ts, Some(selected));
+                });
+                output.textures_delta.clear();
+                let tint = Color32::from_rgba_unmultiplied(80, 140, 255, 90);
+                let painted: Vec<_> = output
+                    .shapes
+                    .into_iter()
+                    .filter_map(|s| match s.shape {
+                        egui::Shape::Path(path) if path.fill == tint => {
+                            assert!(path.closed);
+                            assert_eq!(path.stroke, egui::epaint::PathStroke::NONE);
+                            Some(path.points)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(painted, expected, "only the two touched owners are tinted; column={column}, merged={merged}");
+                assert_eq!(app.session.doc().unwrap().selection, selection);
+            }
+        }
     }
 
     #[test]
@@ -2039,10 +2230,10 @@ mod tests {
     }
 
     #[test]
-    fn clicks_in_a_row_select_word_sentence_paragraph_and_story() {
+    fn clicks_in_a_row_select_word_line_paragraph_with_return_and_story() {
         let text = "One two. Three four! Five six.\nSecond para here.";
         let (mut h, id) = typing(text);
-        // Inside "Three", the second sentence: its start is not the paragraph's.
+        // Inside "Three": double-click selects the word, then line and paragraph with return.
         let p = screen_at(&mut h, id, 10..14);
         h.hover_at(p);
         h.step();
@@ -2052,7 +2243,7 @@ mod tests {
             let r = selected(&h);
             got.push(text[r].to_string());
         }
-        assert_eq!(got[1..], ["Three", "Three four! ", "One two. Three four! Five six.", text], "{got:?}");
+        assert_eq!(got[1..], ["Three", "One two. Three four! Five six.", "One two. Three four! Five six.\n", text], "{got:?}");
         assert!(got[0].is_empty(), "one click places the caret: {got:?}");
     }
 
@@ -2583,9 +2774,9 @@ mod tests {
     }
 
     #[test]
-    fn batched_clicks_retain_upstream_word_sentence_paragraph_story_counts() {
+    fn batched_clicks_retain_upstream_word_line_paragraph_with_return_and_story_counts() {
         let text = "One two. Three four! Five six.\nSecond para here.";
-        for (clicks, expected) in [(2, "Three"), (3, "Three four! "), (4, "One two. Three four! Five six."), (5, text)] {
+        for (clicks, expected) in [(2, "Three"), (3, "One two. Three four! Five six."), (4, "One two. Three four! Five six.\n"), (5, text)] {
             let (mut h, id) = typing(text);
             let p = screen_at(&mut h, id, 10..14);
             let original = h.state().session.doc().unwrap().doc.clone();
@@ -2632,6 +2823,120 @@ mod tests {
                 assert_eq!(h.state().focus_pane, if tail_click { 1 - first } else { first });
                 assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + if tail_click { 2 } else { 1 });
                 assert_released(&h);
+            }
+        }
+    }
+
+    #[test]
+    fn split_secondary_focus_same_frame_paste_keeps_external_text() {
+        // Complete both positive controls in both directions before the secondary batch.
+        for (case, button, same_frame) in [
+            ("primary batch", egui::PointerButton::Primary, true),
+            ("secondary next frame", egui::PointerButton::Secondary, false),
+            ("secondary batch", egui::PointerButton::Secondary, true),
+        ] {
+            for first in [0_u8, 1] {
+                let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+                app.run("file.new", json!({})).unwrap();
+                let object = app.run("frame.create", json!({"rect": [72, 72, 200, 160]})).unwrap()["id"].as_u64().unwrap();
+                let object = designcraft_doc::ItemId(object);
+                app.run("selection.set", json!({"ids": [object.0]})).unwrap();
+                app.run("tool.select", json!({"tool": "selection"})).unwrap();
+                app.native_menu = false;
+                app.split = true;
+                app.ui.rulers = false;
+                app.ui.guides = false;
+                app.ui.task_bar = false;
+                let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+                    |ui, app: &mut DesignApp| {
+                        let ctx = ui.ctx().clone();
+                        let layer = ui.layer_id();
+                        ui.data_mut(|d| d.insert_temp(egui::Id::new("secondary_paste_root_layer"), layer));
+                        app.logic(&ctx);
+                        app.ui(ui);
+                    },
+                    app,
+                );
+                h.run_steps(4);
+                for pane in [0, 1] {
+                    h.state_mut().switch_pane(pane);
+                    let rect = h.state().canvas_rect.unwrap();
+                    let centre = h.state().session.layout().to_canvas(SpreadRef::Doc(0), Point::new(136.0, 116.0));
+                    *h.state_mut().view_mut().unwrap() = View {
+                        zoom: 1.0,
+                        origin: Point::new(centre.x - rect.width() as f64 / 2.0, centre.y - rect.height() as f64 / 2.0),
+                        fitted: true,
+                        rotation: 0,
+                    };
+                }
+                h.state_mut().focus_pane = first;
+                h.state_mut().switch_pane(first);
+                h.run_steps(2);
+                let mut points = [Pos2::ZERO; 2];
+                let mut rects = [Rect::NOTHING; 2];
+                for pane in [0, 1] {
+                    h.state_mut().switch_pane(pane);
+                    rects[pane as usize] = h.state().canvas_rect.unwrap();
+                    points[pane as usize] = guide_screen(&mut h, pane, Point::new(136.0, 116.0));
+                }
+                h.state_mut().switch_pane(first);
+                let layer = h.ctx.data(|d| d.get_temp::<egui::LayerId>(egui::Id::new("secondary_paste_root_layer"))).unwrap();
+                for pane in [0, 1] {
+                    let point = points[pane];
+                    assert!(rects[pane].shrink(20.0).contains(point), "{case}: owned canvas interior");
+                    assert!(!rects[1 - pane].contains(point));
+                    assert_eq!(h.ctx.layer_id_at(point), Some(layer), "{case}: no foreground interception");
+                    assert!(h.ctx.memory(|m| m.allows_interaction(layer)));
+                }
+                assert!(!h.ctx.text_edit_focused());
+                assert!(h.state().ui.dialog.is_none());
+                assert!(!h.state().native_menu && !h.state_mut().session.wants_text());
+                assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+                assert_eq!(h.state().session.doc().unwrap().selection.items, vec![object]);
+                assert!(h.state().session.doc().unwrap().selection.text.is_none());
+                assert!(h.state().session.doc().unwrap().doc.item(object).unwrap().text_frame().is_none());
+                assert!(crate::menus::enabled(h.state(), "edit.paste"));
+                assert_released(&h);
+                let before = h.state().session.doc().unwrap().doc.clone();
+                let undo = h.state().session.doc().unwrap().history.undo.len();
+                let a = points[first as usize];
+                let b = points[(1 - first) as usize];
+                h.input_mut().events.extend([primary(a, true), primary(a, false)]);
+                for pressed in [true, false] {
+                    h.input_mut().events.push(egui::Event::PointerButton { pos: b, button, pressed, modifiers: egui::Modifiers::NONE });
+                }
+                if !same_frame {
+                    h.step();
+                    assert_eq!(h.state().focus_pane, 1 - first, "{case}: secondary press acquired focus");
+                    assert_eq!(h.state().session.doc().unwrap().selection.items, vec![object]);
+                    assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+                    assert_released(&h);
+                }
+                h.input_mut().events.push(egui::Event::Paste("From elsewhere".into()));
+                h.step();
+                if same_frame {
+                    assert!(h.ctx.input(|i| i.pointer.primary_pressed() && i.pointer.primary_released() && !i.pointer.primary_down()));
+                }
+                assert_eq!(h.state().focus_pane, 1 - first, "{case}: final pane owns keyboard input");
+                assert_eq!(h.state().pane, 1 - first);
+                assert!(!h.ctx.text_edit_focused());
+                assert!(h.state().ui.dialog.is_none());
+                assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+                assert_released(&h);
+                let st = h.state().session.doc().unwrap();
+                assert_eq!(st.doc.spreads[0].items.len(), before.spreads[0].items.len() + 1, "{case}, first={first}: paste exactly once");
+                assert_eq!(st.doc.stories.len(), before.stories.len() + 1);
+                assert_eq!(st.doc.item(object), before.item(object));
+                assert!(st.selection.text.is_none(), "external text creates a selected frame, not an insertion point");
+                assert_eq!(st.selection.items.len(), 1);
+                let pasted = st.selection.items[0];
+                assert_ne!(pasted, object);
+                let story = st.doc.item(pasted).unwrap().text_frame().unwrap().story;
+                assert_eq!(st.doc.story(story).unwrap().text, "From elsewhere");
+                assert_eq!(st.history.undo.len(), undo + 1);
+                assert_eq!(st.history.undo.last().unwrap().label, "Paste");
+                st.doc.check().unwrap();
+                eprintln!("split secondary Paste completed: {case}, first={first}");
             }
         }
     }
@@ -2711,5 +3016,313 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&app.session.doc().unwrap().doc, &before));
         assert_eq!(serde_json::to_value(&app.session.doc().unwrap().selection).unwrap(), selection);
         assert!(!app.session.tool_busy());
+    }
+
+    #[test]
+    fn baseline_grid_lines_are_the_ones_on_the_page() {
+        // A start far above the page used to be walked line by line, without end.
+        for start in [-1e9, -1e17] {
+            let mut far = baseline_grid_lines(start, 12.0, 792.0);
+            assert_eq!((far.next(), far.count()), (Some(8.0), 65));
+        }
+        let lines = |start, increment, height| baseline_grid_lines(start, increment, height).collect::<Vec<_>>();
+        assert_eq!(lines(36.0, 12.0, 72.0), [36.0, 48.0, 60.0], "the bottom edge is not a line");
+        assert_eq!(lines(-30.0, 12.0, 30.0), [6.0, 18.0], "a start above the page keeps its rhythm");
+        assert_eq!(lines(f64::NAN, 12.0, 792.0), [0.0; 0]);
+        assert_eq!(baseline_grid_lines(0.0, 12.0, f64::INFINITY).count(), MAX_BASELINES);
+    }
+
+    fn guide_document_owner_release(switch_document: bool, ruler: bool) {
+        use designcraft_engine::{DocState, History, HistoryEntry};
+        use std::sync::Arc;
+
+        let history = |history: &History| {
+            let entries = |v: &[HistoryEntry]| {
+                v.iter().map(|e| (e.label.clone(), e.doc.clone(), Arc::as_ptr(&e.doc) as usize, e.selection.clone())).collect::<Vec<_>>()
+            };
+            (entries(&history.undo), entries(&history.redo), history.limit)
+        };
+        let unchanged = |st: &DocState, before: &DocState| {
+            assert_eq!(st.uid, before.uid);
+            assert_eq!(st.doc, before.doc, "complete document must survive a foreign guide release");
+            assert!(Arc::ptr_eq(&st.doc, &before.doc));
+            assert_eq!(st.revision, before.revision);
+            assert_eq!(st.saved_revision, before.saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &before.saved_doc));
+            assert_eq!(st.selection, before.selection);
+            assert_eq!(history(&st.history), history(&before.history));
+            assert!(st.interaction.is_none());
+        };
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        for position in [200.0, 320.0] {
+            app.run("file.new", json!({"pages": 1})).unwrap();
+            app.run("guide.add", json!({"orientation": "horizontal", "position": position, "at": 500})).unwrap();
+            // Keep a real redo entry in BOTH documents: a foreign release must not clear it.
+            app.run("guide.move", json!({"page": 0, "index": 0, "position": position + 20.0})).unwrap();
+            assert_eq!(app.run("edit.undo", json!({})).unwrap()["undone"], "Move Guide");
+        }
+        app.run("tool.select", json!({"tool": "selection"})).unwrap();
+        app.ui.rulers = true;
+        app.ui.guides = true;
+        app.ui.guides_locked = false;
+        app.ui.task_bar = false;
+        let mut h = harness(app);
+        assert_eq!(h.state().session.active_index(), Some(1));
+        let b_page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let b_ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+        h.state_mut().run("window.previousDocument", Value::Null).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().session.active_index(), Some(0));
+        let press = guide_screen(&mut h, 0, Point::new(500.0, 200.0));
+        let held = guide_screen(&mut h, 0, Point::new(500.0, 220.0));
+        let a_page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let a_ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+        let release = match (switch_document, ruler) {
+            (false, false) => a_page,
+            (false, true) => a_ruler,
+            (true, false) => b_page,
+            (true, true) => b_ruler,
+        };
+        h.hover_at(press);
+        h.step();
+        assert!(!h.ctx.text_edit_focused());
+        assert!(!h.state().native_shortcuts.contains("window.nextDocument"));
+        let before = h.state().session.documents().to_vec();
+        assert_eq!(before.len(), 2);
+        assert_ne!(before[0].uid, before[1].uid);
+        assert!(before.iter().all(|st| st.history.redo.len() == 1));
+        assert_eq!(before[0].doc.spreads[0].pages[0].guides[0].position, 200.0);
+        assert_eq!(before[1].doc.spreads[0].pages[0].guides[0].position, 320.0);
+        h.input_mut().events.extend([primary(press, true), egui::Event::PointerMoved(held)]);
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let capture = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+        assert_eq!(capture.pane, 0);
+        assert_eq!(capture.from, Some((SpreadRef::Doc(0), 0, 0)));
+        assert_eq!(h.state().session.doc().unwrap().uid, before[0].uid);
+        assert_eq!(guide_preview_lines(&h).len(), 1);
+        for (st, old) in h.state().session.documents().iter().zip(&before) {
+            unchanged(st, old);
+        }
+
+        // One actual RawInput: logic dispatches the supported shortcut before ui sees release.
+        // Harness::event would serialize these events across frames.
+        if switch_document {
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::Key {
+                    key: egui::Key::F6,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                });
+            }
+        }
+        h.input_mut().events.extend([egui::Event::PointerMoved(release), primary(release, false)]);
+        h.step();
+        let active = usize::from(switch_document);
+        assert_eq!(h.state().session.active_index(), Some(active), "the real Next Document shortcut must activate B");
+        assert_eq!(h.state().session.doc().unwrap().uid, before[active].uid);
+        assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+        assert!(guide_preview_lines(&h).is_empty());
+        assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+        assert_released(&h);
+        let docs = h.state().session.documents();
+        unchanged(&docs[1], &before[1]);
+        if switch_document {
+            unchanged(&docs[0], &before[0]);
+        } else {
+            let st = &docs[0];
+            let mut expected = (*before[0].doc).clone();
+            let guides = &mut Arc::make_mut(&mut expected.spreads[0]).pages[0].guides;
+            if ruler {
+                guides.clear();
+            } else {
+                let position = st.doc.spreads[0].pages[0].guides[0].position;
+                assert!((position - 240.0).abs() < 1e-4, "page release must move A's guide to 240: {position}");
+                guides[0].position = position; // Only this coordinate uses screen-conversion tolerance.
+            }
+            assert_eq!(*st.doc, expected, "the whole document may change only at the released guide");
+            assert!(!Arc::ptr_eq(&st.doc, &before[0].doc));
+            assert_eq!(st.revision, before[0].revision + 1);
+            assert_eq!(st.saved_revision, before[0].saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &before[0].saved_doc));
+            assert_eq!(st.selection, before[0].selection);
+            let mut expected_history = before[0].history.clone();
+            expected_history.undo.push(HistoryEntry {
+                label: if ruler { "Delete Guide" } else { "Move Guide" }.into(),
+                doc: before[0].doc.clone(),
+                selection: before[0].selection.clone(),
+            });
+            expected_history.redo.clear();
+            assert_eq!(history(&st.history), history(&expected_history));
+        }
+        let after = h.state().session.documents().to_vec();
+        h.step();
+        assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+        assert!(guide_preview_lines(&h).is_empty());
+        for (st, old) in h.state().session.documents().iter().zip(&after) {
+            unchanged(st, old);
+            st.doc.check().unwrap();
+        }
+        assert_released(&h);
+    }
+
+    #[test]
+    fn guide_capture_document_switch_page_release_preserves_both_documents() {
+        guide_document_owner_release(true, false);
+    }
+
+    #[test]
+    fn guide_capture_document_switch_ruler_release_preserves_both_documents() {
+        guide_document_owner_release(true, true);
+    }
+
+    #[test]
+    fn guide_capture_same_document_page_release_moves_once() {
+        guide_document_owner_release(false, false);
+    }
+
+    #[test]
+    fn guide_capture_same_document_ruler_release_deletes_once() {
+        guide_document_owner_release(false, true);
+    }
+
+    fn guide_capture_history_release(revert: bool, ruler: bool) {
+        use designcraft_engine::{History, HistoryEntry};
+        use std::sync::Arc;
+
+        let history = |history: &History| {
+            let entries = |v: &[HistoryEntry]| {
+                v.iter().map(|e| (e.label.clone(), e.doc.clone(), Arc::as_ptr(&e.doc) as usize, e.selection.clone())).collect::<Vec<_>>()
+            };
+            (entries(&history.undo), entries(&history.redo), history.limit)
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held-guide.designcraft");
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 1})).unwrap();
+        for position in [100.0, 200.0] {
+            app.run("guide.add", json!({"orientation": "horizontal", "position": position, "at": 500})).unwrap();
+        }
+        app.run("file.save", json!({"path": path.to_string_lossy()})).unwrap();
+        let saved = app.session.doc().unwrap().clone();
+        assert!(!saved.is_dirty());
+        assert_eq!(saved.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![100.0, 200.0]);
+        app.run("guide.delete", json!({"page": 0, "index": 0})).unwrap();
+        app.run("tool.select", json!({"tool": "selection"})).unwrap();
+        app.ui.rulers = true;
+        app.ui.guides = true;
+        app.ui.guides_locked = false;
+        app.ui.task_bar = false;
+        let mut h = harness(app);
+        let press = guide_screen(&mut h, 0, Point::new(500.0, 200.0));
+        let held = guide_screen(&mut h, 0, Point::new(500.0, 220.0));
+        let page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let release = if ruler { pos2(rect.center().x, rect.min.y - RULER / 2.0) } else { page };
+        h.hover_at(press);
+        h.step();
+        assert!(!h.ctx.text_edit_focused());
+        assert!(!h.state().native_shortcuts.contains("edit.undo"));
+        let captured = h.state().session.doc().unwrap().clone();
+        assert!(captured.is_dirty());
+        assert_eq!(captured.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![200.0]);
+        assert_eq!(captured.history.undo.last().unwrap().label, "Delete Guide");
+        assert!(captured.history.redo.is_empty());
+        h.input_mut().events.extend([primary(press, true), egui::Event::PointerMoved(held)]);
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let drag = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+        assert_eq!(drag.doc_uid, captured.uid);
+        assert_eq!(drag.pane, 0);
+        assert_eq!(drag.from, Some((SpreadRef::Doc(0), 0, 0)));
+        assert_eq!(guide_preview_lines(&h).len(), 1);
+        assert!(Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &captured.doc));
+        assert_eq!(guide_history(&h)["redo"].as_array().unwrap().len(), 0);
+
+        if revert {
+            // The supported engine.execute control route also dispatches through app.run.
+            assert_eq!(h.state_mut().run("file.revert", json!({})).unwrap()["path"], path.to_string_lossy().as_ref());
+        } else {
+            // Undo while still holding: exercise the real shortcut before canvas input.
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::Key {
+                    key: egui::Key::Z,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                });
+            }
+        }
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let restored = h.state().session.doc().unwrap().clone();
+        assert_eq!(restored.uid, captured.uid, "restoration must retain the captured document UID");
+        assert!(!Arc::ptr_eq(&restored.doc, &captured.doc));
+        assert_eq!(restored.doc, saved.doc, "restoration must recover the complete saved document before release");
+        assert_eq!(restored.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![100.0, 200.0]);
+        assert_eq!(restored.revision, captured.revision + 1);
+        assert_eq!(restored.selection, saved.selection);
+        assert!(!restored.is_dirty());
+        if revert {
+            assert!(restored.history.undo.is_empty());
+            assert!(restored.history.redo.is_empty());
+        } else {
+            let mut expected_history = saved.history.clone();
+            expected_history.redo.push(HistoryEntry {
+                label: "Delete Guide".into(),
+                doc: captured.doc.clone(),
+                selection: captured.selection.clone(),
+            });
+            assert_eq!(history(&restored.history), history(&expected_history));
+        }
+
+        h.input_mut().events.extend([egui::Event::PointerMoved(release), primary(release, false)]);
+        h.step();
+        for idle in [false, true] {
+            if idle {
+                h.step();
+            }
+            let st = h.state().session.doc().unwrap();
+            assert_eq!(st.doc, restored.doc, "a stale guide release must preserve the whole restored document (revert={revert}, ruler={ruler})");
+            assert!(Arc::ptr_eq(&st.doc, &restored.doc));
+            assert_eq!(st.uid, restored.uid);
+            assert_eq!(st.revision, restored.revision);
+            assert_eq!(st.saved_revision, restored.saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &restored.saved_doc));
+            assert_eq!(st.is_dirty(), restored.is_dirty());
+            assert_eq!(st.path, restored.path);
+            assert_eq!(st.selection, restored.selection);
+            assert_eq!(history(&st.history), history(&restored.history));
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert!(guide_preview_lines(&h).is_empty());
+            assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+            assert_released(&h);
+            st.doc.check().unwrap();
+        }
+    }
+
+    #[test]
+    fn guide_capture_undo_page_release_preserves_restored_document() {
+        guide_capture_history_release(false, false);
+    }
+
+    #[test]
+    fn guide_capture_undo_ruler_release_preserves_restored_document() {
+        guide_capture_history_release(false, true);
+    }
+
+    #[test]
+    fn guide_capture_revert_page_release_preserves_restored_document() {
+        guide_capture_history_release(true, false);
+    }
+
+    #[test]
+    fn guide_capture_revert_ruler_release_preserves_restored_document() {
+        guide_capture_history_release(true, true);
     }
 }
