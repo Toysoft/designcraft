@@ -1285,7 +1285,6 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     let c = a["chars"].clone();
     let fam = c["fontFamily"].as_str().unwrap_or("").to_string();
     let sty = c["fontStyle"].as_str().unwrap_or("").to_string();
-    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Character")).strong());
     super::font_family_picker(app, ui, &fam, 220.0);
     super::font_style_picker(app, ui, &fam, &sty, 220.0);
     variable_font_axes(app, ui, &fam, &sty);
