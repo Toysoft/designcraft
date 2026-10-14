@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use craft_ui::theme::SuiteDarkPalette;
+use craft_ui::theme::SuitePalette;
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +96,7 @@ fn hex(s: u32) -> Color32 {
 
 impl Tokens {
     pub fn for_brightness(b: Brightness) -> Self {
-        let suite = SuiteDarkPalette::ARTCRAFT;
+        let suite = SuitePalette::ARTCRAFT_DARK;
         let dark = Tokens {
             dark: true,
             standard_dark: false,
@@ -414,7 +414,7 @@ mod palette_tests {
     #[test]
     fn standard_dark_roles_preserve_medium_and_high_contrast() {
         let dark = Tokens::for_brightness(Brightness::Dark);
-        let suite = SuiteDarkPalette::ARTCRAFT;
+        let suite = SuitePalette::ARTCRAFT_DARK;
         assert_eq!(dark.app_bar, suite.chrome);
         assert_eq!(dark.panel, suite.panel);
         assert_eq!(dark.input, suite.input);
