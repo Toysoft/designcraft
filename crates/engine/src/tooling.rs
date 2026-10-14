@@ -93,7 +93,6 @@ impl Session {
             layer,
             snap: view.snap,
             unit: view.unit,
-            scale_strokes: self.prefs.scale_strokes,
         };
         Some(f(self.tool.as_mut(), &cx))
     }

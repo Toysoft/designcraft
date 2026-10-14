@@ -79,6 +79,58 @@ impl CellStroke {
     }
 }
 
+/// Table-level alternating row/column strokes. Retained independently of cell formatting
+/// so an explicit cell style or local edge continues to take precedence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AltStrokes {
+    pub first: u32,
+    pub next: u32,
+    pub first_stroke: CellStroke,
+    pub next_stroke: CellStroke,
+    pub skip_first: u32,
+    pub skip_last: u32,
+}
+
+impl Default for AltStrokes {
+    fn default() -> Self {
+        Self {
+            first: 0,
+            next: 0,
+            first_stroke: CellStroke::default(),
+            next_stroke: CellStroke { weight: 0.25, ..Default::default() },
+            skip_first: 0,
+            skip_last: 0,
+        }
+    }
+}
+
+impl AltStrokes {
+    /// A phase-independent stroke for unskipped, visually uniform patterns. Unequal
+    /// patterns and skip settings are preserved for round trips until their boundary
+    /// phase is supported; they must not be rendered with a guessed phase.
+    pub fn uniform_stroke(&self) -> Option<&CellStroke> {
+        if self.skip_first > 0 || self.skip_last > 0 {
+            return None;
+        }
+        match (self.first > 0, self.next > 0) {
+            (true, false) => Some(&self.first_stroke),
+            (false, true) => Some(&self.next_stroke),
+            (true, true) if self.first_stroke == self.next_stroke || (!self.first_stroke.is_visible() && !self.next_stroke.is_visible()) => {
+                Some(&self.first_stroke)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn no_flags(flags: &[bool; 4]) -> bool {
+    !flags.iter().any(|v| *v)
+}
+fn no_priorities(priorities: &[i32; 4]) -> bool {
+    priorities.iter().all(|v| *v == 0)
+}
+
 fn one() -> u32 {
     1
 }
@@ -120,6 +172,12 @@ pub struct Cell {
     /// top, left, bottom, right order as `strokes`. Older documents keep their table border.
     #[serde(default)]
     pub border_overrides: [bool; 4],
+    /// Whether an edge has supplied cell/style attributes, independently of perimeter priority.
+    #[serde(default, skip_serializing_if = "no_flags")]
+    pub stroke_defined: [bool; 4],
+    /// IDML edge-conflict priorities, in top, left, bottom, right order.
+    #[serde(default, skip_serializing_if = "no_priorities")]
+    pub stroke_priorities: [i32; 4],
     /// Applied cell style ("" = [None]).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub style: String,
@@ -142,6 +200,8 @@ impl Default for Cell {
             rotation: 0.0,
             strokes: Default::default(),
             border_overrides: [false; 4],
+            stroke_priorities: [0; 4],
+            stroke_defined: [false; 4],
             style: String::new(),
             graphic: None,
         }
@@ -200,12 +260,12 @@ impl AltFills {
     /// Fill for the `i`-th of `n` body rows/columns, if the pattern paints it.
     pub fn fill_for(&self, i: usize, n: usize) -> Option<(&str, f32)> {
         let (sf, sl) = (self.skip_first as usize, self.skip_last as usize);
-        if i < sf || i + sl >= n {
+        if i < sf || i >= n.saturating_sub(sl) {
             return None;
         }
-        let period = (self.first + self.next).max(1) as usize;
-        let k = (i - sf) % period;
-        let (c, t) = if k < self.first as usize { (&self.first_color, self.first_tint) } else { (&self.next_color, self.next_tint) };
+        let period = (u64::from(self.first) + u64::from(self.next)).max(1);
+        let k = (i - sf) as u64 % period;
+        let (c, t) = if k < u64::from(self.first) { (&self.first_color, self.first_tint) } else { (&self.next_color, self.next_tint) };
         (c != designcraft_color::swatch::NONE).then_some((c.as_str(), t))
     }
 }
@@ -217,6 +277,9 @@ pub struct TableOptions {
     pub direction: crate::TextDirection,
     /// Outer border (overrides the outer cell edges).
     pub border: CellStroke,
+    /// Per-side borders; absent sides use the legacy uniform `border`.
+    #[serde(skip_serializing_if = "no_borders")]
+    pub borders: [Option<CellStroke>; 4],
     pub space_before: f64,
     pub space_after: f64,
     /// Header rows repeat at the top of every text column / frame the table continues into.
@@ -226,6 +289,20 @@ pub struct TableOptions {
     pub alt_rows: Option<AltFills>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt_cols: Option<AltFills>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_strokes: Option<AltStrokes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_strokes: Option<AltStrokes>,
+}
+
+fn no_borders(borders: &[Option<CellStroke>; 4]) -> bool {
+    borders.iter().all(Option::is_none)
+}
+
+impl TableOptions {
+    pub fn border_for(&self, side: usize) -> &CellStroke {
+        self.borders.get(side).and_then(Option::as_ref).unwrap_or(&self.border)
+    }
 }
 
 impl Default for TableOptions {
@@ -233,12 +310,15 @@ impl Default for TableOptions {
         TableOptions {
             direction: crate::TextDirection::LeftToRight,
             border: CellStroke::default(),
+            borders: Default::default(),
             space_before: 4.0,
             space_after: -4.0,
             repeat_header: true,
             repeat_footer: true,
             alt_rows: None,
             alt_cols: None,
+            row_strokes: None,
+            column_strokes: None,
         }
     }
 }
@@ -615,6 +695,79 @@ impl Table {
         self.set_regions(&regions);
     }
 
+    /// Split each original owner touched by `range` once. Remember merged-cell cuts in the
+    /// original grid: a neighboring split may refine that grid before we reach the owner.
+    pub fn split_cells(&mut self, range: CellRange, horizontal: bool) -> Result<(), String> {
+        if range.r0 > range.r1 || range.c0 > range.c1 || range.r1 >= self.nrows() || range.c1 >= self.ncols() {
+            return Err("cell range out of bounds".into());
+        }
+        let owners = self.owners();
+        let mut selected = std::collections::BTreeSet::new();
+        for r in range.r0..=range.r1 {
+            for c in range.c0..=range.c1 {
+                let owner = owners.get(r * self.ncols() + c).ok_or("missing cell owner")?;
+                selected.insert(*owner);
+            }
+        }
+        let mut targets = Vec::new();
+        for (r, c) in selected {
+            let cell = self.cell(r, c).ok_or("missing split cell")?;
+            let span = if horizontal { cell.row_span } else { cell.col_span } as usize;
+            let start = if horizontal { r } else { c };
+            let cut = if span > 1 { Some(start.checked_add(span.div_ceil(2)).ok_or("invalid split boundary")?) } else { None };
+            targets.push((r, c, cut));
+        }
+        for i in 0..targets.len() {
+            let (r, c, cut) = *targets.get(i).ok_or("missing split target")?;
+            let cell = self.cell(r, c).ok_or("missing split cell")?;
+            let (rs, cs) = (cell.row_span as usize, cell.col_span as usize);
+            let mut blank = cell.blank_like();
+            // Splitting creates an empty half, not a duplicate of graphic-cell content.
+            blank.graphic = None;
+            let before = if horizontal { self.nrows() } else { self.ncols() };
+            if let Some(cut) = cut {
+                let (start, span) = if horizontal { (r, rs) } else { (c, cs) };
+                let first = cut.checked_sub(start).filter(|n| *n > 0 && *n < span).ok_or("invalid split boundary")?;
+                let mut regions: Vec<_> = self.regions().into_iter().filter(|&(rr, cc, _, _)| (rr, cc) != (r, c)).collect();
+                if horizontal {
+                    regions.push((r, c, first, cs));
+                    regions.push((cut, c, rs - first, cs));
+                } else {
+                    regions.push((r, c, rs, first));
+                    regions.push((r, cut, rs, cs - first));
+                }
+                self.set_regions(&regions);
+            } else {
+                // An originally single-track cell may now span two tracks inserted for its
+                // neighbor. split_cell divides that span instead of inserting another track.
+                self.split_cell(r, c, horizontal);
+            }
+            let first = self.cell(r, c).ok_or("missing split half")?;
+            let second = if horizontal { (r + first.row_span as usize, c) } else { (r, c + first.col_span as usize) };
+            let second = self.cell_mut(second.0, second.1).ok_or("missing split half")?;
+            blank.row_span = second.row_span;
+            blank.col_span = second.col_span;
+            *second = blank;
+            let after = if horizontal { self.nrows() } else { self.ncols() };
+            if after > before {
+                let at = if horizontal { r + 1 } else { c + 1 };
+                let added = after - before;
+                for (row, col, cut) in targets.iter_mut().skip(i + 1) {
+                    let axis = if horizontal { row } else { col };
+                    if *axis >= at {
+                        *axis += added;
+                    }
+                    if let Some(cut) = cut
+                        && *cut >= at
+                    {
+                        *cut += added;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Split the cell covering (r, c) in two: `horizontal` stacks the halves (Split Cell
     /// Horizontally), otherwise side by side. A merged cell splits its span; a single cell gets a
     /// new row (column) that the cells beside it span, the row height (column width) shared.
@@ -639,10 +792,11 @@ impl Table {
             return;
         }
         if horizontal {
-            let h = self.rows[or].height;
+            let row = self.rows[or].clone();
             self.insert_rows(or + 1, 1);
-            self.rows[or].height = h / 2.0;
-            self.rows[or + 1].height = h / 2.0;
+            self.rows[or].height = row.height / 2.0;
+            // Both halves keep the split row's height mode and header/body/footer role.
+            self.rows[or + 1] = Row { height: row.height / 2.0, ..row };
             // insert_rows doesn't grow regions that end at the split row; everything else on it
             // spans the new row now.
             let mut regions: Vec<_> = self.regions();
@@ -1098,6 +1252,16 @@ mod tests {
     }
 
     #[test]
+    fn alternating_fill_counts_cannot_overflow() {
+        let fills = AltFills { first: u32::MAX, next: 1, ..Default::default() };
+        assert!(fills.fill_for(0, 2).is_some());
+        assert!(fills.fill_for(1, 2).is_some());
+        let skipped = AltFills { skip_last: u32::MAX, ..fills };
+        assert!(skipped.fill_for(1, 2).is_none());
+        assert!(skipped.fill_for(usize::MAX, usize::MAX).is_none());
+    }
+
+    #[test]
     fn serde_roundtrip() {
         let mut s = story("x");
         s.insert_table(1, Table::new(4, 2, 2, 1, 0, 100.0));
@@ -1118,8 +1282,22 @@ mod tests {
         old.as_object_mut().unwrap().remove("borderOverrides");
         let back: Cell = serde_json::from_value(old).unwrap();
         assert_eq!(back.border_overrides, [false; 4]);
+        assert_eq!(back.stroke_defined, [false; 4]);
+        assert_eq!(back.stroke_priorities, [0; 4]);
+        let legacy_options: TableOptions = serde_json::from_str(r#"{"border":{"weight":3}}"#).unwrap();
+        assert!(legacy_options.borders.iter().all(Option::is_none));
+        assert!(legacy_options.row_strokes.is_none());
+        assert!(legacy_options.column_strokes.is_none());
+        for side in 0..4 {
+            assert_eq!(legacy_options.border_for(side).weight, 3.0);
+        }
 
-        let explicit = Cell { border_overrides: [true, false, true, false], ..cell };
+        let explicit = Cell {
+            border_overrides: [true, false, true, false],
+            stroke_defined: [true, true, false, false],
+            stroke_priorities: [3, 0, 7, 0],
+            ..cell
+        };
         let back: Cell = serde_json::from_str(&serde_json::to_string(&explicit).unwrap()).unwrap();
         assert_eq!(back, explicit);
         assert_eq!(back.blank_like().border_overrides, explicit.border_overrides);
@@ -1150,5 +1328,90 @@ mod split_tests {
         m.split_cell(0, 0, true);
         assert_eq!(m.nrows(), 4);
         assert_eq!((m.cell(0, 0).unwrap().row_span, m.cell(2, 0).unwrap().row_span), (2, 2));
+    }
+
+    #[test]
+    fn split_range_keeps_original_merged_cut_when_neighbor_tracks_are_refined() {
+        for horizontal in [true, false] {
+            let mut t = Table::new(1, 4, 4, 0, 0, 280.0);
+            for (i, size) in [40.0, 60.0, 80.0, 100.0].into_iter().enumerate() {
+                t.rows[i].mode = RowHeightMode::Exactly;
+                t.rows[i].height = if horizontal { size } else { 70.0 };
+                t.columns[i].width = if horizontal { 70.0 } else { size };
+            }
+            for r in 0..4 {
+                for c in 0..4 {
+                    let cell = t.cell_mut(r, c).unwrap();
+                    cell.text.insert(0, &format!("{r},{c}"));
+                    cell.style = format!("style-{r}-{c}");
+                    cell.insets = [r as f64 + c as f64 + 1.0; 4];
+                }
+            }
+            let (merged, selected, owner, lower, neighbor, moved_neighbor) = if horizontal {
+                (CellRange::new(0, 1, 2, 1), CellRange::new(0, 0, 2, 1), (0, 1), (4, 1), (3, 3), (6, 3))
+            } else {
+                (CellRange::new(1, 0, 1, 2), CellRange::new(0, 0, 1, 2), (1, 0), (1, 4), (3, 3), (3, 6))
+            };
+            t.merge(merged).unwrap();
+            let original = t.clone();
+            t.split_cells(selected, horizontal).unwrap();
+            t.check().unwrap();
+            assert_eq!((t.nrows(), t.ncols()), if horizontal { (7, 4) } else { (4, 7) });
+            let sizes: Vec<_> = if horizontal { t.rows.iter().map(|r| r.height).collect() } else { t.columns.iter().map(|c| c.width).collect() };
+            assert_eq!(sizes, [20.0, 20.0, 30.0, 30.0, 40.0, 40.0, 100.0]);
+            let first = t.cell(owner.0, owner.1).unwrap();
+            let second = t.cell(lower.0, lower.1).unwrap();
+            // The original three-track merge divides after its second original track,
+            // regardless of which of those tracks a neighboring selected cell subdivides.
+            assert_eq!(if horizontal { first.row_span } else { first.col_span }, 4);
+            assert_eq!(if horizontal { second.row_span } else { second.col_span }, 2);
+            assert_eq!(first.text, original.cell(owner.0, owner.1).unwrap().text);
+            assert!(second.text.is_empty());
+            assert_eq!(second.style, first.style);
+            assert_eq!(second.insets, first.insets);
+            assert_eq!(t.cell(moved_neighbor.0, moved_neighbor.1), original.cell(neighbor.0, neighbor.1));
+            let owners = t.owners();
+            assert_eq!(owners.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 18, "four original selected owners split once each");
+            let mut before_text: Vec<_> = original.cells.iter().filter(|c| !c.text.is_empty()).map(|c| c.text.text.clone()).collect();
+            let mut after_text: Vec<_> = t.cells.iter().filter(|c| !c.text.is_empty()).map(|c| c.text.text.clone()).collect();
+            before_text.sort();
+            after_text.sort();
+            assert_eq!(after_text, before_text, "no original text is copied or lost");
+        }
+    }
+
+    #[test]
+    fn split_range_resolves_covered_positions_without_expanding_selection() {
+        for horizontal in [true, false] {
+            let mut t = Table::new(1, 3, 3, 0, 0, 180.0);
+            t.merge(CellRange::new(0, 0, 1, 1)).unwrap();
+            let selected = if horizontal { CellRange::new(1, 1, 1, 2) } else { CellRange::new(1, 1, 2, 1) };
+            t.split_cells(selected, horizontal).unwrap();
+            t.check().unwrap();
+            let owners = t.owners();
+            assert_eq!(owners.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 8, "only the two touched owners split");
+            assert_eq!((t.nrows(), t.ncols()), if horizontal { (4, 3) } else { (3, 4) });
+            assert_eq!(t.owner(0, 0), (0, 0));
+            assert_eq!(if horizontal { t.owner(1, 0) } else { t.owner(0, 1) }, if horizontal { (1, 0) } else { (0, 1) });
+        }
+    }
+
+    #[test]
+    fn split_header_row_keeps_its_height_mode_and_role() {
+        let mut t = Table::new(1, 1, 2, 1, 1, 180.0);
+        t.rows[0].height = 60.0;
+        t.rows[0].mode = RowHeightMode::Exactly;
+        let body = t.rows[1].clone();
+        let footer = t.rows[2].clone();
+        t.split_cells(CellRange::new(0, 0, 0, 1), true).unwrap();
+        t.check().unwrap();
+        assert_eq!(t.header_rows(), 2);
+        for row in &t.rows[..2] {
+            assert_eq!(row.height, 30.0);
+            assert_eq!(row.mode, RowHeightMode::Exactly);
+            assert_eq!(row.kind, RowKind::Header);
+        }
+        assert_eq!(t.rows[2], body);
+        assert_eq!(t.rows[3], footer);
     }
 }

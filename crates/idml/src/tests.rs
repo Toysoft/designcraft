@@ -7,7 +7,9 @@ use designcraft_geom::{Rect, shapes};
 
 use super::*;
 
+mod assets;
 mod decorations;
+mod index_sort;
 
 fn zip_files(files: &[(&str, &str)]) -> Vec<u8> {
     use zip::write::SimpleFileOptions;
@@ -28,6 +30,20 @@ fn zip_files_plain() -> Vec<u8> {
     w.start_file("document.json", SimpleFileOptions::default()).unwrap();
     w.write_all(b"{}").unwrap();
     w.finish().unwrap().into_inner()
+}
+
+/// The text of every part of the package `bytes` whose name starts with `prefix`.
+fn zip_text(bytes: &[u8], prefix: &str) -> String {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut out = String::new();
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        if f.name().starts_with(prefix) {
+            f.read_to_string(&mut out).unwrap();
+        }
+    }
+    out
 }
 
 /// A hand-written, minimal IDML document: one facing-pages spread with a right page, a
@@ -196,6 +212,49 @@ fn fixture_with_story(story: &str) -> Vec<u8> {
     ])
 }
 
+/// InDesign: a break character ends its paragraph (`<Br/>` with a ParagraphBreakType closes the
+/// range); the text after it is a paragraph with its own style, set on the next page of the
+/// break's parity.
+const ODD_PAGE_BREAK_STORY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="s1">
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text%3aBody">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Body</Content></CharacterStyleRange>
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" ParagraphBreakType="NextOddPage"><Br/></CharacterStyleRange>
+    </ParagraphStyleRange>
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle" Justification="CenterAlign">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>1</Content></CharacterStyleRange>
+    </ParagraphStyleRange>
+  </Story>
+</idPkg:Story>"#;
+
+#[test]
+fn odd_page_break_ends_its_paragraph_and_keeps_its_parity() {
+    let mut d = import_idml_with(&fixture_with_story(ODD_PAGE_BREAK_STORY), &|_| None).unwrap();
+    let sid = *d.stories.keys().next().unwrap();
+    let story = &d.stories[&sid];
+    assert_eq!(story.text, format!("Body{}\n1", st::ODD_PAGE_BREAK));
+    assert_eq!(story.paras.len(), 2);
+    assert_eq!(story.paras[0].style, "Text/Body");
+    assert_eq!(story.paras[1].style, st::BASIC_PARAGRAPH);
+    assert_eq!(story.paras[1].para.align, Some(designcraft_doc::Align::Center));
+    // Export writes the break as the paragraph's one `Br`; importing that gives the same story.
+    let back = import_idml(&export_idml(&d)).unwrap();
+    let again = back.stories.values().next().unwrap();
+    assert_eq!(again.text, story.text);
+    assert_eq!(again.paras, story.paras);
+    // The fixture's frames are on pages v and vi: the next odd page after v has no frame.
+    let cs = designcraft_compose::compose_story(&d, sid, &Default::default());
+    assert_eq!(cs.frames[0].lines.len(), 1, "no empty line after the break");
+    assert!(cs.frames[1].lines.is_empty());
+    assert_eq!(cs.overset_at, Some(story.text.len() - 1));
+    // Numbered from 4, the second frame is on page 5: "1" starts there.
+    d.sections[0].start_number = Some(4);
+    let cs = designcraft_compose::compose_story(&d, sid, &Default::default());
+    assert_eq!(cs.overset_at, None);
+    assert_eq!(cs.frames[1].lines.iter().map(|l| l.para).collect::<Vec<_>>(), vec![1]);
+}
+
 #[test]
 fn imports_hand_written_fixture() {
     let d = import_idml_with(&fixture(), &|_| None).unwrap();
@@ -240,8 +299,8 @@ fn imports_hand_written_fixture() {
     assert_eq!(d.styles.char_style("Strong").unwrap().chars.font_style.as_deref(), Some("Bold"));
     // Frames, threads, text.
     let story = d.stories.values().next().unwrap();
-    assert_eq!(story.text, format!("Hello & bold\nPage {}\tend{}after", st::PAGE_NUMBER, st::FRAME_BREAK));
-    assert_eq!(story.paras.len(), 2);
+    assert_eq!(story.text, format!("Hello & bold\nPage {}\tend{}\nafter", st::PAGE_NUMBER, st::FRAME_BREAK));
+    assert_eq!(story.paras.len(), 3);
     assert_eq!(story.paras[0].style, "Text/Body");
     assert_eq!(story.paras[1].style, st::BASIC_PARAGRAPH);
     assert_eq!(story.paras[1].para.align, Some(designcraft_doc::Align::Center));
@@ -322,6 +381,17 @@ fn imports_scalar_inset_properties_like_lists_and_attributes() {
 }
 
 #[test]
+fn em_box_first_baseline_offset_round_trips() {
+    use designcraft_doc::FirstBaseline;
+    let first = |d: &Document| d.spreads[0].items[0].text_frame().unwrap().options.first_baseline;
+    let d = inset_fixture(r#"<TextFramePreference FirstBaselineOffset="EmboxHeight"/>"#, "");
+    assert_eq!(first(&d), FirstBaseline::EmboxHeight);
+    assert_eq!(first(&import_idml(&export_idml(&d)).unwrap()), FirstBaseline::EmboxHeight);
+    let unknown = inset_fixture(r#"<TextFramePreference FirstBaselineOffset="SomethingElse"/>"#, "");
+    assert_eq!(first(&unknown), FirstBaseline::Ascent);
+}
+
+#[test]
 fn inset_property_keeps_precedence_over_attribute() {
     for (property, expected) in [
         (r#"<Properties><InsetSpacing type="unit">9</InsetSpacing></Properties>"#.to_string(), [9.0; 4]),
@@ -384,6 +454,60 @@ fn imports_scalar_insets_in_object_style_without_replacing_frame_override() {
     assert_eq!(frame_inset(&d), [3.0; 4]);
 }
 
+/// A one-page spread part `Self` with one rectangle.
+fn one_frame_spread(id: &str) -> String {
+    format!(
+        r#"<idPkg:Spread xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+          <Spread Self="{id}">
+            <Page Self="{id}p" GeometricBounds="0 0 100 100" ItemTransform="1 0 0 1 0 0"/>
+            <Rectangle Self="{id}r" ItemTransform="1 0 0 1 0 0">
+              <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+                <PathPointType Anchor="10 10"/><PathPointType Anchor="10 50"/>
+                <PathPointType Anchor="50 50"/><PathPointType Anchor="50 10"/>
+              </PathPointArray></GeometryPathType></PathGeometry></Properties>
+            </Rectangle>
+          </Spread>
+        </idPkg:Spread>"#
+    )
+}
+
+/// Writers differ in how a designmap `src` spells its part: percent-encoded, another case,
+/// backslashes, a leading `./`. Those resolve; a part absent from the package is a warning that
+/// names it, not silently dropped objects.
+#[test]
+fn designmap_parts_match_leniently_and_missing_ones_are_reported() {
+    let designmap = r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d">
+          <idPkg:Spread src="Spreads/Spread_u1a%20b.xml"/>
+          <idPkg:Spread src="./spreads\SPREAD_u2.xml"/>
+          <idPkg:Spread src="Spreads/Spread_gone.xml"/>
+        </Document>"#;
+    let zip = zip_files(&[
+        ("designmap.xml", designmap),
+        ("Spreads/Spread_u1a b.xml", &one_frame_spread("u1")),
+        ("Spreads/Spread_u2.xml", &one_frame_spread("u2")),
+    ]);
+    let r = import_idml_report(&zip, &|_| None).unwrap();
+    assert_eq!(r.document.spreads.len(), 2, "both lenient spellings resolve");
+    assert!(r.document.spreads.iter().all(|sp| sp.items.len() == 1), "the spreads keep their frames");
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    assert!(r.warnings[0].contains("Spreads/Spread_gone.xml"), "{:?}", r.warnings);
+
+    // With every spread part missing the import fails, and the error names the part.
+    let only_missing = r#"<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" Self="d">
+          <idPkg:Spread src="Spreads/Spread_gone.xml"/>
+        </Document>"#;
+    let err = import_idml(&zip_files(&[("designmap.xml", only_missing)])).unwrap_err();
+    assert!(err.to_string().contains("Spreads/Spread_gone.xml"), "{err}");
+}
+
+#[test]
+fn percent_decode_keeps_malformed_escapes() {
+    assert_eq!(import::percent_decode("a%20b%2"), "a b%2");
+    assert_eq!(import::percent_decode("%é%zz"), "%é%zz");
+    assert_eq!(import::uri_to_path("file:///C:/a%20b"), "C:/a b");
+    assert_eq!(import::uri_to_path("file:/a%bé"), "/a%bé");
+}
+
 #[test]
 fn rejects_non_idml() {
     assert!(import_idml(b"not a zip").is_err());
@@ -408,7 +532,7 @@ fn small_doc() -> Document {
     if let Some(s) = d.story_mut(sid) {
         s.format_chars(0..3, |f| f.over = CharAttrs { size: Some(20.0), fill: Some("Brand".into()), ..Default::default() });
         let end = s.len();
-        s.insert(end, &format!(" {}", st::COLUMN_BREAK));
+        s.insert(end, &format!(" {}\n", st::COLUMN_BREAK));
     }
     let id = designcraft_doc::ItemId(d.alloc());
     let mut it = designcraft_doc::Item::new(id, lid, Shape::Oval, shapes::ellipse(Rect::new(650.0, 300.0, 750.0, 380.0)));
@@ -745,6 +869,32 @@ fn cjk_character_attributes_import_from_independent_xml_and_round_trip() {
 }
 
 #[test]
+fn warichu_imports_from_idml_and_round_trips() {
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" Warichu="true" WarichuLines="3" WarichuSize="40" WarichuLineSpacing="1" WarichuAlignment="Left" WarichuCharsBeforeBreak="2" WarichuCharsAfterBreak="2"><Content>注釈</Content></CharacterStyleRange>
+      </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let doc = import_idml(&fixture_with_story(story)).unwrap();
+    let st = doc.stories.values().find(|s| s.text.contains("注釈")).unwrap();
+    let a = &st.runs().next().unwrap().1.over;
+    assert_eq!(a.warichu, Some(true));
+    assert_eq!(a.warichu_lines, Some(3));
+    assert_eq!(a.warichu_size, Some(40.0));
+    assert_eq!(a.warichu_line_spacing, Some(1.0));
+    assert_eq!(a.warichu_alignment, Some(designcraft_doc::cjk::WarichuAlignment::Left));
+    assert_eq!(a.warichu_chars_before_break, Some(2));
+    assert_eq!(a.warichu_chars_after_break, Some(2));
+    let back = import_idml(&export_idml(&doc)).unwrap();
+    let b = &back.stories.values().find(|s| s.text.contains("注釈")).unwrap().runs().next().unwrap().1.over;
+    assert_eq!(a.warichu, b.warichu);
+    assert_eq!(a.warichu_lines, b.warichu_lines);
+    assert_eq!(a.warichu_size, b.warichu_size);
+    assert_eq!(a.warichu_alignment, b.warichu_alignment);
+    assert_eq!(a.warichu_chars_before_break, b.warichu_chars_before_break);
+    assert_eq!(a.warichu_chars_after_break, b.warichu_chars_after_break);
+}
+
+#[test]
 fn automatic_kerning_does_not_import_inactive_numeric_values() {
     for (attributes, expected) in [
         (r#"KerningMethod="$ID/Optical" KerningValue="1e+11""#, Some(designcraft_doc::Kerning::Optical)),
@@ -859,6 +1009,336 @@ fn arabic_story_and_table_directions_survive_idml_export() {
     assert_eq!(st.direction, designcraft_doc::TextDirection::RightToLeft);
     assert_eq!(st.tables.values().next().unwrap().options.direction, designcraft_doc::TextDirection::RightToLeft);
 }
+/// Fully synthetic style-only table, including sparse based-on attributes and local overrides.
+const CASCADE_STYLES: &str = r#"<idPkg:Styles xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+<RootCellStyleGroup>
+  <CellStyle Self="CellStyle/$ID/[None]" Name="$ID/[None]"/>
+  <CellStyle Self="cs-base" Name="Base" FillColor="Color/Brand" FillTint="25"
+    TopInset="2" LeftInset="3" BottomInset="4" RightInset="5" VerticalJustification="CenterAlign"
+    TopEdgeStrokeWeight="2" TopEdgeStrokeColor="Color/Brand" TopEdgeStrokeTint="40" TopEdgeStrokeType="StrokeStyle/$ID/Dashed"
+    LeftEdgeStrokeWeight="3" BottomEdgeStrokeWeight="4" RightEdgeStrokeWeight="5"
+    AppliedParagraphStyle="ParagraphStyle/CellParagraph"/>
+  <CellStyle Self="cs-body" Name="Body" FillTint="50"><Properties><BasedOn type="object">cs-base</BasedOn></Properties></CellStyle>
+  <CellStyle Self="cs-left" Name="Left" FillColor="Color/Black" LeftEdgeStrokeWeight="0"><Properties><BasedOn type="object">cs-body</BasedOn></Properties></CellStyle>
+  <CellStyle Self="cs-header" Name="Header" FillColor="Color/Paper" BottomEdgeStrokeColor="Color/Brand" BottomEdgeStrokeWeight="6">
+    <Properties><BasedOn type="object">cs-body</BasedOn></Properties>
+  </CellStyle>
+  <CellStyle Self="cs-explicit" Name="Explicit" FillColor="Color/Brand" FillTint="75" TopInset="0"
+    TopEdgeStrokeColor="Swatch/None" RightEdgeStrokeTint="30"/>
+</RootCellStyleGroup>
+<RootParagraphStyleGroup><ParagraphStyle Self="ParagraphStyle/CellParagraph" Name="CellParagraph" PointSize="9"/></RootParagraphStyleGroup>
+<RootTableStyleGroup>
+  <TableStyle Self="TableStyle/$ID/[No table style]" Name="$ID/[No table style]"
+    TopBorderStrokeWeight="7" LeftBorderStrokeWeight="8" BottomBorderStrokeWeight="9" RightBorderStrokeWeight="10"
+    StartRowFillCount="0" StartRowFillColor="Color/Brand" StartRowFillTint="20" EndRowFillCount="0" EndRowFillColor="Swatch/None"
+    HeaderRegionSameAsBodyRegion="true" FooterRegionSameAsBodyRegion="true"
+    LeftColumnRegionSameAsBodyRegion="true" RightColumnRegionSameAsBodyRegion="true"/>
+  <TableStyle Self="ts-base" Name="BaseTable" BodyRegionCellStyle="cs-body" HeaderRegionCellStyle="cs-header"
+    LeftColumnRegionCellStyle="cs-left" HeaderRegionSameAsBodyRegion="false" LeftColumnRegionSameAsBodyRegion="false">
+    <Properties><BasedOn type="string">$ID/[No table style]</BasedOn></Properties>
+  </TableStyle>
+  <TableStyle Self="ts-child" Name="Table" SpaceBefore="12" StartRowFillCount="1" EndRowFillCount="1">
+    <Properties><BasedOn type="object">ts-base</BasedOn></Properties>
+  </TableStyle>
+  <TableStyle Self="TableStyle/$ID/[Basic Table]" Name="$ID/[Basic Table]" SpaceAfter="17">
+    <Properties><BasedOn type="object">ts-child</BasedOn></Properties>
+  </TableStyle>
+</RootTableStyleGroup></idPkg:Styles>"#;
+
+const CASCADE_STORY: &str = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+<Story Self="s1"><ParagraphStyleRange><CharacterStyleRange><Table AppliedTableStyle="ts-child" HeaderRowCount="1" SpaceBefore="19" RightBorderStrokeColor="Color/Brand">
+<Row Name="0" MinimumHeight="24"/><Row Name="1" MinimumHeight="24"/>
+<Column Name="0" SingleColumnWidth="60"/><Column Name="1" SingleColumnWidth="60"/><Column Name="2" SingleColumnWidth="60"/>
+<Cell Name="0:0" AppliedCellStyle="CellStyle/$ID/[None]"><ParagraphStyleRange><CharacterStyleRange><Content>Header left</Content></CharacterStyleRange></ParagraphStyleRange></Cell>
+<Cell Name="1:0" AppliedCellStyle="cs-explicit"><ParagraphStyleRange><CharacterStyleRange><Content>Explicit</Content></CharacterStyleRange></ParagraphStyleRange></Cell>
+<Cell Name="2:0" AppliedCellStyle="cs-explicit" FillColor="Swatch/None" FillTint="0" LeftInset="0" VerticalJustification="BottomAlign"
+  TopEdgeStrokeWeight="0" RightEdgeStrokeColor="Swatch/None" RightEdgeStrokePriority="7">
+  <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle"><CharacterStyleRange><Content>Local</Content></CharacterStyleRange></ParagraphStyleRange>
+</Cell>
+<Cell Name="0:1" AppliedCellStyle="CellStyle/$ID/[None]"><ParagraphStyleRange><CharacterStyleRange><Content>Left</Content></CharacterStyleRange></ParagraphStyleRange></Cell>
+<Cell Name="1:1"><ParagraphStyleRange><CharacterStyleRange><Content>Body</Content></CharacterStyleRange></ParagraphStyleRange></Cell>
+<Cell Name="2:1"><ParagraphStyleRange><CharacterStyleRange><Content>Body right</Content></CharacterStyleRange></ParagraphStyleRange></Cell>
+</Table></CharacterStyleRange></ParagraphStyleRange></Story></idPkg:Story>"#;
+
+fn fixture_with_table_styles(styles: &str, story: &str) -> Vec<u8> {
+    zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", story),
+    ])
+}
+
+#[test]
+fn table_style_cascade_preserves_sparse_edges_and_local_overrides() {
+    let d = import_idml(&fixture_with_table_styles(CASCADE_STYLES, CASCADE_STORY)).unwrap();
+    d.check().unwrap();
+    let table = d.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!((table.nrows(), table.ncols()), (2, 3));
+    assert_eq!(table.style, "Table");
+    assert_eq!(table.options.space_before, 19.0);
+    assert_eq!(std::array::from_fn::<_, 4, _>(|i| table.options.border_for(i).weight), [7.0, 8.0, 9.0, 10.0]);
+    assert_eq!(table.options.border_for(3).color, "Brand");
+    let fills = table.options.alt_rows.as_ref().unwrap();
+    assert_eq!((fills.first, fills.next, fills.first_tint), (1, 1, 0.2));
+    assert_eq!(fills.first_color, "Brand");
+    let header = table.cell(0, 0).unwrap();
+    assert_eq!(header.fill, designcraft_color::swatch::PAPER, "header takes precedence over left region");
+    assert!(header.style.is_empty(), "a table region does not become AppliedCellStyle");
+    assert_eq!(header.insets, [2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(header.vj, designcraft_doc::VerticalJustification::Center);
+    assert_eq!(header.text.paras[0].style, "CellParagraph");
+    assert_eq!(header.strokes[0].weight, 2.0);
+    assert_eq!(header.strokes[0].tint, 0.4);
+    assert_ne!(header.strokes[0].kind, designcraft_doc::StrokeType::Solid);
+    assert_eq!(header.strokes[2].weight, 6.0);
+    assert_eq!(header.border_overrides, [true; 4]);
+    assert_eq!(header.stroke_defined, [true; 4]);
+    assert_eq!(header.stroke_priorities, [0; 4]);
+    let explicit = table.cell(0, 1).unwrap();
+    assert_eq!(explicit.fill, "Brand");
+    assert_eq!(explicit.fill_tint, 0.75);
+    assert_eq!(explicit.insets, [0.0, 3.0, 4.0, 5.0]);
+    assert_eq!(explicit.strokes[0].weight, 2.0, "color-only override inherits weight");
+    assert_eq!(explicit.strokes[0].color, designcraft_color::swatch::NONE);
+    assert_eq!(explicit.strokes[3].weight, 5.0);
+    assert_eq!(explicit.strokes[3].tint, 0.3);
+    let local = table.cell(0, 2).unwrap();
+    assert_eq!(local.fill, designcraft_color::swatch::NONE);
+    assert_eq!(local.fill_tint, 0.0);
+    assert_eq!(local.insets[1], 0.0);
+    assert_eq!(local.vj, designcraft_doc::VerticalJustification::Bottom);
+    assert_eq!(local.strokes[0].weight, 0.0);
+    assert_eq!(local.strokes[3].color, designcraft_color::swatch::NONE);
+    assert_eq!(local.stroke_priorities, [0, 0, 0, 7]);
+    assert_eq!(local.text.paras[0].style, st::BASIC_PARAGRAPH, "explicit paragraph style wins");
+    assert_eq!(table.cell(1, 0).unwrap().fill, designcraft_color::swatch::BLACK);
+    assert_eq!(table.cell(1, 0).unwrap().strokes[1].weight, 0.0);
+    assert_eq!(table.cell(1, 1).unwrap().fill_tint, 0.5);
+    assert_eq!(table.cell(1, 2).unwrap().fill, "Brand");
+
+    let back = import_idml(&export_idml(&d)).unwrap();
+    let roundtrip = back.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    for (before, after) in table.cells.iter().zip(&roundtrip.cells) {
+        assert_eq!(after.strokes, before.strokes);
+        assert_eq!(after.border_overrides, before.border_overrides);
+        assert_eq!(after.stroke_priorities, before.stroke_priorities);
+        assert_eq!(after.style, before.style);
+        assert_eq!(after.fill, before.fill);
+        assert_eq!(after.insets, before.insets);
+    }
+    for i in 0..4 {
+        assert_eq!(roundtrip.options.border_for(i), table.options.border_for(i));
+    }
+    let style = back.styles.cell.iter().find(|s| s.name == "Explicit").unwrap();
+    assert_eq!(style.strokes[0].weight, None, "style export keeps absence distinct from zero");
+    assert_eq!(style.strokes[0].color.as_deref(), Some(designcraft_color::swatch::NONE));
+    assert_eq!(back.styles.table.iter().find(|s| s.name == "Table").unwrap().based_on.as_deref(), Some("BaseTable"));
+}
+
+#[test]
+fn table_style_same_as_body_flags_and_editable_basic_table_are_inherited() {
+    let styles = CASCADE_STYLES.replace(
+        "Name=\"Table\" SpaceBefore",
+        "Name=\"Table\" HeaderRegionSameAsBodyRegion=\"true\" LeftColumnRegionSameAsBodyRegion=\"true\" SpaceBefore",
+    );
+    let story = CASCADE_STORY.replace("AppliedTableStyle=\"ts-child\"", "AppliedTableStyle=\"TableStyle/$ID/[Basic Table]\"");
+    let d = import_idml(&fixture_with_table_styles(&styles, &story)).unwrap();
+    let table = d.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert!(table.style.is_empty());
+    assert_eq!(table.options.space_after, 17.0);
+    assert_eq!(table.cell(0, 0).unwrap().fill, "Brand");
+    assert_eq!(table.cell(0, 0).unwrap().strokes[2].weight, 4.0);
+    assert_eq!(table.cell(1, 0).unwrap().fill, "Brand");
+    assert_eq!(table.cell(1, 0).unwrap().strokes[1].weight, 3.0);
+}
+
+#[test]
+fn table_style_cycles_and_missing_bases_terminate_without_losing_nearest_values() {
+    let styles = r#"<idPkg:Styles xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging">
+<RootCellStyleGroup>
+<CellStyle Self="CellStyle/A" Name="A" TopEdgeStrokeWeight="0"><Properties><BasedOn type="object">CellStyle/B</BasedOn></Properties></CellStyle>
+<CellStyle Self="CellStyle/B" Name="B" TopEdgeStrokeColor="Color/Brand"><Properties><BasedOn type="object">CellStyle/A</BasedOn></Properties></CellStyle>
+<CellStyle Self="CellStyle/Missing" Name="Missing" LeftInset="0"><Properties><BasedOn type="object">CellStyle/Unknown</BasedOn></Properties></CellStyle>
+</RootCellStyleGroup><RootTableStyleGroup>
+<TableStyle Self="ts-child" Name="A" BodyRegionCellStyle="CellStyle/A"><Properties><BasedOn type="object">TableStyle/B</BasedOn></Properties></TableStyle>
+<TableStyle Self="TableStyle/B" Name="B" SpaceAfter="20"><Properties><BasedOn type="object">ts-child</BasedOn></Properties></TableStyle>
+</RootTableStyleGroup></idPkg:Styles>"#;
+    let d = import_idml(&fixture_with_table_styles(styles, CASCADE_STORY)).unwrap();
+    let table = d.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!(table.options.space_after, 20.0);
+    assert_eq!(table.cell(1, 1).unwrap().strokes[0].weight, 0.0);
+    assert_eq!(table.cell(1, 1).unwrap().strokes[0].color, "Brand");
+    let missing = designcraft_doc::resolve_cell_style(&d.styles.cell, "Missing");
+    assert_eq!(missing.inset_overrides[1], Some(0.0));
+}
+
+#[test]
+fn table_local_alternating_fill_off_survives_named_style_roundtrip() {
+    let styles = CASCADE_STYLES.replace(
+        "Name=\"Table\" SpaceBefore",
+        "Name=\"Table\" StartColumnFillCount=\"1\" EndColumnFillCount=\"1\" StartColumnFillColor=\"Color/Brand\" SpaceBefore",
+    );
+    let story = CASCADE_STORY.replace("HeaderRowCount=\"1\"", "HeaderRowCount=\"1\" StartRowFillCount=\"0\" StartColumnFillCount=\"0\"");
+    let document = import_idml(&fixture_with_table_styles(&styles, &story)).unwrap();
+    for document in [&document, &import_idml(&export_idml(&document)).unwrap()] {
+        let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+        assert!(table.options.alt_rows.is_none());
+        assert!(table.options.alt_cols.is_none());
+    }
+}
+
+#[test]
+fn table_local_fill_counts_enable_inherited_disabled_pattern_colors() {
+    let story =
+        CASCADE_STORY.replace("AppliedTableStyle=\"ts-child\"", "AppliedTableStyle=\"ts-base\" StartRowFillCount=\"1\" EndRowFillCount=\"1\"");
+    let document = import_idml(&fixture_with_table_styles(CASCADE_STYLES, &story)).unwrap();
+    let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    let fills = table.options.alt_rows.as_ref().unwrap();
+    assert_eq!((fills.first, fills.next), (1, 1));
+    assert_eq!(fills.first_color, "Brand");
+    assert_eq!(fills.first_tint, 0.2);
+}
+
+#[test]
+fn table_absent_and_explicit_default_edges_remain_distinct_on_idml_roundtrip() {
+    let story = CASCADE_STORY
+        .replace("AppliedTableStyle=\"ts-child\"", "AppliedTableStyle=\"Missing\"")
+        .replace("Name=\"1:1\"", "Name=\"1:1\" TopEdgeStrokeWeight=\"1\" TopEdgeStrokePriority=\"0\"");
+    let document = import_idml(&fixture_with_table_styles(STYLES, &story)).unwrap();
+    for document in [&document, &import_idml(&export_idml(&document)).unwrap()] {
+        let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+        assert_eq!(table.cell(1, 0).unwrap().stroke_defined, [false; 4]);
+        assert_eq!(table.cell(1, 1).unwrap().stroke_defined, [true, false, false, false]);
+        assert_eq!(table.cell(1, 1).unwrap().border_overrides, [false; 4]);
+        assert_eq!(table.cell(1, 1).unwrap().stroke_priorities, [0; 4]);
+    }
+}
+
+#[test]
+fn multiline_table_and_cell_style_bases_resolve() {
+    let styles = CASCADE_STYLES.replace(">cs-base</BasedOn>", ">\n  cs-base \n</BasedOn>").replace(">ts-base</BasedOn>", ">\n ts-base \n</BasedOn>");
+    let document = import_idml(&fixture_with_table_styles(&styles, CASCADE_STORY)).unwrap();
+    let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!(table.cell(1, 1).unwrap().strokes[0].weight, 2.0);
+    assert_eq!(table.options.border_for(0).weight, 7.0);
+}
+
+#[test]
+fn legacy_native_documents_export_both_builtin_table_styles_when_missing() {
+    let story = CASCADE_STORY.replace("AppliedTableStyle=\"ts-child\"", "AppliedTableStyle=\"TableStyle/$ID/[Basic Table]\"");
+    let mut document = import_idml(&fixture_with_story(&story)).unwrap();
+    document.styles_mut().table.clear();
+    let bytes = export_idml(&document);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut styles = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("Resources/Styles.xml").unwrap(), &mut styles).unwrap();
+    assert_eq!(styles.matches("Self=\"TableStyle/$ID/[Basic Table]\"").count(), 1);
+    assert_eq!(styles.matches("Self=\"TableStyle/$ID/[No table style]\"").count(), 1);
+    let back = import_idml(&bytes).unwrap();
+    assert!(back.styles.table.iter().any(|s| s.name == designcraft_doc::BASIC_TABLE));
+}
+
+#[test]
+fn hostile_table_spans_are_clamped_before_arithmetic() {
+    let story = CASCADE_STORY.replace("Name=\"1:1\"", "Name=\"1:1\" RowSpan=\"inf\" ColumnSpan=\"inf\"");
+    let document = import_idml(&fixture_with_table_styles(CASCADE_STYLES, &story)).unwrap();
+    document.check().unwrap();
+    let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!(table.cell(1, 1).unwrap().row_span, 1);
+    assert_eq!(table.cell(1, 1).unwrap().col_span, 2);
+}
+
+#[test]
+fn signed_idml_edge_priorities_roundtrip_without_clamping() {
+    let story = CASCADE_STORY.replace(
+        "Name=\"1:1\"",
+        "Name=\"1:1\" TopEdgeStrokePriority=\"-5\" LeftEdgeStrokePriority=\"-2147483648\" RightEdgeStrokePriority=\"2147483647\"",
+    );
+    let document = import_idml(&fixture_with_table_styles(CASCADE_STYLES, &story)).unwrap();
+    for document in [&document, &import_idml(&export_idml(&document)).unwrap()] {
+        let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+        assert_eq!(table.cell(1, 1).unwrap().stroke_priorities, [-5, i32::MIN, 0, i32::MAX]);
+    }
+}
+
+#[test]
+fn alternating_table_strokes_inherit_and_roundtrip_without_flattening_cell_edges() {
+    let styles = CASCADE_STYLES.replace(
+        "Name=\"BaseTable\"",
+        "Name=\"BaseTable\" StartRowStrokeCount=\"1\" EndRowStrokeCount=\"1\" StartRowStrokeWeight=\"0\" EndRowStrokeWeight=\"0\" StartRowStrokeColor=\"Color/Paper\" EndRowStrokeColor=\"Color/Brand\" StartColumnStrokeCount=\"2\" EndColumnStrokeCount=\"1\" StartColumnStrokeWeight=\"1\" EndColumnStrokeWeight=\"2\" EndColumnLineStyle=\"StrokeStyle/$ID/Dotted\" SkipFirstAlternatingStrokeColumns=\"1\"",
+    ).replace("Name=\"Table\"", "Name=\"Table\" StartRowStrokeTint=\"25\"");
+    let story = CASCADE_STORY.replace("HeaderRowCount=\"1\"", "HeaderRowCount=\"1\" EndRowStrokeColor=\"Swatch/None\"");
+    let document = import_idml(&fixture_with_table_styles(&styles, &story)).unwrap();
+    let before = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    let row = before.options.row_strokes.as_ref().unwrap();
+    assert_eq!((row.first, row.next), (1, 1));
+    assert_eq!(row.first_stroke.tint, 0.25);
+    assert_eq!(row.first_stroke.color, designcraft_color::swatch::PAPER);
+    assert_eq!(row.next_stroke.color, designcraft_color::swatch::NONE);
+    assert!(!row.uniform_stroke().unwrap().is_visible(), "zero patterns are uniform even when their colors differ");
+    let column = before.options.column_strokes.as_ref().unwrap();
+    assert_eq!((column.first, column.next, column.skip_first), (2, 1, 1));
+    assert_eq!(column.next_stroke.kind, designcraft_doc::StrokeType::Dotted);
+    assert!(column.uniform_stroke().is_none(), "nonuniform/skipped patterns are preserved without guessing their phase");
+    assert_eq!(before.cell(0, 0).unwrap().strokes[2].weight, 6.0, "cell styles remain higher-precedence edges");
+    let back = import_idml(&export_idml(&document)).unwrap();
+    let after = back.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!(after.options.row_strokes, before.options.row_strokes);
+    assert_eq!(after.options.column_strokes, before.options.column_strokes);
+    let style = back.styles.table.iter().find(|s| s.name == "Table").unwrap();
+    assert_eq!(style.row_strokes.first_stroke.weight, None);
+    assert_eq!(style.row_strokes.first_stroke.tint, Some(0.25));
+}
+
+#[test]
+fn alternating_table_strokes_local_off_overrides_named_style_on_roundtrip() {
+    let styles = CASCADE_STYLES.replace(
+        "Name=\"Table\"",
+        "Name=\"Table\" StartRowStrokeCount=\"1\" EndRowStrokeCount=\"1\" StartColumnStrokeCount=\"1\" EndColumnStrokeCount=\"1\"",
+    );
+    let story = CASCADE_STORY.replace(
+        "HeaderRowCount=\"1\"",
+        "HeaderRowCount=\"1\" StartRowStrokeCount=\"0\" EndRowStrokeCount=\"0\" StartRowStrokeWeight=\"4\" EndRowStrokeColor=\"Color/Brand\" StartColumnStrokeCount=\"0\" EndColumnStrokeCount=\"0\" SkipFirstAlternatingStrokeColumns=\"3\" EndColumnLineStyle=\"StrokeStyle/$ID/Dotted\"",
+    );
+    let document = import_idml(&fixture_with_table_styles(&styles, &story)).unwrap();
+    for document in [&document, &import_idml(&export_idml(&document)).unwrap()] {
+        let table = document.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+        let row = table.options.row_strokes.as_ref().unwrap();
+        let column = table.options.column_strokes.as_ref().unwrap();
+        assert_eq!((row.first, row.next, column.first, column.next), (0, 0, 0, 0));
+        assert!(row.uniform_stroke().is_none());
+        assert!(column.uniform_stroke().is_none());
+        assert_eq!(row.first_stroke.weight, 4.0);
+        assert_eq!(row.next_stroke.color, "Brand");
+        assert_eq!(column.skip_first, 3);
+        assert_eq!(column.next_stroke.kind, designcraft_doc::StrokeType::Dotted);
+    }
+}
+
+#[test]
+fn complete_uniform_native_style_fields_keep_legacy_identity_on_idml_roundtrip() {
+    let mut document = import_idml(&fixture()).unwrap();
+    let stroke = designcraft_doc::CellStroke { weight: 3.0, tint: 0.5, ..Default::default() };
+    document.styles_mut().cell.push(designcraft_doc::CellStyle {
+        name: "Uniform".into(),
+        insets: Some([5.0; 4]),
+        stroke: Some(stroke.clone()),
+        ..Default::default()
+    });
+    document.styles_mut().table.push(designcraft_doc::TableStyle { name: "Uniform".into(), border: Some(stroke.clone()), ..Default::default() });
+    let back = import_idml(&export_idml(&document)).unwrap();
+    let cell = back.styles.cell.iter().find(|s| s.name == "Uniform").unwrap();
+    assert_eq!(cell.insets, Some([5.0; 4]));
+    assert_eq!(cell.stroke.as_ref(), Some(&stroke));
+    assert!(cell.strokes.iter().all(designcraft_doc::CellStrokeAttrs::is_empty));
+    let table = back.styles.table.iter().find(|s| s.name == "Uniform").unwrap();
+    assert_eq!(table.border.as_ref(), Some(&stroke));
+    assert!(table.borders.iter().all(designcraft_doc::CellStrokeAttrs::is_empty));
+}
 
 #[test]
 fn imports_column_rules_from_frames_and_object_styles() {
@@ -939,4 +1419,753 @@ fn layers_import_and_export_in_stacking_order() {
     let back = import_idml(&bytes).unwrap();
     assert_eq!(names(&back), ["Content", "Background"]);
     assert_eq!(back.spreads[0].items[0].layer, back.layers[1].id);
+}
+
+#[test]
+fn split_columns_import_and_round_trip() {
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]" SpanColumnType="SplitColumns" SplitColumnInsideGutter="27" SplitColumnOutsideGutter="4.5">
+        <Properties><SpanSplitColumnCount type="short">3</SpanSplitColumnCount></Properties>
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Split list</Content></CharacterStyleRange>
+      </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let doc = import_idml(&fixture_with_story(story)).unwrap();
+    let para = |d: &Document| d.stories.values().find(|s| s.text.contains("Split list")).unwrap().paras[0].para.clone();
+    let a = para(&doc);
+    assert_eq!(a.span_columns, Some(designcraft_doc::SpanColumns::Split(3)));
+    assert_eq!(a.split_inside_gutter, Some(27.0));
+    assert_eq!(a.split_outside_gutter, Some(4.5));
+    let b = para(&import_idml(&export_idml(&doc)).unwrap());
+    assert_eq!((b.span_columns, b.split_inside_gutter, b.split_outside_gutter), (a.span_columns, a.split_inside_gutter, a.split_outside_gutter));
+}
+
+#[test]
+fn list_numbering_format_expression_and_bullet_import_and_round_trip() {
+    let styles = STYLES.replace(
+        "    </ParagraphStyleGroup>",
+        r#"      <ParagraphStyle Self="ParagraphStyle/Text%3aHead" Name="Text:Head" BulletsAndNumberingListType="NumberedList" NumberingExpression="^#.^t">
+        <Properties><NumberingFormat type="string">A, B, C, D...</NumberingFormat></Properties>
+      </ParagraphStyle>
+      <ParagraphStyle Self="ParagraphStyle/Text%3aTable" Name="Text:Table" BulletsAndNumberingListType="NumberedList" NumberingExpression="Tabel ^#^t">
+        <Properties><NumberingFormat type="string">001, 002, 003...</NumberingFormat></Properties>
+      </ParagraphStyle>
+      <ParagraphStyle Self="ParagraphStyle/Text%3aKanji" Name="Text:Kanji" BulletsAndNumberingListType="NumberedList">
+        <Properties><NumberingFormat type="string">一, 二, 三, 四...</NumberingFormat></Properties>
+      </ParagraphStyle>
+      <ParagraphStyle Self="ParagraphStyle/Text%3aPoint" Name="Text:Point" BulletsAndNumberingListType="BulletList" BulletsTextAfter="^&gt;">
+        <Properties><BulletChar BulletCharacterType="UnicodeOnly" BulletCharacterValue="9632"/></Properties>
+      </ParagraphStyle>
+    </ParagraphStyleGroup>"#,
+    );
+    let bytes = zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", &styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", STORY),
+    ]);
+    let check = |d: &Document| {
+        let (head, _) = d.styles.resolve_para_style("Text/Head");
+        assert_eq!(head.number_style, designcraft_doc::NumberStyle::UpperLetters);
+        assert_eq!(head.number_label(2), "B.\t");
+        let (table, _) = d.styles.resolve_para_style("Text/Table");
+        assert_eq!(table.number_label(7), "Tabel 007\t");
+        let (kanji, _) = d.styles.resolve_para_style("Text/Kanji");
+        assert_eq!(kanji.number_style, designcraft_doc::NumberStyle::Arabic);
+        let (point, _) = d.styles.resolve_para_style("Text/Point");
+        assert_eq!(point.bullet_label(), "\u{25A0}\u{2002}");
+    };
+    let d = import_idml(&bytes).unwrap();
+    check(&d);
+    check(&import_idml(&export_idml(&d)).unwrap());
+}
+
+fn fixture_with_styles(styles: &str) -> Vec<u8> {
+    zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", STORY),
+    ])
+}
+
+/// Paragraph styles `Body` (based on the root) and `Loose` (no BasedOn), both with `attrs`.
+fn keep_styles(attrs: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Styles xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <RootParagraphStyleGroup Self="rp">
+    <ParagraphStyle Self="ParagraphStyle/$ID/[No paragraph style]" Name="$ID/[No paragraph style]" PointSize="12"/>
+    <ParagraphStyle Self="ParagraphStyle/Body" Name="Body" {attrs}>
+      <Properties><BasedOn type="object">ParagraphStyle/$ID/[No paragraph style]</BasedOn></Properties>
+    </ParagraphStyle>
+    <ParagraphStyle Self="ParagraphStyle/Loose" Name="Loose" {attrs}/>
+  </RootParagraphStyleGroup>
+</idPkg:Styles>"#
+    )
+}
+
+/// Keep Lines Together whose mode no style sets is InDesign's default: at start/end of paragraph.
+/// An explicit mode still wins.
+#[test]
+fn keep_lines_mode_defaults_to_start_and_end() {
+    let keep = r#"KeepLinesTogether="true" KeepFirstLines="2" KeepLastLines="2""#;
+    for (attrs, all) in [(keep.to_string(), false), (format!(r#"{keep} KeepAllLinesTogether="true""#), true)] {
+        let d = import_idml_with(&fixture_with_styles(&keep_styles(&attrs)), &|_| None).unwrap();
+        for name in ["Body", "Loose"] {
+            let (pp, _) = d.styles.resolve_para_style(name);
+            assert_eq!((pp.keep_lines_together, pp.keep_all_lines, pp.keep_first, pp.keep_last), (true, all, 2, 2), "{name}: {attrs}");
+        }
+    }
+}
+
+type Resolved = (designcraft_doc::ParaProps, designcraft_doc::CharProps);
+
+/// (IDML attribute, InDesign's default as IDML writes it, another value, the resolved field,
+/// its value for InDesign's default, its value for the other value).
+type AttrRow = (&'static str, &'static str, &'static str, fn(&Resolved) -> String, String, String);
+
+macro_rules! attr_rows {
+    ($($attr:literal: $default:literal => $dv:expr, $other:literal => $ov:expr, |$r:ident| $field:expr;)*) => {
+        vec![$(($attr, $default, $other, (|$r: &Resolved| format!("{:?}", $field)) as fn(&Resolved) -> String, format!("{:?}", $dv), format!("{:?}", $ov)),)*]
+    };
+}
+
+/// InDesign's defaults for a new document's [No Paragraph Style], for every paragraph and
+/// character attribute the importer reads (except the font family: see below).
+fn indesign_text_defaults() -> Vec<AttrRow> {
+    use designcraft_doc::{Align, Capitalization, Composer, Digits, GridAlign, Leading, ListType, Position, StartParagraph, TextDirection};
+    attr_rows! {
+        "Justification": "LeftAlign" => Align::Left, "CenterAlign" => Align::Center, |r| r.0.align;
+        "ParagraphDirection": "LeftToRightDirection" => TextDirection::LeftToRight, "RightToLeftDirection" => TextDirection::RightToLeft, |r| r.0.direction;
+        "LeftIndent": "0" => 0.0, "6" => 6.0, |r| r.0.left_indent;
+        "RightIndent": "0" => 0.0, "6" => 6.0, |r| r.0.right_indent;
+        "FirstLineIndent": "0" => 0.0, "6" => 6.0, |r| r.0.first_line_indent;
+        "LastLineIndent": "0" => 0.0, "6" => 6.0, |r| r.0.last_line_indent;
+        "SpaceBefore": "0" => 0.0, "6" => 6.0, |r| r.0.space_before;
+        "SpaceAfter": "0" => 0.0, "6" => 6.0, |r| r.0.space_after;
+        "DropCapLines": "0" => 0, "3" => 3, |r| r.0.drop_cap_lines;
+        "DropCapCharacters": "0" => 0, "1" => 1, |r| r.0.drop_cap_chars;
+        "DropcapDetail": "1" => (true, false), "2" => (false, true), |r| (r.0.drop_cap_align_left, r.0.drop_cap_scale_descenders);
+        "GridAlignment": "None" => GridAlign::None, "AlignToBaseline" => GridAlign::AllLines, |r| r.0.grid_align;
+        "Composer": "HL Composer" => Composer::Paragraph, "HL Single" => Composer::SingleLine, |r| r.0.composer;
+        "Hyphenation": "true" => true, "false" => false, |r| r.0.hyphenate;
+        "HyphenateWordsLongerThan": "5" => 5, "7" => 7, |r| r.0.hyph_min_word;
+        "HyphenateAfterFirst": "2" => 2, "3" => 3, |r| r.0.hyph_after_first;
+        "HyphenateBeforeLast": "2" => 2, "3" => 3, |r| r.0.hyph_before_last;
+        "HyphenateLadderLimit": "3" => 3, "0" => 0, |r| r.0.hyph_limit;
+        "HyphenationZone": "36" => 36.0, "18" => 18.0, |r| r.0.hyph_zone;
+        "HyphenateCapitalizedWords": "true" => true, "false" => false, |r| r.0.hyph_capitalized;
+        "HyphenateLastWord": "true" => true, "false" => false, |r| r.0.hyph_last_word;
+        "HyphenateAcrossColumns": "true" => true, "false" => false, |r| r.0.hyph_across_column;
+        "HyphenWeight": "5" => 0.5, "9" => 0.9, |r| r.0.hyph_weight;
+        "MinimumWordSpacing": "80" => 0.8, "70" => 0.7, |r| r.0.word_space_min;
+        "DesiredWordSpacing": "100" => 1.0, "90" => 0.9, |r| r.0.word_space_desired;
+        "MaximumWordSpacing": "133" => 1.33, "150" => 1.5, |r| r.0.word_space_max;
+        "MinimumLetterSpacing": "0" => 0.0, "-5" => -0.05, |r| r.0.letter_space_min;
+        "DesiredLetterSpacing": "0" => 0.0, "1" => 0.01, |r| r.0.letter_space_desired;
+        "MaximumLetterSpacing": "0" => 0.0, "5" => 0.05, |r| r.0.letter_space_max;
+        "MinimumGlyphScaling": "100" => 1.0, "97" => 0.97, |r| r.0.glyph_scale_min;
+        "DesiredGlyphScaling": "100" => 1.0, "101" => 1.01, |r| r.0.glyph_scale_desired;
+        "MaximumGlyphScaling": "100" => 1.0, "103" => 1.03, |r| r.0.glyph_scale_max;
+        "AutoLeading": "120" => 1.2, "100" => 1.0, |r| r.0.auto_leading;
+        "SingleWordJustification": "FullyJustified" => Align::FullyJustified, "LeftAlign" => Align::Left, |r| r.0.single_word_justify;
+        "KeepWithNext": "0" => 0, "1" => 1, |r| r.0.keep_with_next;
+        "KeepLinesTogether": "false" => false, "true" => true, |r| r.0.keep_lines_together;
+        "KeepAllLinesTogether": "false" => false, "true" => true, |r| r.0.keep_all_lines;
+        "KeepFirstLines": "2" => 2, "3" => 3, |r| r.0.keep_first;
+        "KeepLastLines": "2" => 2, "3" => 3, |r| r.0.keep_last;
+        "StartParagraph": "Anywhere" => StartParagraph::Anywhere, "NextColumn" => StartParagraph::NextColumn, |r| r.0.start_paragraph;
+        "BulletsAndNumberingListType": "NoList" => ListType::None, "BulletList" => ListType::Bullets, |r| r.0.list_type;
+        "BalanceRaggedLines": "NoBalancing" => false, "FullyBalanced" => true, |r| r.0.balance_ragged;
+        "Kashidas": "DefaultKashidas" => true, "KashidasOff" => false, |r| r.0.kashidas;
+        "RuleAbove": "false" => false, "true" => true, |r| r.0.rule_above.on;
+        "RuleAboveColor": "Text Color" => designcraft_doc::TEXT_COLOR, "Color/Black" => "[Black]", |r| r.0.rule_above.color;
+        "RuleAboveTint": "-1" => 1.0f32, "50" => 0.5f32, |r| r.0.rule_above.tint;
+        "RuleBelow": "false" => false, "true" => true, |r| r.0.rule_below.on;
+        "RuleBelowColor": "Text Color" => designcraft_doc::TEXT_COLOR, "Color/Black" => "[Black]", |r| r.0.rule_below.color;
+        "RuleBelowTint": "-1" => 1.0f32, "50" => 0.5f32, |r| r.0.rule_below.tint;
+        "ParagraphShadingOn": "false" => false, "true" => true, |r| r.0.shading_on;
+        "ParagraphShadingColor": "Color/Black" => "[Black]", "Swatch/None" => "[None]", |r| r.0.shading_color;
+        "ParagraphShadingTint": "20" => 0.2f32, "50" => 0.5f32, |r| r.0.shading_tint;
+        "ParagraphBorderOn": "false" => false, "true" => true, |r| r.0.border_on;
+        "ParagraphBorderColor": "Color/Black" => "[Black]", "Swatch/None" => "[None]", |r| r.0.border_color;
+        "ParagraphBorderTint": "-1" => 1.0f32, "50" => 0.5f32, |r| r.0.border_tint;
+        "FontStyle": "Regular" => "Regular", "Bold" => "Bold", |r| r.1.font_style;
+        "PointSize": "12" => 12.0, "9" => 9.0, |r| r.1.size;
+        "Leading": "Auto" => Leading::Auto, "14" => Leading::Points(14.0), |r| r.1.leading;
+        "KerningMethod": "$ID/Metrics" => designcraft_doc::Kerning::Metrics, "$ID/Optical" => designcraft_doc::Kerning::Optical, |r| r.1.kerning;
+        "Tracking": "0" => 0.0, "20" => 20.0, |r| r.1.tracking;
+        "HorizontalScale": "100" => 1.0, "90" => 0.9, |r| r.1.h_scale;
+        "VerticalScale": "100" => 1.0, "90" => 0.9, |r| r.1.v_scale;
+        "BaselineShift": "0" => 0.0, "2" => 2.0, |r| r.1.baseline_shift;
+        "Skew": "0" => 0.0, "10" => 10.0, |r| r.1.skew;
+        "FillColor": "Color/Black" => "[Black]", "Swatch/None" => "[None]", |r| r.1.fill;
+        "FillTint": "-1" => 1.0, "50" => 0.5, |r| r.1.fill_tint;
+        "StrokeColor": "Swatch/None" => "[None]", "Color/Black" => "[Black]", |r| r.1.stroke;
+        "StrokeTint": "-1" => 1.0, "50" => 0.5, |r| r.1.stroke_tint;
+        "StrokeWeight": "1" => 1.0, "2" => 2.0, |r| r.1.stroke_weight;
+        "Capitalization": "Normal" => Capitalization::Normal, "AllCaps" => Capitalization::AllCaps, |r| r.1.capitalization;
+        "Position": "Normal" => Position::Normal, "Superscript" => Position::Superscript, |r| r.1.position;
+        "Underline": "false" => false, "true" => true, |r| r.1.underline;
+        "StrikeThru": "false" => false, "true" => true, |r| r.1.strikethrough;
+        "UnderlineTint": "-1" => 1.0f32, "50" => 0.5f32, |r| r.1.underline_tint;
+        "StrikeThruTint": "-1" => 1.0f32, "50" => 0.5f32, |r| r.1.strikethrough_tint;
+        "Ligatures": "true" => true, "false" => false, |r| r.1.ligatures;
+        "NoBreak": "false" => false, "true" => true, |r| r.1.no_break;
+        "OTFContextualAlternate": "true" => true, "false" => false, |r| designcraft_doc::otf::is_on(&r.1.otf_features, "calt");
+        "DigitsType": "DefaultDigits" => Digits::Default, "ArabicDigits" => Digits::Arabic, |r| r.1.digits;
+        "AppliedLanguage": "$ID/English: USA" => "English: USA", "$ID/German: 2006 Reform" => "German: 2006 Reform", |r| r.1.language;
+    }
+}
+
+/// [No paragraph style] with `root` attributes and `Body`, based on it, with `body` attributes.
+fn text_styles(root: &str, body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Styles xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <RootParagraphStyleGroup Self="rp">
+    <ParagraphStyle Self="ParagraphStyle/$ID/[No paragraph style]" Name="$ID/[No paragraph style]" {root}/>
+    <ParagraphStyle Self="ParagraphStyle/Body" Name="Body" {body}>
+      <Properties><BasedOn type="object">ParagraphStyle/$ID/[No paragraph style]</BasedOn></Properties>
+    </ParagraphStyle>
+  </RootParagraphStyleGroup>
+</idPkg:Styles>"#
+    )
+}
+
+fn resolve_body(root: &str, body: &str) -> Resolved {
+    let d = import_idml_with(&fixture_with_styles(&text_styles(root, body)), &|_| None).unwrap();
+    d.styles.resolve_para_style("Body")
+}
+
+/// Text attributes an IDML file leaves unset are InDesign's defaults; written ones win, and a
+/// file that writes every default (as InDesign's own exports do) imports the same.
+#[test]
+fn absent_text_attributes_take_indesign_defaults() {
+    let rows = indesign_text_defaults();
+    let all = |pick: fn(&AttrRow) -> &str| rows.iter().map(|r| format!(r#"{}="{}""#, r.0, pick(r))).collect::<Vec<_>>().join(" ");
+    let (defaults, others) = (all(|r| r.1), all(|r| r.2));
+    let omitted = resolve_body("", "");
+    let written = resolve_body(&defaults, "");
+    for (attr, _, _, field, want, _) in &rows {
+        assert_eq!(field(&omitted), *want, "{attr} omitted");
+        assert_eq!(field(&written), *want, "{attr} written as InDesign's default");
+    }
+    assert_eq!(omitted, written);
+    for (root, body) in [(others.as_str(), ""), ("", others.as_str())] {
+        let r = resolve_body(root, body);
+        for (attr, _, _, field, _, want) in &rows {
+            assert_eq!(field(&r), *want, "{attr} written on the {}", if root.is_empty() { "style" } else { "root" });
+        }
+    }
+    // Product difference: InDesign's default face isn't available, so unset fonts are DesignCraft's.
+    assert_eq!(omitted.1.font_family, designcraft_doc::CharProps::default().font_family);
+}
+
+/// A tint of -1 is the colour's own tint (100 %): written on a style, it replaces its parent's.
+/// Tints are never negative or above 100 %.
+#[test]
+fn minus_one_tint_is_the_colours_own() {
+    let tints = |v: &str| {
+        ["UnderlineTint", "StrikeThruTint", "FillTint", "StrokeTint", "ParagraphShadingTint", "ParagraphBorderTint", "RuleAboveTint", "RuleBelowTint"]
+            .map(|k| format!(r#"{k}="{v}""#))
+            .join(" ")
+            + r#" RuleAbove="true" RuleBelow="true""#
+    };
+    for (body, want) in [("-1", 1.0), ("150", 1.0)] {
+        let r = resolve_body(&tints("50"), &tints(body));
+        let got = [
+            r.1.underline_tint,
+            r.1.strikethrough_tint,
+            r.1.fill_tint,
+            r.1.stroke_tint,
+            r.0.shading_tint,
+            r.0.border_tint,
+            r.0.rule_above.tint,
+            r.0.rule_below.tint,
+        ];
+        assert_eq!(got, [want; 8], "{body}");
+    }
+    // Footnote rules, table fills and strokes, cell fills.
+    let prefs = PREFS.replace("</idPkg:Preferences>", r#"<FootnoteOption RuleTint="-1"/></idPkg:Preferences>"#);
+    let story = r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+<Story Self="s1"><ParagraphStyleRange><CharacterStyleRange><Table Self="tb" StartRowFillCount="1" StartRowFillTint="-1" EndRowFillTint="-1" TopBorderStrokeTint="-1">
+<Row Self="r0" Name="0"/><Column Self="c0" Name="0"/><Cell Self="ce" Name="0:0" FillColor="Color/Black" FillTint="-1" TopEdgeStrokeTint="-1"/></Table></CharacterStyleRange></ParagraphStyleRange></Story>
+</idPkg:Story>"#;
+    let d = import_idml_with(
+        &zip_files(&[
+            ("designmap.xml", DESIGNMAP),
+            ("Resources/Graphic.xml", GRAPHIC),
+            ("Resources/Styles.xml", STYLES),
+            ("Resources/Preferences.xml", &prefs),
+            ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+            ("Spreads/Spread_sp1.xml", SPREAD),
+            ("Stories/Story_s1.xml", story),
+        ]),
+        &|_| None,
+    )
+    .unwrap();
+    assert_eq!(d.footnote_options.rule.tint, 1.0);
+    let t = d.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    let alt = t.options.alt_rows.as_ref().unwrap();
+    assert_eq!((alt.first_tint, alt.next_tint, t.options.border.tint), (1.0, 1.0, 1.0));
+    let c = t.cell(0, 0).unwrap();
+    assert_eq!((c.fill_tint, c.strokes[0].tint), (1.0, 1.0));
+}
+
+/// Rules in Text Color take the colour of the paragraph's text; they round-trip as Text Color.
+#[test]
+fn text_color_rules_round_trip() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let rule = designcraft_doc::Rule { on: true, ..Default::default() };
+    assert_eq!(rule.color, designcraft_doc::TEXT_COLOR);
+    let para = designcraft_doc::ParaAttrs {
+        rule_above: Some(rule.clone()),
+        rule_below: Some(designcraft_doc::Rule { color: "[Black]".into(), ..rule }),
+        kashidas: Some(false),
+        ..Default::default()
+    };
+    let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(40.0, 40.0, 400.0, 400.0), lid, "Ruled", ParaFormat::default()).unwrap();
+    d.story_mut(sid).unwrap().paras[0].para = para.clone();
+    let bytes = export_idml(&d);
+    let story = zip_text(&bytes, "Stories/");
+    assert!(story.contains(r#"<RuleAboveColor type="string">Text Color</RuleAboveColor>"#), "{story}");
+    assert!(story.contains(r#"Kashidas="KashidasOff""#), "{story}");
+    let back = import_idml(&bytes).unwrap();
+    let p = &back.stories.values().find(|s| s.text == "Ruled").unwrap().paras[0];
+    assert_eq!((p.para.rule_above.as_ref(), p.para.rule_below.as_ref()), (para.rule_above.as_ref(), para.rule_below.as_ref()));
+    assert_eq!(p.para.kashidas, Some(false));
+}
+
+/// `[Basic Paragraph]` is InDesign's `$ID/NormalParagraphStyle`, both ways.
+#[test]
+fn basic_paragraph_is_normal_paragraph_style() {
+    let d = import_idml_with(&fixture(), &|_| None).unwrap();
+    let basic = d.styles.para(st::BASIC_PARAGRAPH).unwrap();
+    assert_eq!(basic.based_on.as_deref(), Some(designcraft_doc::NO_PARA_STYLE));
+    assert_eq!(d.styles.para("Text/Body").unwrap().based_on.as_deref(), Some(st::BASIC_PARAGRAPH));
+    let s = d.stories.values().find(|s| s.text.starts_with("Hello")).unwrap();
+    assert_eq!(s.paras[1].style, st::BASIC_PARAGRAPH);
+    assert!(d.styles.paragraph.iter().all(|p| !p.name.contains("NormalParagraphStyle")));
+    let bytes = export_idml(&d);
+    let styles = zip_text(&bytes, "Resources/Styles.xml");
+    assert!(styles.contains(r#"Self="ParagraphStyle/$ID/NormalParagraphStyle" Name="$ID/NormalParagraphStyle""#), "{styles}");
+    assert!(zip_text(&bytes, "Stories/").contains(r#"AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle""#));
+    let back = import_idml(&bytes).unwrap();
+    assert_eq!(back.styles.paragraph.iter().filter(|p| p.name == st::BASIC_PARAGRAPH).count(), 1);
+}
+
+/// Page items, frames, tables and preferences an IDML file leaves unset are InDesign's defaults
+/// for a new document.
+#[test]
+fn absent_item_and_document_attributes_take_indesign_defaults() {
+    use designcraft_doc::{Cap, FirstBaseline, Join, StrokeAlign, VerticalJustification};
+    use designcraft_geom::corners::CornerShape;
+    let path = |x: f64| {
+        let pts: String = [(x, 0.0), (x, 50.0), (x + 50.0, 50.0), (x + 50.0, 0.0)]
+            .iter()
+            .map(|(x, y)| format!(r#"<PathPointType Anchor="{x} {y}" LeftDirection="{x} {y}" RightDirection="{x} {y}"/>"#))
+            .collect();
+        format!(
+            r#"<Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>{pts}</PathPointArray></GeometryPathType></PathGeometry></Properties>"#
+        )
+    };
+    let designmap = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0" Self="d">
+<NumberingList Self="NumberingList/Steps" Name="Steps"/>
+<RootTableStyleGroup Self="rts"><TableStyle Self="TableStyle/Banded" Name="Banded" StartRowFillCount="1"/></RootTableStyleGroup>
+<Story Self="s1"><ParagraphStyleRange><CharacterStyleRange><Table Self="tb" StartRowFillCount="1" StartColumnFillCount="2"><Row Self="r0" Name="0"/><Column Self="c0" Name="0"/><Cell Self="ce" Name="0:0"/></Table></CharacterStyleRange></ParagraphStyleRange></Story>
+<Spread Self="sp1"><Page Self="p1"/>
+<Rectangle Self="plain">{}</Rectangle>
+<Rectangle Self="round" TopLeftCornerOption="RoundedCorner" TopRightCornerOption="RoundedCorner" BottomLeftCornerOption="RoundedCorner" BottomRightCornerOption="RoundedCorner">{}</Rectangle>
+<Rectangle Self="legacy" CornerOption="RoundedCorner">{}</Rectangle>
+<Rectangle Self="sized" TopLeftCornerOption="RoundedCorner" TopLeftCornerRadius="5">{}</Rectangle>
+<TextFrame Self="tf" ParentStory="s1">{}</TextFrame>
+</Spread>
+</Document>"#,
+        path(0.0),
+        path(100.0),
+        path(200.0),
+        path(300.0),
+        path(400.0)
+    );
+    let d = import_idml_with(&zip_files(&[("designmap.xml", &designmap)]), &|_| None).unwrap();
+    // Document Setup, margins and columns, grids, Advanced Type, transparency, black.
+    let s = &d.settings;
+    assert_eq!((s.page_width, s.page_height, s.facing_pages, s.intent), (612.0, 792.0, true, designcraft_doc::Intent::Print));
+    assert_eq!((s.bleed, s.slug), ([0.0; 4], [0.0; 4]));
+    let page = &d.spreads[0].pages[0];
+    assert_eq!((page.margins.top, page.margins.bottom, page.margins.inside, page.margins.outside), (36.0, 36.0, 36.0, 36.0));
+    assert_eq!((page.columns.count, page.columns.gutter), (1, 12.0));
+    assert_eq!((s.baseline_grid.start, s.baseline_grid.increment, s.baseline_grid.view_threshold), (36.0, 12.0, 0.75));
+    assert_eq!((s.grid.horizontal, s.grid.vertical, s.grid.subdivisions, s.grid.in_back), (72.0, 72.0, 8, true));
+    let a = &s.advanced_type;
+    assert_eq!((a.superscript_size, a.superscript_position, a.subscript_size, a.subscript_position), (58.3, 33.3, 58.3, 33.3));
+    assert_eq!((s.blend_space, s.overprint_black, s.keyboard_increment), (designcraft_doc::BlendSpace::Cmyk, true, 1.0));
+    // Fill, stroke, transparency, wrap and corners of a frame with no attributes.
+    let item = |n: usize| d.spreads[0].items[n].clone();
+    let plain = item(0);
+    assert!(plain.fill.is_none() && plain.stroke.is_none());
+    let st = &plain.stroke;
+    assert_eq!((st.weight, st.miter_limit, st.cap, st.join, st.align), (1.0, 4.0, Cap::Butt, Join::Miter, StrokeAlign::Center));
+    assert_eq!((plain.opacity, plain.blend, plain.wrap.mode), (1.0, designcraft_color::BlendMode::Normal, designcraft_doc::WrapMode::None));
+    assert!(plain.corners.is_none());
+    // A corner shape without a size: 12 pt.
+    for n in [1, 2] {
+        assert_eq!(item(n).corners.corners.map(|c| (c.shape, c.size)), [(CornerShape::Rounded, 12.0); 4], "item {n}");
+    }
+    assert_eq!(item(3).corners.corners[0].size, 5.0);
+    // Text Frame Options.
+    let tf = item(4);
+    let o = &tf.text_frame().unwrap().options;
+    assert_eq!((o.columns, o.gutter, o.inset, o.balance_columns, o.ignore_wrap), (1, 12.0, [0.0; 4], false, false));
+    assert_eq!((o.vertical_justification, o.first_baseline, o.first_baseline_min), (VerticalJustification::Top, FirstBaseline::Ascent, 0.0));
+    assert_eq!((o.auto_size, o.auto_size_ref), (designcraft_doc::AutoSize::Off, 4), "auto-size from the centre");
+    // Numbered lists don't continue across stories.
+    assert_eq!(d.settings.lists, vec![designcraft_doc::NumberedList { name: "Steps".into(), continue_across_stories: false }]);
+    // Table and cell options.
+    let t = d.stories.values().flat_map(|s| s.tables.values()).next().unwrap();
+    assert_eq!((t.options.space_before, t.options.space_after, t.options.repeat_header), (4.0, -4.0, true));
+    assert_eq!((t.options.border.weight, t.options.border.color.as_str()), (1.0, "[Black]"));
+    assert_eq!((t.rows[0].mode, t.rows[0].height), (designcraft_doc::RowHeightMode::AtLeast, 3.0));
+    // Alternating fills: the first rows or columns Black 20 %, the next None.
+    let fills = |a: &designcraft_doc::AltFills| (a.first_color.clone(), a.first_tint, a.next_color.clone(), a.next_tint, a.next);
+    let want = ("[Black]".to_string(), 0.2f32, "[None]".to_string(), 1.0f32, 1);
+    assert_eq!(fills(t.options.alt_rows.as_ref().unwrap()), want);
+    let cols = t.options.alt_cols.as_ref().unwrap();
+    assert_eq!((fills(cols), cols.first), (want.clone(), 2));
+    let banded = d.styles.table.iter().find(|s| s.name == "Banded").unwrap();
+    let mut bt = designcraft_doc::Table::new(0, 1, 1, 0, 0, 100.0);
+    d.styles.resolve_table_style(&banded.name).apply_to(&mut bt, &d.styles.cell);
+    assert_eq!(fills(bt.options.alt_rows.as_ref().unwrap()), want);
+    let c = t.cell(0, 0).unwrap();
+    assert_eq!((c.insets, c.vj, c.fill.as_str()), ([4.0; 4], VerticalJustification::Top, "[None]"));
+    for e in &c.strokes {
+        assert_eq!((e.weight, e.color.as_str(), e.tint, &e.kind), (1.0, "[Black]", 1.0, &designcraft_doc::StrokeType::Solid));
+    }
+}
+
+/// IDML has no attribute for a drop cap's character style: it is the nested style list's leading
+/// "through 1 Dropcap" entry, read into the drop cap style and written back from it.
+#[test]
+fn drop_caps_import_and_round_trip() {
+    // A style with a drop cap and its character style; a paragraph overriding both locally.
+    let opener = r#"<ParagraphStyle Self="ParagraphStyle/Opener" Name="Opener" DropCapCharacters="1" DropCapLines="3">
+        <Properties><AllNestedStyles type="list"><ListItem type="record">
+          <AppliedCharacterStyle type="object">CharacterStyle/Strong</AppliedCharacterStyle><Delimiter type="enumeration">Dropcap</Delimiter>
+          <Repetition type="long">1</Repetition><Inclusive type="boolean">true</Inclusive></ListItem></AllNestedStyles></Properties>
+      </ParagraphStyle>
+    </RootParagraphStyleGroup>"#;
+    let styles = STYLES.replace("</RootParagraphStyleGroup>", opener);
+    let story = r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="s1">
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Opener" DropCapCharacters="2" DropCapLines="2">
+      <Properties><AllNestedStyles type="list"><ListItem type="record">
+        <AppliedCharacterStyle type="object">CharacterStyle/$ID/[No character style]</AppliedCharacterStyle><Delimiter type="enumeration">Dropcap</Delimiter>
+        <Repetition type="long">1</Repetition><Inclusive type="boolean">true</Inclusive></ListItem></AllNestedStyles></Properties>
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Once upon a time</Content></CharacterStyleRange>
+    </ParagraphStyleRange>
+  </Story>
+</idPkg:Story>"#;
+    let bytes = zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", &styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", story),
+    ]);
+    let check = |d: &Document| {
+        let st = d.styles.para("Opener").unwrap();
+        assert_eq!((st.para.drop_cap_chars, st.para.drop_cap_lines), (Some(1), Some(3)));
+        assert_eq!(st.para.drop_cap_style.as_deref(), Some("Strong"));
+        assert_eq!(st.para.nested_styles, Some(vec![designcraft_doc::NestedStyle::drop_cap("Strong")]), "one entry, not duplicated");
+        let p = &d.stories.values().find(|s| s.text.starts_with("Once")).unwrap().paras[0];
+        assert_eq!((p.para.drop_cap_chars, p.para.drop_cap_lines), (Some(2), Some(2)));
+        assert_eq!(p.para.drop_cap_style.as_deref(), Some(st::NO_CHAR_STYLE));
+    };
+    let d = import_idml_with(&bytes, &|_| None).unwrap();
+    check(&d);
+    let bytes = export_idml(&d);
+    assert!(!zip_text(&bytes, "").contains("DropCapStyle"), "not an IDML attribute");
+    check(&import_idml(&bytes).unwrap());
+    // A drop cap style set without nested styles is written as one; Align Left Edge and Scale for
+    // Descenders as DropcapDetail.
+    let mut d = d;
+    if let Some(s) = d.styles_mut().para_mut("Opener") {
+        s.para.nested_styles = None;
+        s.para.drop_cap_align_left = Some(false);
+        s.para.drop_cap_scale_descenders = Some(true);
+    }
+    let bytes = export_idml(&d);
+    assert!(!zip_text(&bytes, "").contains("DropCapStyle"));
+    assert!(zip_text(&bytes, "Resources/Styles.xml").contains(r#"DropcapDetail="2""#));
+    let back = import_idml(&bytes).unwrap();
+    let st = back.styles.para("Opener").unwrap();
+    assert_eq!((st.para.drop_cap_chars, st.para.drop_cap_lines, st.para.drop_cap_style.as_deref()), (Some(1), Some(3), Some("Strong")));
+    assert_eq!((st.para.drop_cap_align_left, st.para.drop_cap_scale_descenders), (Some(false), Some(true)));
+    assert_eq!(st.para.nested_styles, Some(vec![designcraft_doc::NestedStyle::drop_cap("Strong")]));
+}
+
+/// IDML styles and stories with an `Opener` style whose drop cap style is `Strong`, plus `styles`
+/// (more paragraph styles) and `paras` (the story's paragraph ranges). `WORDS` in them stands for
+/// a nested style list of `Strong` through 1 word.
+fn drop_cap_fixture(styles: &str, paras: &str) -> Vec<u8> {
+    let nested = |style: &str, delim: &str| {
+        format!(
+            r#"<AllNestedStyles type="list"><ListItem type="record"><AppliedCharacterStyle type="object">CharacterStyle/{style}</AppliedCharacterStyle><Delimiter type="enumeration">{delim}</Delimiter><Repetition type="long">1</Repetition><Inclusive type="boolean">true</Inclusive></ListItem></AllNestedStyles>"#
+        )
+    };
+    let words = nested("Strong", "AnyWord");
+    let opener = format!(
+        r#"<ParagraphStyle Self="ParagraphStyle/Opener" Name="Opener" DropCapCharacters="1" DropCapLines="3"><Properties>{}</Properties></ParagraphStyle>
+    {}
+    </RootParagraphStyleGroup>"#,
+        nested("Strong", "Dropcap"),
+        styles.replace("WORDS", &words)
+    );
+    let styles = STYLES.replace("</RootParagraphStyleGroup>", &opener);
+    let story = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="s1">{}</Story>
+</idPkg:Story>"#,
+        paras.replace("WORDS", &words)
+    );
+    zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", &styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", &story),
+    ])
+}
+
+/// A nested style list replaces the inherited one, drop cap style entry included: a style or
+/// paragraph with a list of its own and no Dropcap entry has no drop cap style.
+#[test]
+fn own_nested_styles_clear_an_inherited_drop_cap_style() {
+    let styles = r#"<ParagraphStyle Self="ParagraphStyle/Child" Name="Child"><Properties><BasedOn type="object">ParagraphStyle/Opener</BasedOn>WORDS</Properties></ParagraphStyle>
+    <ParagraphStyle Self="ParagraphStyle/Plain" Name="Plain"><Properties>WORDS</Properties></ParagraphStyle>"#;
+    let paras = r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Opener"><Properties>WORDS</Properties>
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Cleared</Content><Br/></CharacterStyleRange>
+    </ParagraphStyleRange>
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Opener">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Inherited</Content></CharacterStyleRange>
+    </ParagraphStyleRange>"#;
+    let d = import_idml_with(&drop_cap_fixture(styles, paras), &|_| None).unwrap();
+    let cap = |name: &str| d.styles.para(name).unwrap().para.drop_cap_style.clone();
+    assert_eq!(cap("Opener").as_deref(), Some("Strong"));
+    assert_eq!(cap("Child").as_deref(), Some(st::NO_CHAR_STYLE), "its own list replaces Opener's");
+    assert_eq!(cap("Plain"), None, "nothing to clear");
+    let story = d.stories.values().find(|s| s.text.starts_with("Cleared")).unwrap();
+    assert_eq!(story.paras[0].para.drop_cap_style.as_deref(), Some(st::NO_CHAR_STYLE));
+    assert_eq!(story.paras[1].para.drop_cap_style, None);
+    assert_eq!(d.styles.resolve_para(&story.paras[1]).0.drop_cap_style, "Strong");
+}
+
+/// Paragraphs in table cells and footnotes are cleared like story paragraphs.
+#[test]
+fn own_nested_styles_clear_an_inherited_drop_cap_style_in_cells_and_notes() {
+    let opener = |text: &str| {
+        format!(
+            r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Opener"><Properties>WORDS</Properties><CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>{text}</Content></CharacterStyleRange></ParagraphStyleRange>"#
+        )
+    };
+    let paras = format!(
+        r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/NormalParagraphStyle"><CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]">
+<Content>Body</Content><Footnote>{}</Footnote>
+<Table HeaderRowCount="0" FooterRowCount="0"><Row Name="0" MinimumHeight="24"/><Column Name="0" SingleColumnWidth="60"/><Cell Name="0:0">{}</Cell></Table>
+</CharacterStyleRange></ParagraphStyleRange>"#,
+        opener("Note"),
+        opener("Cell")
+    );
+    let d = import_idml_with(&drop_cap_fixture("", &paras), &|_| None).unwrap();
+    let story = d.stories.values().find(|s| !s.notes.is_empty()).expect("story with a footnote");
+    let note = &story.notes[0].text;
+    assert_eq!(note.paras[0].para.drop_cap_style.as_deref(), Some(st::NO_CHAR_STYLE), "{:?}", note.text);
+    let cell = &story.tables.values().next().expect("a table").cell(0, 0).unwrap().text;
+    assert_eq!(cell.paras[0].para.drop_cap_style.as_deref(), Some(st::NO_CHAR_STYLE), "{:?}", cell.text);
+}
+
+/// A paragraph that clears its style's drop cap style without nested styles of its own round-trips:
+/// it is written with the style's list, the Dropcap entry set to [None].
+#[test]
+fn a_cleared_drop_cap_style_round_trips() {
+    let paras = r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Opener">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Once upon a time</Content></CharacterStyleRange>
+    </ParagraphStyleRange>"#;
+    let mut d = import_idml_with(&drop_cap_fixture("", paras), &|_| None).unwrap();
+    let sid = *d.stories.keys().next().unwrap();
+    let clear = |d: &mut Document| d.story_mut(sid).unwrap().paras[0].para.drop_cap_style = Some(st::NO_CHAR_STYLE.into());
+    let resolved = |d: &Document| {
+        let st = d.stories.values().find(|s| s.text.starts_with("Once")).unwrap();
+        d.styles.resolve_para(&st.paras[0]).0
+    };
+    clear(&mut d);
+    let back = import_idml(&export_idml(&d)).unwrap();
+    let pp = resolved(&back);
+    assert_eq!(pp.drop_cap_style, st::NO_CHAR_STYLE);
+    assert_eq!(pp.nested_styles, vec![designcraft_doc::NestedStyle::drop_cap(st::NO_CHAR_STYLE)]);
+    // The style's drop cap style without nested styles: the paragraph is written with an empty
+    // list, which clears it on import.
+    if let Some(s) = d.styles_mut().para_mut("Opener") {
+        s.para.nested_styles = None;
+    }
+    assert_eq!(resolved(&d).drop_cap_style, st::NO_CHAR_STYLE);
+    let back = import_idml(&export_idml(&d)).unwrap();
+    assert_eq!(back.styles.para("Opener").unwrap().para.drop_cap_style.as_deref(), Some("Strong"));
+    let pp = resolved(&back);
+    assert_eq!(pp.drop_cap_style, st::NO_CHAR_STYLE);
+    assert!(pp.nested_styles.iter().all(|ns| ns.style != "Strong"), "{:?}", pp.nested_styles);
+}
+
+/// Frames take the corners and Text Frame Options they don't write from their object style chain,
+/// then `[None]`. Per-corner attributes win over the legacy all-corners pair, at each level; a
+/// corner shape without a radius takes the chain's radius.
+#[test]
+fn frames_inherit_object_style_corners_and_text_frame_options() {
+    use designcraft_doc::{AutoSize, FirstBaseline, VerticalJustification};
+    use designcraft_geom::corners::CornerShape as C;
+    // Anchors in the order top-left, bottom-left, bottom-right, top-right.
+    let path = |x: f64| {
+        let pts: String = [(x, 0.0), (x, 50.0), (x + 50.0, 50.0), (x + 50.0, 0.0)]
+            .iter()
+            .map(|(x, y)| format!(r#"<PathPointType Anchor="{x} {y}" LeftDirection="{x} {y}" RightDirection="{x} {y}"/>"#))
+            .collect();
+        format!(
+            r#"<Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>{pts}</PathPointArray></GeometryPathType></PathGeometry></Properties>"#
+        )
+    };
+    let corners = |opt: &str, r: &str| {
+        ["TopLeft", "TopRight", "BottomLeft", "BottomRight"].map(|n| format!(r#"{n}CornerOption="{opt}" {n}CornerRadius="{r}""#)).join(" ")
+    };
+    let inset = |v: f64| {
+        format!(
+            r#"<Properties><InsetSpacing type="list">{}</InsetSpacing></Properties>"#,
+            r#"<ListItem type="unit">V</ListItem>"#.replace('V', &v.to_string()).repeat(4)
+        )
+    };
+    let designmap = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Document xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="20.2" Self="d">
+<RootObjectStyleGroup Self="ro">
+  <ObjectStyle Self="ObjectStyle/$ID/[None]" Name="$ID/[None]" {none}>
+    <TextFramePreference TextColumnCount="1" TextColumnGutter="12" AutoSizingReferencePoint="CenterPoint" AutoSizingType="Off"/>
+  </ObjectStyle>
+  <ObjectStyle Self="ObjectStyle/Rounded" Name="Rounded" TopLeftCornerOption="RoundedCorner" TopRightCornerOption="RoundedCorner" BottomLeftCornerOption="RoundedCorner" BottomRightCornerOption="RoundedCorner" TopLeftCornerRadius="6">
+    <Properties><BasedOn type="object">ObjectStyle/$ID/[None]</BasedOn></Properties>
+    <TextFramePreference TextColumnCount="2" TextColumnGutter="18" VerticalJustification="CenterAlign" FirstBaselineOffset="LeadingOffset" MinimumFirstBaselineOffset="4" IgnoreWrap="true" AutoSizingType="HeightOnly">{inset}</TextFramePreference>
+  </ObjectStyle>
+  <ObjectStyle Self="ObjectStyle/Child" Name="Child" TopRightCornerOption="BevelCorner">
+    <Properties><BasedOn type="object">ObjectStyle/Rounded</BasedOn></Properties>
+  </ObjectStyle>
+</RootObjectStyleGroup>
+<Story Self="s1"/>
+<Spread Self="sp1"><Page Self="p1"/>
+<TextFrame Self="tf" ParentStory="s1" AppliedObjectStyle="ObjectStyle/Child" BottomRightCornerOption="InverseRoundedCorner" BottomRightCornerRadius="11.34">{p0}<TextFramePreference TextColumnCount="3"/></TextFrame>
+<Rectangle Self="legacy" AppliedObjectStyle="ObjectStyle/Rounded" CornerOption="BevelCorner" CornerRadius="5" TopLeftCornerOption="InsetCorner">{p1}</Rectangle>
+<Rectangle Self="one" TopRightCornerOption="RoundedCorner" TopRightCornerRadius="11.34">{p2}</Rectangle>
+<Rectangle Self="plain" AppliedObjectStyle="ObjectStyle/Rounded">{p3}</Rectangle>
+</Spread>
+</Document>"#,
+        none = corners("None", "12"),
+        inset = inset(3.0),
+        p0 = path(0.0),
+        p1 = path(100.0),
+        p2 = path(200.0),
+        p3 = path(300.0),
+    );
+    let d = import_idml_with(&zip_files(&[("designmap.xml", &designmap)]), &|_| None).unwrap();
+    let item = |n: usize| d.spreads[0].items[n].clone();
+    // Path order: top-left, bottom-left, bottom-right, top-right.
+    let shapes = |n: usize| item(n).corners.corners.map(|c| (c.shape, c.size));
+    assert_eq!(shapes(0), [(C::Rounded, 6.0), (C::Rounded, 12.0), (C::InverseRounded, 11.34), (C::Bevel, 12.0)]);
+    assert_eq!(shapes(1), [(C::Inset, 5.0), (C::Bevel, 5.0), (C::Bevel, 5.0), (C::Bevel, 5.0)]);
+    assert!(item(2).corners.corners.iter().enumerate().all(|(i, c)| (c.shape == C::Rounded) == (i == 3)));
+    assert_eq!(item(2).corners.corners[3].size, 11.34);
+    assert_eq!(shapes(3), [(C::Rounded, 6.0), (C::Rounded, 12.0), (C::Rounded, 12.0), (C::Rounded, 12.0)]);
+    let tf = item(0);
+    let o = &tf.text_frame().unwrap().options;
+    assert_eq!((o.columns, o.gutter, o.inset), (3, 18.0, [3.0; 4]));
+    assert_eq!((o.vertical_justification, o.first_baseline, o.first_baseline_min), (VerticalJustification::Center, FirstBaseline::Leading, 4.0));
+    assert_eq!((o.ignore_wrap, o.auto_size, o.auto_size_ref), (true, AutoSize::HeightOnly, 4));
+}
+#[test]
+fn type_on_a_path_keeps_its_start_and_end_brackets() {
+    use designcraft_geom::{Anchor, PathData, Point, SubPath};
+    for end in [Some(250.0), None] {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let id = designcraft_doc::ItemId(d.alloc());
+        let line = PathData::single(SubPath::new(vec![Anchor::corner(Point::new(100.0, 300.0)), Anchor::corner(Point::new(500.0, 300.0))], false));
+        let mut it = designcraft_doc::Item::new(id, lid, Shape::GraphicLine, line);
+        let sid = designcraft_doc::StoryId(d.alloc());
+        let mut tf = designcraft_doc::TextFrame { story: sid, options: Default::default() };
+        tf.options.path = Some(designcraft_doc::PathType { start: 30.0, end, ..Default::default() });
+        it.content = designcraft_doc::Content::Text(tf);
+        let mut story = designcraft_doc::Story::with_text(sid, "Along", Default::default());
+        story.frames = vec![id];
+        d.stories.insert(sid, std::sync::Arc::new(story));
+        d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+        let back = import_idml(&export_idml(&d)).unwrap();
+        let pt = back.spreads[0].items[0].text_frame().unwrap().options.path.clone().unwrap();
+        assert!((pt.start - 30.0).abs() < 1e-6, "{pt:?}");
+        assert_eq!(pt.end.map(|e| e.round()), end, "an end bracket at the path's end is no end bracket");
+    }
+}
+
+#[test]
+fn frame_preference_import_caps_column_count_without_composition() {
+    for (raw, expected) in [("4000000000", 216), ("1e300", 216), ("-100", 1), ("0", 1), ("NaN", 1), ("inf", 1), ("-inf", 1)] {
+        for attribute in [true, false] {
+            let preference = if attribute {
+                format!(r#"<TextFramePreference TextColumnCount="{raw}"/>"#)
+            } else {
+                format!(
+                    r#"<TextFramePreference><Properties><TextColumnCount type="number">{raw}</TextColumnCount></Properties></TextFramePreference>"#
+                )
+            };
+            let document = format!(
+                r#"<Document><Story Self="s"/><Spread Self="spread"><Page Self="page"/><TextFrame Self="frame" ParentStory="s">{preference}</TextFrame></Spread></Document>"#
+            );
+            let d = import_idml_with(&zip_files(&[("designmap.xml", &document)]), &|_| None).unwrap();
+            let frame = d.spreads[0].items[0].text_frame().unwrap();
+            // Inspect imported data only: never compose an unbounded input value.
+            assert_eq!(frame.options.columns, expected, "{raw}, attribute={attribute}");
+        }
+    }
+}
+
+#[test]
+fn frame_preference_property_color_resolves_for_frames_and_object_styles() {
+    let document = r#"<Document>
+<Color Self="Color/Near" Model="Process" Space="RGB" ColorValue="255 0 0" Name="Near" Visible="true"/>
+<Color Self="Color/Far" Model="Process" Space="RGB" ColorValue="0 0 255" Name="Far" Visible="true"/>
+<RootObjectStyleGroup Self="root">
+<ObjectStyle Self="ObjectStyle/Base" Name="Base" EnableTextFrameGeneralOptions="true"><TextFramePreference ColumnRuleStrokeColor="Color/Far"/></ObjectStyle>
+<ObjectStyle Self="ObjectStyle/Child" Name="Child" EnableTextFrameGeneralOptions="true"><Properties><BasedOn type="object">ObjectStyle/Base</BasedOn></Properties><TextFramePreference><Properties><ColumnRuleStrokeColor type="object">Color/Near</ColumnRuleStrokeColor></Properties></TextFramePreference></ObjectStyle>
+</RootObjectStyleGroup>
+<Story Self="s"/><Spread Self="spread"><Page Self="page"/>
+<TextFrame Self="local" ParentStory="s" AppliedObjectStyle="ObjectStyle/Base"><TextFramePreference><Properties><ColumnRuleStrokeColor type="object">Color/Near</ColumnRuleStrokeColor></Properties></TextFramePreference></TextFrame>
+<TextFrame Self="inherited" ParentStory="s" AppliedObjectStyle="ObjectStyle/Child"/>
+<TextFrame Self="attribute" ParentStory="s" AppliedObjectStyle="ObjectStyle/Child"><TextFramePreference ColumnRuleStrokeColor="Color/Far"><Properties><ColumnRuleStrokeColor type="object">Color/Near</ColumnRuleStrokeColor></Properties></TextFramePreference></TextFrame>
+<TextFrame Self="invalid" ParentStory="s" AppliedObjectStyle="ObjectStyle/Child"><TextFramePreference><Properties><ColumnRuleStrokeColor type="object">missing</ColumnRuleStrokeColor></Properties></TextFramePreference></TextFrame>
+</Spread></Document>"#;
+    let d = import_idml_with(&zip_files(&[("designmap.xml", document)]), &|_| None).unwrap();
+    let colors: Vec<_> = d.spreads[0].items.iter().map(|it| it.text_frame().unwrap().options.column_rule_color.as_str()).collect();
+    assert_eq!(colors, vec!["Near", "Near", "Far", designcraft_color::swatch::NONE]);
+    assert_eq!(d.styles.object_style("Child").unwrap().text_frame.as_ref().unwrap().column_rule_color, "Near");
 }

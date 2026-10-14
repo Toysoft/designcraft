@@ -85,7 +85,7 @@ pub fn unescape_id(s: &str) -> String {
 pub const PARA_BUILTINS: &[(&str, &str)] = &[("[No Paragraph Style]", "$ID/[No paragraph style]"), ("[Basic Paragraph]", "$ID/NormalParagraphStyle")];
 pub const CHAR_BUILTINS: &[(&str, &str)] = &[("[None]", "$ID/[No character style]")];
 pub const CELL_BUILTINS: &[(&str, &str)] = &[("[None]", "$ID/[None]")];
-pub const TABLE_BUILTINS: &[(&str, &str)] = &[("[Basic Table]", "$ID/[Basic Table]")];
+pub const TABLE_BUILTINS: &[(&str, &str)] = &[("[Basic Table]", "$ID/[Basic Table]"), ("[No table style]", "$ID/[No table style]")];
 pub const OBJECT_BUILTINS: &[(&str, &str)] =
     &[("[None]", "$ID/[None]"), ("[Basic Graphics Frame]", "$ID/[Normal Graphics Frame]"), ("[Basic Text Frame]", "$ID/[Normal Text Frame]")];
 
@@ -424,10 +424,11 @@ pub fn first_baseline_out(f: FirstBaseline) -> &'static str {
         FirstBaseline::Leading => "LeadingOffset",
         FirstBaseline::XHeight => "XHeight",
         FirstBaseline::Fixed => "FixedHeight",
+        FirstBaseline::EmboxHeight => "EmboxHeight",
     }
 }
 pub fn first_baseline_in(s: &str) -> FirstBaseline {
-    [FirstBaseline::CapHeight, FirstBaseline::Leading, FirstBaseline::XHeight, FirstBaseline::Fixed]
+    [FirstBaseline::CapHeight, FirstBaseline::Leading, FirstBaseline::XHeight, FirstBaseline::Fixed, FirstBaseline::EmboxHeight]
         .into_iter()
         .find(|m| first_baseline_out(*m) == s)
         .unwrap_or(FirstBaseline::Ascent)
@@ -447,6 +448,7 @@ pub fn auto_size_in(s: &str) -> AutoSize {
         .find(|m| auto_size_out(*m) == s)
         .unwrap_or(AutoSize::Off)
 }
+
 /// Auto-size reference points in our 0..9 order (row-major, top-left first).
 pub const REF_POINTS: [&str; 9] = [
     "TopLeftPoint",
@@ -462,7 +464,7 @@ pub const REF_POINTS: [&str; 9] = [
 
 pub fn number_style_out(n: NumberStyle) -> &'static str {
     match n {
-        NumberStyle::Arabic | NumberStyle::ArabicLeadingZero => "Arabic",
+        NumberStyle::Arabic | NumberStyle::ArabicLeadingZero | NumberStyle::ArabicThreeDigits | NumberStyle::ArabicFourDigits => "Arabic",
         NumberStyle::UpperRoman => "UpperRoman",
         NumberStyle::LowerRoman => "LowerRoman",
         NumberStyle::UpperLetters => "UpperLetters",
@@ -541,17 +543,55 @@ pub fn pt(x: f64, y: f64) -> String {
     format!("{} {}", num(x), num(y))
 }
 
+// ---------- list numbering ----------
+
+/// A paragraph's `NumberingFormat` ("A, B, C, D...", "001, 002, 003...", …), told apart by its
+/// first item. None for formats with no counterpart (CJK, Arabic, Hebrew, …).
+pub fn numbering_format_in(s: &str) -> Option<NumberStyle> {
+    Some(match s.split(',').next().unwrap_or("").trim() {
+        "1" => NumberStyle::Arabic,
+        "01" => NumberStyle::ArabicLeadingZero,
+        "001" => NumberStyle::ArabicThreeDigits,
+        "0001" => NumberStyle::ArabicFourDigits,
+        "I" => NumberStyle::UpperRoman,
+        "i" => NumberStyle::LowerRoman,
+        "A" => NumberStyle::UpperLetters,
+        "a" => NumberStyle::LowerLetters,
+        _ => return None,
+    })
+}
+pub fn numbering_format_out(n: NumberStyle) -> &'static str {
+    match n {
+        NumberStyle::Arabic | NumberStyle::Symbols => "1, 2, 3, 4...",
+        NumberStyle::ArabicLeadingZero => "01, 02, 03...",
+        NumberStyle::ArabicThreeDigits => "001, 002, 003...",
+        NumberStyle::ArabicFourDigits => "0001, 0002, 0003...",
+        NumberStyle::UpperRoman => "I, II, III, IV...",
+        NumberStyle::LowerRoman => "i, ii, iii, iv...",
+        NumberStyle::UpperLetters => "A, B, C, D...",
+        NumberStyle::LowerLetters => "a, b, c, d...",
+    }
+}
+/// Label text in IDML metacharacters (a tab is `^t`).
+pub fn list_text_out(s: &str) -> String {
+    s.replace('\t', "^t")
+}
+
 // ---------- footnote options ----------
 
 pub fn note_style_out(n: NumberStyle) -> &'static str {
     match n {
         NumberStyle::ArabicLeadingZero => "SingleLeadingZeros",
+        NumberStyle::ArabicThreeDigits => "DoubleLeadingZeros",
+        NumberStyle::ArabicFourDigits => "TripleLeadingZeros",
         n => number_style_out(n),
     }
 }
 pub fn note_style_in(s: &str) -> NumberStyle {
     match s {
-        "SingleLeadingZeros" | "DoubleLeadingZeros" => NumberStyle::ArabicLeadingZero,
+        "SingleLeadingZeros" => NumberStyle::ArabicLeadingZero,
+        "DoubleLeadingZeros" => NumberStyle::ArabicThreeDigits,
+        "TripleLeadingZeros" => NumberStyle::ArabicFourDigits,
         "Asterisks" => NumberStyle::Symbols,
         s => number_style_in(s),
     }
@@ -597,6 +637,7 @@ pub fn nested_until_out(u: &designcraft_doc::NestedUntil) -> (&'static str, Stri
         N::ForcedLineBreak => e("ForcedLineBreak"),
         N::EmSpace => e("EmSpaces"),
         N::EnSpace => e("EnSpaces"),
+        N::Dropcap => e("Dropcap"),
         N::Chars(c) => ("string", c.clone()),
     }
 }
@@ -615,6 +656,7 @@ pub fn nested_until_in(ty: &str, v: &str) -> designcraft_doc::NestedUntil {
         "ForcedLineBreak" => N::ForcedLineBreak,
         "EmSpaces" => N::EmSpace,
         "EnSpaces" => N::EnSpace,
+        "Dropcap" => N::Dropcap,
         _ => N::Words,
     }
 }

@@ -80,6 +80,8 @@ fn metachars(s: &str, grep: bool) -> String {
             ("~M", "\u{E002}"),
             ("~R", "\u{E003}"),
             ("~P", "\u{E004}"),
+            ("~L", "\u{E011}"),
+            ("~E", "\u{E012}"),
             ("~=", "\u{2014}"),
             ("~_", "\u{2014}"),
             ("~-", "\u{AD}"),
@@ -179,6 +181,7 @@ fn change(s: &mut Session, p: &Value) -> Result<Value> {
             over.set_json(k, v).map_err(|e| bad("find.change", e))?;
         }
     }
+    super::text::validate_char_fill(&s.doc()?.doc, &over, "find.change")?;
     let targets = scope(s, p)?;
     s.edit(|d, sel| {
         let mut count = 0usize;

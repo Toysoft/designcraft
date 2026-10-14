@@ -55,6 +55,8 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    ("Reverse Path", ["Pfadrichtung umkehren", "Inverser le tracé", "Invertir trazado", "パスの方向反転", "反转路径"]),
+    ("Set Anchor", ["Ankerpunkt festlegen", "Définir le point d’ancrage", "Definir punto de ancla", "アンカーポイントを設定", "设置锚点"]),
     ("Clear", ["Löschen", "Effacer", "Borrar", "消去", "清除"]),
     ("Duplicate", ["Duplizieren", "Dupliquer", "Duplicar", "複製", "重复"]),
     ("Select All", ["Alles auswählen", "Tout sélectionner", "Seleccionar todo", "すべてを選択", "全选"]),
@@ -88,6 +90,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Tate-Chu-Yoko", ["Tate-Chu-Yoko", "Tate-Chu-Yoko", "Tate-Chu-Yoko", "縦中横", "纵中横"]),
     ("Ruby…", ["Ruby …", "Ruby…", "Ruby…", "ルビ…", "旁注…"]),
     ("Kenten", ["Kenten", "Kenten", "Kenten", "圏点", "圈点"]),
+    ("Warichu", ["Warichu", "Warichu", "Warichu", "割り注", "割注"]),
     ("Font", ["Schriftart", "Police", "Fuente", "フォント", "字体"]),
     ("Size", ["Schriftgrad", "Corps", "Tamaño", "サイズ", "大小"]),
     ("Character", ["Zeichen", "Caractère", "Carácter", "文字", "字符"]),
@@ -228,6 +231,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Art", ["Art", "Art", "Art", "Art", "画板"]),
     ("Based On:", ["Based On:", "Based On:", "Based On:", "Based On:", "基于："]),
     ("Bleed", ["Bleed", "Bleed", "Bleed", "Bleed", "出血"]),
+    ("Bleed Marks", ["Beschnittmarken", "Traits de fond perdu", "Marcas de sangrado", "塗り足しマーク", "出血标记"]),
     ("Body Rows", ["Body Rows", "Body Rows", "Body Rows", "Body Rows", "表体行"]),
     ("Bottom", ["Bottom", "Bottom", "Bottom", "Bottom", "底部"]),
     ("Break Link to Style", ["Break Link to Style", "Break Link to Style", "Break Link to Style", "Break Link to Style", "断开与样式的链接"]),
@@ -274,6 +278,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Create Table", ["Create Table", "Create Table", "Create Table", "Create Table", "创建表"]),
     ("Create Table…", ["Create Table…", "Create Table…", "Create Table…", "Create Table…", "创建表…"]),
     ("Crop", ["Crop", "Crop", "Crop", "Crop", "裁剪"]),
+    ("Crop Marks", ["Schnittmarken", "Traits de coupe", "Marcas de recorte", "トンボ", "裁切标记"]),
     ("Crop to:", ["Crop to:", "Crop to:", "Crop to:", "Crop to:", "裁剪到："]),
     ("Cursor Key:", ["Cursor Key:", "Cursor Key:", "Cursor Key:", "Cursor Key:", "光标键："]),
     ("Default", ["Default", "Default", "Default", "Default", "默认"]),
@@ -293,6 +298,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Duplicate Spread", ["Duplicate Spread", "Duplicate Spread", "Duplicate Spread", "Duplicate Spread", "复制跨页"]),
     ("Email", ["Email", "Email", "Email", "Email", "电子邮件"]),
     ("Embed", ["Embed", "Embed", "Embed", "Embed", "嵌入"]),
+    ("Export PDF", ["PDF exportieren", "Exporter en PDF", "Exportar PDF", "PDF を書き出し", "导出PDF"]),
     ("Export XML…", ["Export XML…", "Export XML…", "Export XML…", "Export XML…", "导出XML…"]),
     ("Fast", ["Fast", "Fast", "Fast", "Fast", "快速"]),
     (
@@ -310,6 +316,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ),
     ("Fit Content to Frame", ["Fit Content to Frame", "Fit Content to Frame", "Fit Content to Frame", "Fit Content to Frame", "内容适合框架"]),
     ("Fitting:", ["Fitting:", "Fitting:", "Fitting:", "Fitting:", "适合："]),
+    (
+        "Flattener preset",
+        ["Voreinstellung für Transparenzreduzierung", "Préréglage d'aplatissement", "Preajuste de acoplado", "透明分割プリセット", "拼合器预设"],
+    ),
     ("Font Family:", ["Font Family:", "Font Family:", "Font Family:", "Font Family:", "字体系列："]),
     ("Font Size:", ["Font Size:", "Font Size:", "Font Size:", "Font Size:", "字体大小："]),
     ("Font Style:", ["Font Style:", "Font Style:", "Font Style:", "Font Style:", "字体样式："]),
@@ -327,6 +337,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Height", ["Height", "Height", "Height", "Height", "高度"]),
     ("Height:", ["Height:", "Height:", "Height:", "Height:", "高度："]),
     ("High Quality", ["High Quality", "High Quality", "High Quality", "High Quality", "高品质"]),
+    ("Desktop Printing", ["Bürodruck", "Impression bureautique", "Impresión de oficina", "オフィス印刷", "办公打印"]),
     (
         "Horizontal Gridline Every:",
         ["Horizontal Gridline Every:", "Horizontal Gridline Every:", "Horizontal Gridline Every:", "Horizontal Gridline Every:", "水平网格线间隔："],
@@ -335,6 +346,16 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Hyphenate", ["Hyphenate", "Hyphenate", "Hyphenate", "Hyphenate", "连字符"]),
     ("Import Options", ["Import Options", "Import Options", "Import Options", "Import Options", "导入选项"]),
     ("Import XML…", ["Import XML…", "Import XML…", "Import XML…", "Import XML…", "导入XML…"]),
+    (
+        "Include document bleed",
+        [
+            "Dokumentbeschnitt einschließen",
+            "Inclure le fond perdu du document",
+            "Incluir sangrado del documento",
+            "ドキュメントの塗り足しを含める",
+            "包含文档出血",
+        ],
+    ),
     ("Increment Every:", ["Increment Every:", "Increment Every:", "Increment Every:", "Increment Every:", "递增步长："]),
     ("Ink Manager", ["Ink Manager", "Ink Manager", "Ink Manager", "Ink Manager", "油墨管理器"]),
     ("Insert Column", ["Insert Column", "Insert Column", "Insert Column", "Insert Column", "插入列"]),
@@ -354,6 +375,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Load…", ["Load…", "Load…", "Load…", "Load…", "加载…"]),
     ("Make Compound", ["Make Compound", "Make Compound", "Make Compound", "Make Compound", "建立复合路径"]),
     ("Margins", ["Margins", "Margins", "Margins", "Margins", "边距"]),
+    ("Marks and Bleeds", ["Marken und Beschnitt", "Traits et fond perdu", "Marcas y sangrado", "トンボと塗り足し", "标记和出血"]),
     ("Maximum", ["Maximum", "Maximum", "Maximum", "Maximum", "最大"]),
     ("Menu Customization", ["Menu Customization", "Menu Customization", "Menu Customization", "Menu Customization", "菜单自定"]),
     (
@@ -424,6 +446,9 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("OpenType", ["OpenType", "OpenType", "OpenType", "OpenType", "OpenType"]),
     ("Orientation:", ["Orientation:", "Orientation:", "Orientation:", "Orientation:", "方向："]),
     ("Outside", ["Outside", "Outside", "Outside", "Outside", "外侧"]),
+    ("Page Information", ["Seiteninformationen", "Informations sur la page", "Información de página", "ページ情報", "页面信息"]),
+    ("Page Range", ["Seitenbereich", "Plage de pages", "Intervalo de páginas", "ページ範囲", "页面范围"]),
+    ("Page Range:", ["Seitenbereich:", "Plage de pages :", "Intervalo de páginas:", "ページ範囲:", "页面范围："]),
     ("Pages:", ["Pages:", "Pages:", "Pages:", "Pages:", "页面："]),
     ("Paragraph Composer", ["Paragraph Composer", "Paragraph Composer", "Paragraph Composer", "Paragraph Composer", "段落排版器"]),
     (
@@ -431,6 +456,8 @@ const TABLE: &[(&str, [&str; 5])] = &[
         ["Paragraph Style Options", "Paragraph Style Options", "Paragraph Style Options", "Paragraph Style Options", "段落样式选项"],
     ),
     ("Paragraph Style:", ["Paragraph Style:", "Paragraph Style:", "Paragraph Style:", "Paragraph Style:", "段落样式："]),
+    ("PDF/A-2b", ["PDF/A-2b", "PDF/A-2b", "PDF/A-2b", "PDF/A-2b", "PDF/A-2b"]),
+    ("PDF/X-4", ["PDF/X-4", "PDF/X-4", "PDF/X-4", "PDF/X-4", "PDF/X-4"]),
     ("Place PDF", ["Place PDF", "Place PDF", "Place PDF", "Place PDF", "置入PDF"]),
     ("Plain Text", ["Plain Text", "Plain Text", "Plain Text", "Plain Text", "纯文本"]),
     ("Polygon Settings", ["Polygon Settings", "Polygon Settings", "Polygon Settings", "Polygon Settings", "多边形设置"]),
@@ -440,6 +467,8 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Preferences", ["Preferences", "Preferences", "Preferences", "Preferences", "首选项"]),
     ("Prefix:", ["Prefix:", "Prefix:", "Prefix:", "Prefix:", "前缀："]),
     ("Preset", ["Preset", "Preset", "Preset", "Preset", "预设"]),
+    ("Preset:", ["Voreinstellung:", "Préréglage :", "Preajuste:", "プリセット:", "预设："]),
+    ("Commercial Printing", ["Druckerei", "Impression commerciale", "Impresión comercial", "商業印刷", "商业印刷"]),
     ("Print", ["Print", "Print", "Print", "Print", "打印"]),
     ("Printer:", ["Printer:", "Printer:", "Printer:", "Printer:", "打印机："]),
     ("Printing / Exporting:", ["Printing / Exporting:", "Printing / Exporting:", "Printing / Exporting:", "Printing / Exporting:", "打印/导出："]),
@@ -507,11 +536,14 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Single-line", ["Single-line", "Single-line", "Single-line", "Single-line", "单行"]),
     ("Single-line Composer", ["Single-line Composer", "Single-line Composer", "Single-line Composer", "Single-line Composer", "单行排版器"]),
     ("Size:", ["Size:", "Size:", "Size:", "Size:", "大小："]),
+    ("Screen and Email", ["Bildschirm und E-Mail", "Écran et e-mail", "Pantalla y correo", "画面とメール", "屏幕和电子邮件"]),
     (
         "Space Between Footnotes:",
         ["Space Between Footnotes:", "Space Between Footnotes:", "Space Between Footnotes:", "Space Between Footnotes:", "脚注间距："],
     ),
     ("Speed", ["Speed", "Speed", "Speed", "Speed", "速度"]),
+    ("Standard", ["Standard", "Norme", "Estándar", "標準", "标准"]),
+    ("Standard:", ["Standard:", "Norme :", "Estándar:", "標準:", "标准："]),
     ("Star Inset:", ["Star Inset:", "Star Inset:", "Star Inset:", "Star Inset:", "星形内边距："]),
     ("Start Page #:", ["Start Page #:", "Start Page #:", "Start Page #:", "Start Page #:", "起始页码："]),
     ("Start at:", ["Start at:", "Start at:", "Start at:", "Start at:", "起始编号："]),
@@ -523,6 +555,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Suffix:", ["Suffix:", "Suffix:", "Suffix:", "Suffix:", "后缀："]),
     ("Synchronize", ["Synchronize", "Synchronize", "Synchronize", "Synchronize", "同步"]),
     ("Tag:", ["Tag:", "Tag:", "Tag:", "Tag:", "标签："]),
+    ("Tagged PDF", ["Markiertes PDF", "PDF balisé", "PDF etiquetado", "タグ付き PDF", "带标签的 PDF"]),
     ("Text Frame", ["Text Frame", "Text Frame", "Text Frame", "Text Frame", "文本框架"]),
     ("Text Frame Options", ["Text Frame Options", "Text Frame Options", "Text Frame Options", "Text Frame Options", "文本框架选项"]),
     ("Text Message", ["Text Message", "Text Message", "Text Message", "Text Message", "短信"]),
@@ -615,6 +648,15 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Fill (X)", ["Fill (X)", "Fill (X)", "Fill (X)", "Fill (X)", "填色 (X)"]),
     ("Stroke (X)", ["Stroke (X)", "Stroke (X)", "Stroke (X)", "Stroke (X)", "描边 (X)"]),
     ("Apply None (/)", ["Apply None (/)", "Apply None (/)", "Apply None (/)", "Apply None (/)", "应用无 (/)"]),
+    (
+        "Default Fill and Stroke",
+        ["Default Fill and Stroke", "Default Fill and Stroke", "Default Fill and Stroke", "Default Fill and Stroke", "默认填色和描边"],
+    ),
+    ("Swap Fill and Stroke", ["Swap Fill and Stroke", "Swap Fill and Stroke", "Swap Fill and Stroke", "Swap Fill and Stroke", "交换填色和描边"]),
+    (
+        "Toggle Fill and Stroke",
+        ["Toggle Fill and Stroke", "Toggle Fill and Stroke", "Toggle Fill and Stroke", "Toggle Fill and Stroke", "切换填色和描边"],
+    ),
     ("Reverse the gradient", ["Reverse the gradient", "Reverse the gradient", "Reverse the gradient", "Reverse the gradient", "反转渐变"]),
     ("Style source", ["Style source", "Style source", "Style source", "Style source", "样式源"]),
     ("Open", ["Open", "Open", "Open", "Open", "打开"]),
@@ -668,6 +710,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ),
     ("for", ["for", "pour", "por", "に対して", "行"]),
     ("About DesignCraft", ["About DesignCraft", "About DesignCraft", "About DesignCraft", "About DesignCraft", "关于 DesignCraft"]),
+    ("Quit DesignCraft", ["DesignCraft beenden", "Quitter DesignCraft", "Salir de DesignCraft", "DesignCraft を終了", "退出 DesignCraft"]),
     ("Accept All Changes", ["Accept All Changes", "Accept All Changes", "Accept All Changes", "Accept All Changes", "接受所有更改"]),
     ("Activate Document", ["Activate Document", "Activate Document", "Activate Document", "Activate Document", "激活文档"]),
     ("Add Anchor Point", ["Add Anchor Point", "Add Anchor Point", "Add Anchor Point", "Add Anchor Point", "添加锚点"]),
@@ -707,6 +750,22 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ),
     ("Apply Cell Style", ["Apply Cell Style", "Apply Cell Style", "Apply Cell Style", "Apply Cell Style", "应用单元格样式"]),
     ("Apply Color", ["Apply Color", "Apply Color", "Apply Color", "Apply Color", "应用颜色"]),
+    ("Repeat", ["Wiederholen", "Répéter", "Repetir", "繰り返し", "重复"]),
+    ("Count:", ["Anzahl:", "Nombre :", "Recuento:", "繰り返し数:", "计数:"]),
+    ("Create as a grid", ["Als Raster erstellen", "Créer en tant que grille", "Crear como cuadrícula", "グリッドとして作成", "创建为网格"]),
+    ("Rows:", ["Zeilen:", "Rangées :", "Filas:", "行:", "行:"]),
+    ("Columns:", ["Spalten:", "Colonnes :", "Columnas:", "列:", "列:"]),
+    ("Vertical:", ["Vertikal:", "Vertical :", "Vertical:", "垂直方向:", "垂直:"]),
+    ("Horizontal:", ["Horizontal:", "Horizontal :", "Horizontal:", "水平方向:", "水平:"]),
+    ("Invalid value", ["Ungültiger Wert", "Valeur non valide", "Valor no válido", "無効な値", "无效值"]),
+    ("Isolate Blending", ["Füllmethode isolieren", "Isoler le mode de fusion", "Aislar fusión", "描画モードを分離", "分离混合"]),
+    ("Knockout Group", ["Aussparungsgruppe", "Groupe de masquage", "Grupo de exclusión", "グループの抜き", "挖空组"]),
+    ("Object:", ["Objekt:", "Objet :", "Objeto:", "オブジェクト:", "对象:"]),
+    ("Group:", ["Gruppe:", "Groupe :", "Grupo:", "グループ:", "编组:"]),
+    (
+        "Sample Color (Eyedropper)",
+        ["Farbe aufnehmen (Pipette)", "Prélever la couleur (Pipette)", "Tomar color (Cuentagotas)", "カラーを抽出 (スポイト)", "取样颜色 (吸管)"],
+    ),
     ("Apply Condition", ["Apply Condition", "Apply Condition", "Apply Condition", "Apply Condition", "应用条件"]),
     (
         "Apply Parent to Pages…",
@@ -734,6 +793,8 @@ const TABLE: &[(&str, [&str; 5])] = &[
         "Community & Project Links",
         ["Community & Project Links", "Community & Project Links", "Community & Project Links", "Community & Project Links", "社区与项目链接"],
     ),
+    ("Compress images", ["Bilder komprimieren", "Compresser les images", "Comprimir imágenes", "画像を圧縮", "压缩图像"]),
+    ("Compression", ["Komprimierung", "Compression", "Compresión", "圧縮", "压缩"]),
     ("Conditions", ["Conditions", "Conditions", "Conditions", "Conditions", "条件"]),
     ("Container", ["Container", "Container", "Container", "Container", "容器"]),
     ("Content", ["Content", "Content", "Content", "Content", "内容"]),
@@ -1722,13 +1783,13 @@ const TABLE: &[(&str, [&str; 5])] = &[
         ],
     ),
     (
-        "Select an object to color its fill or stroke.",
+        "Select an object or text to color its fill or stroke.",
         [
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "选择一个对象以设置其填色或描边颜色。",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "选择一个对象或文本以设置其填色或描边颜色。",
         ],
     ),
     (
@@ -1908,6 +1969,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cap Height", ["Cap Height", "Cap Height", "Cap Height", "Cap Height", "大写字母高度"]),
     ("Leading", ["Leading", "Leading", "Leading", "Leading", "行距"]),
     ("x Height", ["x Height", "x Height", "x Height", "x Height", "x 字高"]),
+    ("Em Box Height", ["Em Box Height", "Em Box Height", "Em Box Height", "Em Box Height", "全角字框高度"]),
     ("Fixed", ["Fixed", "Fixed", "Fixed", "Fixed", "固定"]),
     ("Never (continuous)", ["Never (continuous)", "Never (continuous)", "Never (continuous)", "Never (continuous)", "从不（连续编号）"]),
     ("Page", ["Page", "Page", "Page", "Page", "页面"]),
@@ -1933,6 +1995,23 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("forcedLineBreak", ["forcedLineBreak", "forcedLineBreak", "forcedLineBreak", "forcedLineBreak", "强制换行符"]),
     ("emSpace", ["emSpace", "emSpace", "emSpace", "emSpace", "全角空格"]),
     ("enSpace", ["enSpace", "enSpace", "enSpace", "enSpace", "半角空格"]),
+    ("dropcap", ["Initiale", "lettrine", "capitular", "ドロップキャップ", "首字下沉"]),
+    ("Drop Caps", ["Initialen", "Lettrines", "Capitulares", "ドロップキャップ", "首字下沉"]),
+    ("Lines:", ["Zeilen:", "Lignes :", "Líneas:", "行数：", "行数："]),
+    ("Characters:", ["Zeichen:", "Caractères :", "Caracteres:", "文字数：", "字符数："]),
+    ("Drop Lines", ["Initialzeilen", "Lignes lettrine", "Líneas capitular", "ドロップ行数", "下沉行数"]),
+    ("Drop Chars", ["Initialzeichen", "Car. lettrine", "Car. capitular", "ドロップ文字数", "下沉字符数"]),
+    ("Align Left Edge", ["Linke Kante ausrichten", "Aligner le bord gauche", "Alinear borde izquierdo", "左端揃え", "左边缘对齐"]),
+    (
+        "Scale for Descenders",
+        [
+            "Für Unterlängen skalieren",
+            "Mise à l'échelle pour les jambages",
+            "Escalar para trazos descendentes",
+            "ディセンダーに合わせて拡大・縮小",
+            "为下伸部分缩放",
+        ],
+    ),
     ("chars", ["chars", "chars", "chars", "chars", "指定字符"]),
     ("[Automatic]", ["[Automatic]", "[Automatic]", "[Automatic]", "[Automatic]", "[自动]"]),
     ("Tracking:", ["Tracking:", "Tracking:", "Tracking:", "Tracking:", "字距调整："]),
@@ -2777,6 +2856,9 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Paragraph Rules", ["Absatzlinien", "Filets de paragraphe", "Filetes de párrafo", "段落境界線", "段落线"]),
     ("Rule Below", ["Linie unterhalb", "Filet après", "Filete después", "後境界線", "下方横线"]),
     ("Tint:", ["Farbton:", "Teinte:", "Matiz:", "濃淡:", "色调："]),
+    ("Slug", ["Infobereich", "Ligne-bloc", "Indicaciones", "印刷可能領域", "辅助信息区"]),
+    ("Presentation", ["Präsentation", "Présentation", "Presentación", "プレゼンテーション", "演示文稿"]),
+    ("Extras", ["Extras", "Options supplémentaires", "Extras", "エクストラ", "附加"]),
     ("Column", ["Spalte", "Colonne", "Columna", "段", "栏"]),
 ];
 
@@ -2996,8 +3078,24 @@ mod tests {
             ("Tate-Chu-Yoko", "縦中横"),
             ("Ruby…", "ルビ…"),
             ("Kenten", "圏点"),
+            ("Warichu", "割り注"),
         ] {
             assert_eq!(tr("ja", en), ja);
         }
+    }
+
+    #[test]
+    fn pdf_export_dialog_strings_are_translated() {
+        // Translated labels in every supported language.
+        assert_ne!(tr("zh", "Crop Marks"), "Crop Marks");
+        assert_ne!(tr("de", "Tagged PDF"), "Tagged PDF");
+        assert_ne!(tr("ar", "Include document bleed"), "Include document bleed");
+        assert_ne!(tr("pt-br", "Compress images"), "Compress images");
+        // English returns the key unchanged.
+        assert_eq!(tr("", "Export PDF"), "Export PDF");
+        // An unknown string still falls through unchanged.
+        assert_eq!(tr("de", "Low Quality Print"), "Low Quality Print");
+        // Fixed standard names stay identical in every language.
+        assert_eq!(tr("ja", "PDF/X-4"), "PDF/X-4");
     }
 }

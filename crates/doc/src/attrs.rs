@@ -431,6 +431,8 @@ pub enum NestedUntil {
     ForcedLineBreak,
     EmSpace,
     EnSpace,
+    /// The paragraph's drop cap characters.
+    Dropcap,
     /// Any of these characters.
     Chars(String),
 }
@@ -464,6 +466,18 @@ pub struct NestedStyle {
 impl Default for NestedStyle {
     fn default() -> Self {
         NestedStyle { style: String::new(), through: true, count: 1, until: NestedUntil::Words }
+    }
+}
+
+impl NestedStyle {
+    /// The drop cap's character style as a nested style: `style` through 1 drop cap.
+    pub fn drop_cap(style: &str) -> Self {
+        NestedStyle { style: style.into(), through: true, count: 1, until: NestedUntil::Dropcap }
+    }
+
+    /// Is this the form a drop cap's character style takes at the start of a nested style list?
+    pub fn is_drop_cap(&self) -> bool {
+        self.until == NestedUntil::Dropcap && self.through && self.count == 1
     }
 }
 
@@ -530,12 +544,16 @@ pub struct TabStop {
     pub align_on: String,
 }
 
+/// The colour of a paragraph rule that follows the paragraph's text colour.
+pub const TEXT_COLOR: &str = "Text Color";
+
 /// A paragraph rule (Rule Above / Rule Below).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Rule {
     pub on: bool,
     pub weight: f64,
+    /// A swatch, or [`TEXT_COLOR`].
     pub color: String,
     pub tint: f32,
     /// Width: column (true) or text (false).
@@ -547,7 +565,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Rule { on: false, weight: 1.0, color: "[Black]".into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
+        Rule { on: false, weight: 1.0, color: TEXT_COLOR.into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
     }
 }
 
@@ -571,15 +589,33 @@ pub enum NumberStyle {
     LowerLetters,
     /// 01, 02, …
     ArabicLeadingZero,
+    /// 001, 002, …
+    ArabicThreeDigits,
+    /// 0001, 0002, …
+    ArabicFourDigits,
     /// *, †, ‡, §, ¶, ‖, then doubled (**, ††, …): footnotes.
     Symbols,
 }
 
+/// Numbers past this are written in Arabic digits by the styles that repeat characters (roman
+/// numerals, letters, symbols), so a hostile start number can't build a huge label.
+const MAX_REPEATED_FORM: u32 = 3999;
+
 impl NumberStyle {
     pub fn format(self, n: u32) -> String {
+        if n > MAX_REPEATED_FORM
+            && matches!(
+                self,
+                NumberStyle::UpperRoman | NumberStyle::LowerRoman | NumberStyle::UpperLetters | NumberStyle::LowerLetters | NumberStyle::Symbols
+            )
+        {
+            return n.to_string();
+        }
         match self {
             NumberStyle::Arabic => n.to_string(),
             NumberStyle::ArabicLeadingZero => format!("{n:02}"),
+            NumberStyle::ArabicThreeDigits => format!("{n:03}"),
+            NumberStyle::ArabicFourDigits => format!("{n:04}"),
             NumberStyle::UpperRoman => roman(n),
             NumberStyle::LowerRoman => roman(n).to_lowercase(),
             NumberStyle::UpperLetters => letters(n),
@@ -591,6 +627,58 @@ impl NumberStyle {
             }
         }
     }
+}
+
+/// Expand the metacharacters of a list's label text (`^t` tab, `^>` en space, `^^` caret, …),
+/// putting `number` in for `^#`. Level placeholders (`^1`…`^9`) and metacharacters with no
+/// meaning in a label are dropped; a label never holds a paragraph break.
+pub fn expand_list_text(s: &str, number: &str) -> String {
+    let mut out = String::with_capacity(s.len() + number.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '^' {
+            if c != '\n' && c != '\r' {
+                out.push(c);
+            }
+            continue;
+        }
+        let Some(m) = it.next() else {
+            out.push('^');
+            break;
+        };
+        let r = match m {
+            '#' => {
+                out.push_str(number);
+                continue;
+            }
+            '^' => '^',
+            't' => '\t',
+            'y' => crate::story::RIGHT_INDENT_TAB,
+            'i' => crate::story::INDENT_HERE,
+            'n' => crate::story::FORCED_LINE_BREAK,
+            'm' => '\u{2003}',
+            '>' => '\u{2002}',
+            'f' => '\u{2001}',
+            '|' => '\u{200A}',
+            '<' => '\u{2009}',
+            '/' => '\u{2007}',
+            '.' => '\u{2008}',
+            's' => '\u{A0}',
+            'S' => '\u{202F}',
+            '_' => '\u{2014}',
+            '=' => '\u{2013}',
+            '~' => '\u{2011}',
+            '{' => '\u{201C}',
+            '}' => '\u{201D}',
+            '[' => '\u{2018}',
+            ']' => '\u{2019}',
+            '"' => '"',
+            '\'' => '\'',
+            _ => continue,
+        };
+        out.push(r);
+    }
+    out
 }
 
 fn roman(mut n: u32) -> String {
@@ -692,6 +780,18 @@ attr_set! {
         ruby: String = String::new(),
         /// Kenten: an emphasis dot above each character.
         kenten: bool = false,
+        /// Warichu: the run is set in smaller lines stacked inside one line height.
+        warichu: bool = false,
+        /// How many warichu lines (InDesign's minimum is 2).
+        warichu_lines: u32 = 2,
+        /// Warichu size as a percentage of the parent size.
+        warichu_size: f64 = 50.0,
+        /// Extra points between warichu baselines. 0 is automatic (one small em).
+        warichu_line_spacing: f64 = 0.0,
+        warichu_alignment: crate::cjk::WarichuAlignment = crate::cjk::WarichuAlignment::Auto,
+        /// Minimum characters on a warichu line before a break, and on the line after it.
+        warichu_chars_before_break: u32 = 1,
+        warichu_chars_after_break: u32 = 1,
         /// Digits (World-Ready): how 0–9 are drawn.
         digits: Digits = Digits::Default,
         character_direction: crate::arabic::CharacterDirection = crate::arabic::CharacterDirection::Default,
@@ -727,8 +827,17 @@ attr_set! {
         last_line_indent: f64 = 0.0,
         space_before: f64 = 0.0,
         space_after: f64 = 0.0,
+        /// Drop cap: the paragraph's first `drop_cap_chars` characters (code points, never
+        /// splitting a base from its combining marks) set `drop_cap_lines` lines tall, in the
+        /// character style `drop_cap_style` ("" or `[None]`: the text's own formatting).
         drop_cap_lines: u32 = 0,
         drop_cap_chars: u32 = 0,
+        drop_cap_style: String = String::new(),
+        /// Align Left Edge: the drop cap's ink starts at the indent (its first letter's left side
+        /// bearing is taken off), and the lines beside it start where its advance ends.
+        drop_cap_align_left: bool = true,
+        /// Scale for Descenders (kept and round-tripped; doesn't change the layout).
+        drop_cap_scale_descenders: bool = false,
         /// Nested styles, in order from the paragraph start.
         nested_styles: Vec<NestedStyle> = Vec::new(),
         /// GREP styles: a character style for every match of a pattern (applied after nested).
@@ -773,11 +882,15 @@ attr_set! {
         // Keeps
         keep_with_next: u32 = 0,
         keep_lines_together: bool = false,
-        keep_all_lines: bool = true,
+        /// All lines in paragraph (true) or at start/end of paragraph (false).
+        keep_all_lines: bool = false,
         keep_first: u32 = 2,
         keep_last: u32 = 2,
         start_paragraph: StartParagraph = StartParagraph::Anywhere,
         span_columns: SpanColumns = SpanColumns::Single,
+        /// Split Columns: the space between sub-columns and the inset from the column's edges.
+        split_inside_gutter: f64 = 6.0,
+        split_outside_gutter: f64 = 0.0,
         rule_above: Rule = Rule::default(),
         rule_below: Rule = Rule::default(),
         tabs: Vec<TabStop> = Vec::new(),
@@ -788,7 +901,10 @@ attr_set! {
         start_at: Option<u32> = None,
         bullet_char: String = "\u{2022}".into(),
         number_style: NumberStyle = NumberStyle::Arabic,
-        /// Text after the number/bullet (`^t` = tab).
+        /// A numbered paragraph's label: `^#` is the number, other metacharacters expand as in
+        /// [`expand_list_text`].
+        number_expression: String = "^#.^t".into(),
+        /// Text after the bullet (metacharacters expand as in [`expand_list_text`]).
         list_separator: String = "\t".into(),
         balance_ragged: bool = false,
         optical_margin: bool = false,
@@ -837,6 +953,20 @@ impl ParaAttrs {
             fields.insert(k.clone(), v.clone());
         }
         self.set_json(key, &merged)
+    }
+}
+
+impl ParaProps {
+    /// The label of a numbered paragraph with number `n`.
+    pub fn number_label(&self, n: u32) -> String {
+        expand_list_text(&self.number_expression, &self.number_style.format(n))
+    }
+
+    /// The label of a bulleted paragraph.
+    pub fn bullet_label(&self) -> String {
+        let mut s: String = self.bullet_char.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        s.push_str(&expand_list_text(&self.list_separator, ""));
+        s
     }
 }
 
@@ -1023,5 +1153,22 @@ mod tests {
         assert_eq!(NumberStyle::UpperLetters.format(27), "AA");
         assert_eq!(NumberStyle::LowerLetters.format(28), "bb");
         assert_eq!(NumberStyle::ArabicLeadingZero.format(3), "03");
+        assert_eq!(NumberStyle::ArabicThreeDigits.format(7), "007");
+        assert_eq!(NumberStyle::ArabicFourDigits.format(12), "0012");
+        // Repeating forms stay small for huge numbers.
+        assert_eq!(NumberStyle::UpperRoman.format(u32::MAX), u32::MAX.to_string());
+        assert_eq!(NumberStyle::LowerLetters.format(u32::MAX), u32::MAX.to_string());
+        assert_eq!(NumberStyle::Symbols.format(u32::MAX), u32::MAX.to_string());
+    }
+
+    #[test]
+    fn list_labels_expand_metacharacters() {
+        let p = ParaProps { number_style: NumberStyle::UpperLetters, ..Default::default() };
+        assert_eq!(p.number_label(2), "B.\t");
+        let p = ParaProps { number_expression: "Tabel ^#^t".into(), ..Default::default() };
+        assert_eq!(p.number_label(3), "Tabel 3\t");
+        assert_eq!(expand_list_text("^2.^#.^>x^^^", "4"), ".4.\u{2002}x^^");
+        assert_eq!(expand_list_text("a\nb^p", "1"), "ab");
+        assert_eq!(ParaProps::default().bullet_label(), "\u{2022}\t");
     }
 }
