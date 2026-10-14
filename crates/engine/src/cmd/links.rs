@@ -146,6 +146,9 @@ fn list(d: &Document) -> Vec<Value> {
 #[cfg(not(target_arch = "wasm32"))]
 fn reload(path: &str) -> Result<(Vec<u8>, (u32, u32))> {
     let b = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    if designcraft_render::is_pdf(&b) {
+        designcraft_render::check_pdf_input_size(b.len()).map_err(|e| bad("links", format!("{path}: {e}")))?;
+    }
     let px = designcraft_render::image_size(&b).ok_or_else(|| bad("links", format!("{path}: unsupported or corrupt image")))?;
     Ok((b, px))
 }

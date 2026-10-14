@@ -203,3 +203,5 @@ Newest first.
 | 2026-10-10 | major | Restructured to the progress-docs standard; full re-measure; the "Working today" inventory moved to docs/target-app-parity.md, milestones to docs/roadmap.md, the CLI/MCP section left to docs/agents.md (which already covered it) |
 | 2026-10-04 | major | Parity estimate: breadth 99%, depth ~83%, ~170 h |
 | 2026-10-01 | major | First roadmap: status, milestones |
+
+- PDF reader infrastructure: pinned shared parsing/rasterization, transformed page-box geometry and explicit failures for known incomplete layered-PDF exports. Application ownership and parity targets are unchanged.
