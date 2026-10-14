@@ -128,6 +128,15 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-14 (cloud)** · Open and Save reach cloud storage through CollabCraft. The start screen
+  grows a Cloud section listing your own layouts and what other people shared. The same service is
+  offered beside This Computer in Save As. The application bar gains an account menu, a Share split
+  button and a presence row. The pages, the menus and every string a user reads are craft-ui's. All
+  twelve Craft apps therefore offer the same ones. DesignCraft answers three things of its own.
+  What a layout is, how bytes become one and back, and where the worker runs. A save carries the
+  etag the layout was read at as its condition. A stored copy somebody else has moved on therefore
+  refuses it. No provider credential, provider URL or provider protocol lives in this repository.
+  No readiness percentage change.
 - **2026-10-12** · Text threads by hand: click a selected text frame's in or out port to load
   the text cursor, then click a frame to thread it, click empty space for a column-wide frame or
   drag one (it snaps like frame drawing); Shift-click autoflows, Alt-click stays loaded on the
