@@ -1616,14 +1616,18 @@ fn cmyk_tiff(data: &[u8], mode: RasterMode, compression: &Compression) -> Option
 }
 
 /// A decoded CMYK raster as a DeviceCMYK image, downsampled when the colour class asks for it
-/// (always lossless: the inks are kept exactly).
+/// and a JPEG at its quality (lossless without one or with transparency).
 fn cmyk_image(mut r: designcraft_images::CmykRaster, mode: RasterMode, compression: &Compression) -> Option<Image> {
     // krilla panics when the channel lengths don't match the size.
     let pixels = usize::try_from(r.width).ok()?.checked_mul(usize::try_from(r.height).ok()?)?;
     if r.cmyk.len() != pixels.checked_mul(4)? || r.alpha.as_ref().is_some_and(|a| a.len() != pixels) {
         return None;
     }
-    if let Some((w, h)) = compression.plan(compression.classes.color, false, (r.width, r.height)).size {
+    // The class's own quality only: the legacy `compress_images` switch never touched CMYK
+    // rasters, and callers rely on their inks staying exact.
+    let plan = compression.plan(compression.classes.color, true, (r.width, r.height));
+    let quality = plan.quality.filter(|_| compression.classes.color.quality.is_some());
+    if let Some((w, h)) = plan.size {
         // Four 8-bit channels resample like RGBA; alpha like a grey image.
         let cmyk = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(r.width, r.height, std::mem::take(&mut r.cmyk))?;
         let alpha = match r.alpha.take() {
@@ -1634,6 +1638,27 @@ fn cmyk_image(mut r: designcraft_images::CmykRaster, mode: RasterMode, compressi
             None => None,
         };
         r = designcraft_images::CmykRaster { width: w, height: h, cmyk: image::imageops::resize(&cmyk, w, h, DOWNSAMPLE).into_raw(), alpha };
+    }
+    cmyk_raster_image(r, mode, quality)
+}
+
+/// A CMYK raster as a DeviceCMYK image: a JPEG at `quality` when it is opaque and within
+/// JPEG's size (the encoder writes Adobe-inverted samples, which krilla's Decode array turns
+/// back), otherwise lossless with its alpha.
+fn cmyk_raster_image(r: designcraft_images::CmykRaster, mode: RasterMode, quality: Option<u8>) -> Option<Image> {
+    if let Some(q) = quality
+        && r.alpha.is_none()
+        && let (Ok(w), Ok(h)) = (u16::try_from(r.width), u16::try_from(r.height))
+        && w > 0
+        && h > 0
+    {
+        let mut buf = Vec::new();
+        let enc = jpeg_encoder::Encoder::new(&mut buf, q);
+        if enc.encode(&r.cmyk, w, h, jpeg_encoder::ColorType::Cmyk).is_ok()
+            && let Ok(img) = Image::from_jpeg(buf.into(), mode.interpolate)
+        {
+            return Some(img);
+        }
     }
     Image::from_custom(CmykImage(Arc::new(r)), mode.interpolate).ok()
 }
@@ -1774,8 +1799,7 @@ fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode
         None => img,
     };
     if let Some(conv) = convert {
-        let r = conv.raster(&img.to_rgba8());
-        return Image::from_custom(CmykImage(Arc::new(r)), mode.interpolate).ok();
+        return cmyk_raster_image(conv.raster(&img.to_rgba8()), mode, plan.quality);
     }
     let transparent = typed_alpha && img.to_rgba8().pixels().any(|p| p[3] < 255);
     if let Some(q) = plan.quality.filter(|_| !transparent) {

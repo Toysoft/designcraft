@@ -643,14 +643,22 @@ fn compression_downsamples_per_class_and_sets_jpeg_quality() {
     let pdf = export_pdf(&j, &Cache::new(), &opts).unwrap();
     assert!(pdf.windows(bytes.len()).any(|w| w == bytes.as_slice()), "original JPEG bytes embedded");
     assert_eq!(export(&j, class(0.72, 1.2, Some(60))), vec![(4, 4, "DCTDecode".into())]);
-    // A CMYK TIFF is downsampled too, lossless and still CMYK.
+    // A CMYK TIFF is downsampled too and stays CMYK: lossless without a quality, a CMYK JPEG
+    // (Adobe-inverted samples with a Decode array) with one.
     let (tif, _) = cmyk_tiff();
     let mut c = doc_with_text("x");
     place(&mut c, tif, (4, 2));
-    let opts = PdfOptions { images: ImageCompression { color: class(0.72, 1.2, Some(60)), ..ImageCompression::NONE }, ..Default::default() };
+    let opts = PdfOptions { images: ImageCompression { color: class(0.72, 1.2, None), ..ImageCompression::NONE }, ..Default::default() };
     let pdf = export_pdf(&c, &Cache::new(), &opts).unwrap();
     assert_eq!(image_dicts(&pdf), vec![(2, 1, "FlateDecode".into())]);
     assert_eq!(image_xobjects(&pdf)[0].0, "DeviceCMYK");
+    let opts = PdfOptions { images: ImageCompression { color: class(0.72, 1.2, Some(60)), ..ImageCompression::NONE }, ..Default::default() };
+    let s = uncompressed(&c, opts);
+    assert!(
+        s.contains("/Filter/DCTDecode") && s.contains("/ColorSpace/DeviceCMYK") && s.contains("/Decode[1 0 1 0 1 0 1 0]"),
+        "{}",
+        &s[..s.len().min(3000)]
+    );
     // The grey class governs grey images; monochrome ones are never JPEG.
     let mut g = doc_with_text("x");
     let grey = {
@@ -767,6 +775,21 @@ fn color_conversion_to_destination_makes_cmyk() {
     let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { output: convert.clone(), ..Default::default() }).unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert_eq!(image_xobjects(&r.bytes)[0].0, "DeviceCMYK");
+    // With an image quality the converted raster is a CMYK JPEG.
+    let jpeg_opts = PdfOptions {
+        output: convert.clone(),
+        images: crate::ImageCompression {
+            color: crate::ImageClass { downsample_to: None, above: 0.0, quality: Some(70) },
+            ..crate::ImageCompression::NONE
+        },
+        ..Default::default()
+    };
+    let s = uncompressed(&d, jpeg_opts);
+    assert!(
+        s.contains("/Filter/DCTDecode") && s.contains("/ColorSpace/DeviceCMYK") && s.contains("/Decode[1 0 1 0 1 0 1 0]"),
+        "{}",
+        &s[..s.len().min(3000)]
+    );
     let r =
         export_pdf_with_report(&d, &Cache::new(), &PdfOptions { output: convert.clone(), standard: Standard::PdfA2b, ..Default::default() }).unwrap();
     assert_ne!(image_xobjects(&r.bytes)[0].0, "DeviceCMYK", "PDF/A stays RGB");
