@@ -77,6 +77,35 @@ impl Mode {
     }
 }
 
+/// Resolution (horizontal, vertical pixels per inch) from the ResolutionInfo image resource
+/// (id 1005, 16.16 fixed point); `None` without one or when the file is damaged.
+pub(crate) fn resolution(bytes: &[u8]) -> Option<(f64, f64)> {
+    let mut r = Reader { b: bytes };
+    if r.take(4)? != b"8BPS" {
+        return None;
+    }
+    r.take(22)?; // version, reserved, channels, height, width, depth, mode
+    r.block(false)?; // colour mode data
+    let mut res = Reader { b: r.block(false)? };
+    while res.take(4)? == b"8BIM" {
+        let id = res.u16()?;
+        // Pascal name, padded so that length byte + name take an even number of bytes.
+        let n = usize::from(*res.take(1)?.first()?);
+        res.take(n + (n + 1) % 2)?;
+        let len = usize::try_from(res.u32()?).ok()?;
+        let data = res.take(len)?;
+        if len % 2 == 1 {
+            res.take(1)?;
+        }
+        if id == 1005 && data.len() >= 16 {
+            let fixed = |at: usize| Some(f64::from(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?)) / 65536.0);
+            let (h, v) = (fixed(0)?, fixed(8)?);
+            return (h > 0.0 && v > 0.0).then_some((h, v));
+        }
+    }
+    None
+}
+
 /// The merged composite as straight RGBA8, `None` when the file is damaged or unsupported (32-bit,
 /// Multichannel, ZIP-compressed composite).
 pub(crate) fn decode(bytes: &[u8]) -> Option<image::RgbaImage> {

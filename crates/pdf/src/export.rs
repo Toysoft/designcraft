@@ -1697,11 +1697,22 @@ fn is_mono(img: &image::DynamicImage) -> bool {
 /// lossless. `None` when it can't be decoded.
 fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode, compression: &Compression) -> Option<Image> {
     use image::ImageDecoder;
-    let (px, gray, typed_alpha) = {
-        let dec = image::ImageReader::new(std::io::Cursor::new(&data[..])).with_guessed_format().ok()?.into_decoder().ok()?;
-        let ct = dec.color_type();
-        let gray = matches!(ct, image::ColorType::L8 | image::ColorType::La8 | image::ColorType::L16 | image::ColorType::La16);
-        (dec.dimensions(), gray, ct.has_alpha())
+    // Formats `image` reads are probed from their header; a PSD (which only `designcraft_images`
+    // reads) is decoded up front and counts as colour with transparency.
+    let probe = image::ImageReader::new(std::io::Cursor::new(&data[..])).with_guessed_format().ok().and_then(|r| r.into_decoder().ok());
+    let mut decoded: Option<image::DynamicImage> = None;
+    let (px, gray, typed_alpha) = match probe {
+        Some(dec) => {
+            let ct = dec.color_type();
+            let gray = matches!(ct, image::ColorType::L8 | image::ColorType::La8 | image::ColorType::L16 | image::ColorType::La16);
+            (dec.dimensions(), gray, ct.has_alpha())
+        }
+        None => {
+            let rgba = designcraft_images::decode_rgba(data)?;
+            let px = rgba.dimensions();
+            decoded = Some(image::DynamicImage::ImageRgba8(rgba));
+            (px, false, true)
+        }
     };
     // Monochrome is told from the pixels, so a grey image starts in the grey class.
     let classes = &compression.classes;
@@ -1718,7 +1729,10 @@ fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode
             return lossless(data, fmt, mode);
         }
     }
-    let img = image::load_from_memory(data).ok()?;
+    let img = match decoded {
+        Some(img) => img,
+        None => image::load_from_memory(data).ok()?,
+    };
     let plan = if gray && is_mono(&img) { compression.plan(classes.mono, false, px) } else { plan };
     if plan.size.is_none() && plan.quality.is_none() {
         return lossless(data, fmt, mode);

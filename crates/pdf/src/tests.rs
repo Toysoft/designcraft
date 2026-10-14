@@ -676,3 +676,41 @@ fn compression_downsamples_per_class_and_sets_jpeg_quality() {
     };
     assert_eq!(image_dicts(&export_pdf(&m, &Cache::new(), &opts).unwrap()), vec![(2, 2, "FlateDecode".into())]);
 }
+
+/// A minimal Photoshop file: 2×1 RGB, no layers, raw merged image (red, then green).
+fn tiny_psd() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend(b"8BPS");
+    b.extend(1u16.to_be_bytes());
+    b.extend([0u8; 6]);
+    b.extend(3u16.to_be_bytes());
+    b.extend(1u32.to_be_bytes());
+    b.extend(2u32.to_be_bytes());
+    b.extend(8u16.to_be_bytes());
+    b.extend(3u16.to_be_bytes());
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u16.to_be_bytes());
+    b.extend([255, 0, 0, 255, 0, 0]);
+    b
+}
+
+/// A placed PSD (read by `designcraft_images`, not by `image`) still exports with Compression
+/// on: lossless as it is, downsampled when its class asks for it.
+#[test]
+fn psd_exports_through_compression() {
+    use crate::{ImageClass, ImageCompression};
+    let mut d = doc_with_text("x");
+    place(&mut d, tiny_psd(), (2, 1));
+    let export = |color: ImageClass| {
+        let opts = PdfOptions { images: ImageCompression { color, ..ImageCompression::NONE }, ..Default::default() };
+        let r = export_pdf_with_report(&d, &Cache::new(), &opts).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        image_dicts(&r.bytes)
+    };
+    assert_eq!(export(ImageClass::LOSSLESS), vec![(2, 1, "FlateDecode".into())]);
+    assert_eq!(export(ImageClass { downsample_to: None, above: 0.0, quality: Some(60) }), vec![(2, 1, "DCTDecode".into())]);
+    // 2 px over 100 pt = 1.44 ppi; above 1.2 → down to 0.72 ppi = 1×1.
+    assert_eq!(export(ImageClass { downsample_to: Some(0.72), above: 1.2, quality: None }), vec![(1, 1, "FlateDecode".into())]);
+}
