@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5–7 h away; beta ~28 points and ~420–750 h beyond that (the core-workflow gate, not the percentage: ready for real work is already ~47%)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (text threads by hand; the alpha gate waits on Primary Text Frame page fixes) · **Target:** Adobe InDesign 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (text threads by hand; the alpha gate waits on Primary Text Frame page fixes; Move Pages position validation) · **Target:** Adobe InDesign 2026
 
 DesignCraft aims at full Adobe InDesign parity, and to be better: faster, open (documented JSON
 format + IDML), scriptable by agents (MCP), and available on the web.
@@ -128,6 +128,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-13** · Move Pages uses validated one-based absolute page positions in the dialog; `layout.pages.move` keeps its zero-based API. Page order, text and page-local item positions survive a move, native reopen and one Undo. Documents with non-shuffling multi-page spreads return an unsupported error before mutation; moving those pages remains open. Paste and page dragging in #348 remain separate work. No readiness percentage change.
 - **2026-10-12** · Text threads by hand: click a selected text frame's in or out port to load
   the text cursor, then click a frame to thread it, click empty space for a column-wide frame or
   drag one (it snaps like frame drawing); Shift-click autoflows, Alt-click stays loaded on the
