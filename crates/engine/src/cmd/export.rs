@@ -1,6 +1,6 @@
 //! File › Export PDF (Print).
 
-use designcraft_pdf::{ImageClass, ImageCompression, Marks, PdfOptions, Standard};
+use designcraft_pdf::{ColorConversion, ImageClass, ImageCompression, Marks, Output, PdfOptions, Standard};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, cmd, has_doc, str_param};
@@ -9,7 +9,7 @@ use crate::{EngineError, Result, Session};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "file.exportPdf", "Export PDF…", ["File"], None,
-        "{path?, pages?: \"1-3,5\" | [1,3] (1-based positions; default all), flatten?: high|medium|low|ppi (Transparency Flattener: spreads with transparency are rasterised), spreads?: bool, fullScreen?: bool, bookmarksPanel?: bool, pageLayout?: single|continuous|twoUp|twoUpCover|twoUpContinuous, view?: fitPage|fitWidth|actual, advanceSeconds?: number (interactive PDF), bleed?: bool (the document bleed) | number | [top, bottom, inside, outside] (the export's own bleed, pt), slug?: bool (include the slug area in the media box), marks?: bool | {crop?, bleed?, pageInfo?, weight?, offset?}, standard?: \"none\"|\"x4\"|\"a2b\", compressImages?: bool (JPEG quality 90 for images without a quality in `images`), images?: {color?, gray?, mono?: {downsample?: ppi (bicubic, for images above `above` ppi; default 1.5× the target), above?: ppi, quality?: maximum|high|medium|low|minimum|lossless|1–100 (JPEG; monochrome is always lossless)}} (Compression; images are passed through or lossless unless asked), tagged?: bool (structure tree: stories as paragraphs, figures with alt text), media?: bool (interactive: embed placed video and sound), title?, author?} → {path, bytes, pages, warnings} (no path: {base64, …})",
+        "{path?, pages?: \"1-3,5\" | [1,3] (1-based positions; default all), flatten?: high|medium|low|ppi (Transparency Flattener: spreads with transparency are rasterised), spreads?: bool, fullScreen?: bool, bookmarksPanel?: bool, pageLayout?: single|continuous|twoUp|twoUpCover|twoUpContinuous, view?: fitPage|fitWidth|actual, advanceSeconds?: number (interactive PDF), bleed?: bool (the document bleed) | number | [top, bottom, inside, outside] (the export's own bleed, pt), slug?: bool (include the slug area in the media box), marks?: bool | {crop?, bleed?, pageInfo?, weight?, offset?}, standard?: \"none\"|\"x4\"|\"a2b\", compressImages?: bool (JPEG quality 90 for images without a quality in `images`), images?: {color?, gray?, mono?: {downsample?: ppi (bicubic, for images above `above` ppi; default 1.5× the target), above?: ppi, quality?: maximum|high|medium|low|minimum|lossless|1–100 (JPEG; monochrome is always lossless)}} (Compression; images are passed through or lossless unless asked), output?: {colorConversion?: none|destination|preserveNumbers (Convert to Destination: RGB colours and rasters become CMYK; CMYK numbers are kept), destination?: a CMYK profile name from color.settings (default: the working CMYK)}, tagged?: bool (structure tree: stories as paragraphs, figures with alt text), media?: bool (interactive: embed placed video and sound), title?, author?} → {path, bytes, pages, warnings} (no path: {base64, …})",
         has_doc, export_pdf),
         cmd!(noundo "file.exportEpub", "Export EPUB (Reflowable)…", ["File"], None,
         "{path?, title?, author?, language?: \"en\", identifier?: str (dc:identifier; a stable urn:uuid by default), coverImage?: path (a PNG or JPEG as the cover), tocTitle?: str (the table of contents' title; from the language by default), cover?: bool (the first page as the cover image), embedFonts?: bool (package the stylesheet's fonts whose licence allows it, whole files), fixedLayout?: bool (pre-paginated: each page as an image with its text)} → {path, bytes, warnings} (no path: {base64, bytes, warnings}); warnings name images without alt text, exported as decorative, and fonts that could not be embedded",
@@ -363,6 +363,25 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
         }
         Some(v) => return Err(bad(ID, format!("bad `images`: {v} (an object with color, gray and mono classes)"))),
     };
+    let output = match p.get("output") {
+        None | Some(Value::Null) => Output::default(),
+        Some(Value::Object(o)) => {
+            let conversion = match o.get("colorConversion").or_else(|| o.get("conversion")) {
+                None | Some(Value::Null) => ColorConversion::None,
+                Some(Value::String(c)) => ColorConversion::parse(c)
+                    .ok_or_else(|| bad(ID, format!("unknown `output.colorConversion` `{c}` (none, destination, preserveNumbers)")))?,
+                Some(v) => return Err(bad(ID, format!("bad `output.colorConversion`: {v}"))),
+            };
+            let destination = match o.get("destination") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(d)) if d.trim().is_empty() => None,
+                Some(Value::String(d)) => Some(d.clone()),
+                Some(v) => return Err(bad(ID, format!("bad `output.destination`: {v} (a CMYK profile name)"))),
+            };
+            Output { conversion, destination }
+        }
+        Some(v) => return Err(bad(ID, format!("bad `output`: {v} (an object with colorConversion and destination)"))),
+    };
     let marks = match p.get("marks") {
         Some(Value::Bool(true)) => Marks::ALL,
         Some(Value::Object(m)) => {
@@ -391,6 +410,7 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
         standard,
         compress_images: p.get("compressImages").and_then(Value::as_bool).unwrap_or(false),
         images,
+        output,
         title: str_param(p, "title").map(str::to_string),
         author: str_param(p, "author").map(str::to_string),
         tagged: p.get("tagged").and_then(Value::as_bool).unwrap_or(false),
@@ -1294,5 +1314,16 @@ mod pdf_option_tests {
         assert!(opts(json!({"images": {"color": {"quality": 0}}})).is_err());
         assert!(opts(json!({"images": {"color": {"downsample": -300}}})).is_err());
         assert!(opts(json!({"images": []})).is_err());
+
+        let o = opts(json!({"output": {"colorConversion": "preserveNumbers", "destination": "DesignCraft Generic CMYK (SWOP-like)"}})).unwrap();
+        assert_eq!(
+            o.output,
+            Output { conversion: ColorConversion::PreserveNumbers, destination: Some("DesignCraft Generic CMYK (SWOP-like)".into()) }
+        );
+        let o = opts(json!({"output": {"colorConversion": "destination", "destination": ""}})).unwrap();
+        assert_eq!(o.output, Output { conversion: ColorConversion::ToDestination, destination: None });
+        assert_eq!(opts(json!({"output": {}})).unwrap().output, Output::default());
+        assert!(opts(json!({"output": {"colorConversion": "rgb"}})).is_err());
+        assert!(opts(json!({"output": "destination"})).is_err());
     }
 }

@@ -170,6 +170,10 @@ pub struct PdfExportSettings {
     pub mono_downsample: bool,
     pub mono_ppi: String,
     pub mono_above: String,
+    /// Output › Color Conversion: `none`, `destination` or `preserveNumbers`.
+    pub color_conversion: String,
+    /// Output › Destination: a CMYK profile name, `""` = Document CMYK (the working space).
+    pub destination: String,
 }
 
 impl Default for PdfExportSettings {
@@ -205,6 +209,8 @@ impl Default for PdfExportSettings {
             mono_downsample: true,
             mono_ppi: "1200".into(),
             mono_above: "1800".into(),
+            color_conversion: "none".into(),
+            destination: String::new(),
         }
     }
 }

@@ -198,6 +198,18 @@ pub fn pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
+/// Whether the file is a Photoshop document in CMYK mode (its inks are kept by
+/// [`decode_cmyk_psd`]; [`decode_rgba`] converts them to RGB).
+pub fn is_cmyk_psd(bytes: &[u8]) -> bool {
+    psd::is_cmyk(bytes)
+}
+
+/// The ink values of a CMYK Photoshop document's composite, with straight alpha; `None` for
+/// other modes or a damaged file.
+pub fn decode_cmyk_psd(bytes: &[u8]) -> Option<CmykRaster> {
+    psd::decode_cmyk(bytes)
+}
+
 /// Straight (non-premultiplied) RGBA8 of a raster.
 pub fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     if is_psd(bytes) {

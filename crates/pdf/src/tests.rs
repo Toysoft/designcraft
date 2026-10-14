@@ -714,3 +714,73 @@ fn psd_exports_through_compression() {
     // 2 px over 100 pt = 1.44 ppi; above 1.2 → down to 0.72 ppi = 1×1.
     assert_eq!(export(ImageClass { downsample_to: Some(0.72), above: 1.2, quality: None }), vec![(1, 1, "FlateDecode".into())]);
 }
+
+/// A minimal CMYK Photoshop file, 2×1: 100% K, then 100% C (channels stored inverted).
+fn tiny_cmyk_psd() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend(b"8BPS");
+    b.extend(1u16.to_be_bytes());
+    b.extend([0u8; 6]);
+    b.extend(4u16.to_be_bytes());
+    b.extend(1u32.to_be_bytes());
+    b.extend(2u32.to_be_bytes());
+    b.extend(8u16.to_be_bytes());
+    b.extend(4u16.to_be_bytes()); // CMYK
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u32.to_be_bytes());
+    b.extend(0u16.to_be_bytes());
+    b.extend([255, 0, 255, 255, 255, 255, 0, 255]); // C, M, Y, K planes
+    b
+}
+
+/// A CMYK Photoshop file keeps its inks (100% K stays K only); PDF/A gets it as RGB.
+#[test]
+fn cmyk_psd_keeps_its_inks() {
+    let mut d = doc_with_text("x");
+    place(&mut d, tiny_cmyk_psd(), (2, 1));
+    let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions::default()).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(image_xobjects(&r.bytes), vec![("DeviceCMYK".to_string(), vec![0, 0, 0, 255, 255, 0, 0, 0])]);
+    let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { standard: Standard::PdfA2b, ..Default::default() }).unwrap();
+    assert_ne!(image_xobjects(&r.bytes)[0].0, "DeviceCMYK");
+}
+
+/// Output › Convert to Destination: RGB swatches and RGB rasters become CMYK; CMYK and grey
+/// keep their numbers and spaces; PDF/A stays RGB.
+#[test]
+fn color_conversion_to_destination_makes_cmyk() {
+    use crate::{ColorConversion, Output};
+    let convert = Output { conversion: ColorConversion::ToDestination, destination: None };
+    let mut d = doc_with_text("x");
+    d.swatches.push(Swatch::color("Web Red", Color::rgb(1.0, 0.0, 0.0)));
+    add_box(&mut d, Rect::new(36.0, 36.0, 136.0, 136.0), "Web Red");
+    add_box(&mut d, Rect::new(36.0, 200.0, 136.0, 300.0), "[Black]");
+    let plain = uncompressed(&d, PdfOptions::default());
+    assert!(plain.contains("1 0 0 rg"), "RGB fill stays RGB without conversion");
+    let s = uncompressed(&d, PdfOptions { output: convert.clone(), ..Default::default() });
+    assert!(!s.contains(" rg\n") && !s.contains(" rg "), "no RGB fills left:\n{}", &s[..s.len().min(2500)]);
+    assert!(s.contains("0 0 0 1 k"), "black keeps its numbers");
+    // An RGB PNG becomes a DeviceCMYK image; a grey one stays grey.
+    let mut d = doc_with_text("x");
+    place(&mut d, raster(image::ImageFormat::Png, false), (8, 8));
+    let r = export_pdf_with_report(&d, &Cache::new(), &PdfOptions { output: convert.clone(), ..Default::default() }).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(image_xobjects(&r.bytes)[0].0, "DeviceCMYK");
+    let r =
+        export_pdf_with_report(&d, &Cache::new(), &PdfOptions { output: convert.clone(), standard: Standard::PdfA2b, ..Default::default() }).unwrap();
+    assert_ne!(image_xobjects(&r.bytes)[0].0, "DeviceCMYK", "PDF/A stays RGB");
+    let mut g = doc_with_text("x");
+    let grey = {
+        let img = image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 { 40 } else { 200 }]));
+        let mut b = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png).unwrap();
+        b
+    };
+    place(&mut g, grey, (8, 8));
+    let r = export_pdf_with_report(&g, &Cache::new(), &PdfOptions { output: convert, ..Default::default() }).unwrap();
+    assert_eq!(image_xobjects(&r.bytes)[0].0, "DeviceGray");
+    // An unknown destination is an error, not a silent RGB file.
+    let bad = Output { conversion: ColorConversion::PreserveNumbers, destination: Some("No Such Profile".into()) };
+    assert!(export_pdf(&g, &Cache::new(), &PdfOptions { output: bad, ..Default::default() }).is_err());
+}

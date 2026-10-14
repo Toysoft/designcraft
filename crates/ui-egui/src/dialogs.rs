@@ -332,15 +332,16 @@ const PDF_IMAGE_QUALITIES: [(&str, &str); 6] =
 /// presets downsample colour and grey to 300 ppi (above 450) at maximum JPEG quality and
 /// monochrome to 1200 ppi (above 1800); Screen and Email to 100 / 300 ppi at low quality.
 fn apply_pdf_preset(d: &mut Dialog, preset: &str) {
-    let (standard, crop, bleed, page_info, flatten, ppi, mono_ppi, quality) = match preset {
-        "Desktop Printing" => ("none", false, false, false, None, 300, 1200, "maximum"),
-        "Commercial Printing" => ("none", true, true, false, None, 300, 1200, "maximum"),
-        "Screen and Email" => ("none", false, false, false, Some("low"), 100, 300, "low"),
-        "PDF/X-4" => ("x4", true, true, false, None, 300, 1200, "maximum"),
-        "PDF/A-2b" => ("a2b", false, false, false, None, 300, 1200, "maximum"),
+    let (standard, crop, bleed, page_info, flatten, ppi, mono_ppi, quality, conversion) = match preset {
+        "Desktop Printing" => ("none", false, false, false, None, 300, 1200, "maximum", "none"),
+        "Commercial Printing" => ("none", true, true, false, None, 300, 1200, "maximum", "preserveNumbers"),
+        "Screen and Email" => ("none", false, false, false, Some("low"), 100, 300, "low", "none"),
+        "PDF/X-4" => ("x4", true, true, false, None, 300, 1200, "maximum", "preserveNumbers"),
+        "PDF/A-2b" => ("a2b", false, false, false, None, 300, 1200, "maximum", "none"),
         _ => return,
     };
     d.fields.insert("standard".into(), json!(standard));
+    d.fields.insert("colorConversion".into(), json!(conversion));
     d.fields.insert("compressImages".into(), json!(false));
     d.fields.insert("marksCrop".into(), json!(crop));
     d.fields.insert("marksBleed".into(), json!(bleed));
@@ -468,6 +469,45 @@ fn pdf_export(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         crate::rtl::label(ui, crate::i18n::tr(lang, "Offset:"));
         text_field(ui, d, "marksOffset", 60.0);
     });
+
+    head(ui, "Output");
+    ui.horizontal(|ui| {
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Color Conversion:"));
+        translated_combo(
+            lang,
+            ui,
+            d,
+            "colorConversion",
+            &[
+                ("none", "No Color Conversion"),
+                ("destination", "Convert to Destination"),
+                ("preserveNumbers", "Convert to Destination (Preserve Numbers)"),
+            ],
+        );
+    });
+    if d.s("colorConversion") != "none" {
+        ui.horizontal(|ui| {
+            crate::rtl::label(ui, crate::i18n::tr(lang, "Destination:"));
+            let working = designcraft_color::cms::active_settings().cmyk;
+            let document = format!("{} - {working}", crate::i18n::tr(lang, "Document CMYK"));
+            let mut options: Vec<(String, String)> = vec![(String::new(), document)];
+            options.extend(
+                designcraft_color::cms::profiles()
+                    .into_iter()
+                    .filter(|p| p.kind == designcraft_color::cms::ProfileKind::Cmyk)
+                    .map(|p| (p.name.clone(), p.name)),
+            );
+            let cur = d.s("destination");
+            let shown = options.iter().find(|(id, _)| *id == cur).map(|(_, l)| l.clone()).unwrap_or_else(|| cur.clone());
+            egui::ComboBox::from_id_salt("pdf_destination").selected_text(crate::rtl::widget(ui, shown)).width(260.0).show_ui(ui, |ui| {
+                for (id, label) in &options {
+                    if ui.selectable_label(cur == *id, crate::rtl::widget(ui, label.as_str())).clicked() {
+                        d.fields.insert("destination".into(), json!(id));
+                    }
+                }
+            });
+        });
+    }
 
     head(ui, "Advanced");
     ui.horizontal(|ui| {
@@ -2581,11 +2621,14 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             pe.mono_downsample = d.b("monoDownsample");
             pe.mono_ppi = d.s("monoPpi");
             pe.mono_above = d.s("monoAbove");
+            pe.color_conversion = d.s("colorConversion");
+            pe.destination = d.s("destination");
 
             let mut params = json!({
                 "standard": d.s("standard"),
                 "compressImages": d.b("compressImages"),
                 "images": pdf_images_param(&d),
+                "output": {"colorConversion": d.s("colorConversion"), "destination": d.s("destination")},
                 "spreads": d.b("spreads"),
                 "bleed": pdf_bleed_param(&d),
                 "slug": d.b("slug"),
@@ -6404,10 +6447,12 @@ mod tests {
             "bleedOutside",
             "bleedTop",
             "colorAbove",
+            "colorConversion",
             "colorDownsample",
             "colorPpi",
             "colorQuality",
             "compressImages",
+            "destination",
             "flatten",
             "grayAbove",
             "grayDownsample",
@@ -6431,6 +6476,8 @@ mod tests {
         assert_eq!(d.fields["colorPpi"].as_str(), Some("300"));
         assert_eq!(d.fields["monoAbove"].as_str(), Some("1800"));
         assert_eq!(d.fields["slug"].as_bool(), Some(false));
+        assert_eq!(d.fields["colorConversion"].as_str(), Some("none"));
+        assert_eq!(d.fields["destination"].as_str(), Some(""));
         assert_eq!(d.fields["preset"].as_str(), Some("Desktop Printing"));
         assert_eq!(d.fields["standard"].as_str(), Some("none"));
         assert_eq!(d.fields["compressImages"].as_bool(), Some(false));
@@ -6498,6 +6545,7 @@ mod tests {
         assert!(d.b("colorDownsample") && d.s("colorPpi") == "300" && d.s("colorAbove") == "450");
         assert_eq!((d.s("colorQuality"), d.s("grayQuality")), ("maximum".to_string(), "maximum".to_string()));
         assert!(d.s("monoPpi") == "1200" && d.s("monoAbove") == "1800" && d.s("monoQuality").is_empty());
+        assert_eq!(d.s("colorConversion"), "preserveNumbers", "press presets convert to the destination");
         assert!(d.b("marksCrop"));
         assert!(d.b("marksBleed"));
         assert!(!d.b("marksPageInfo"));

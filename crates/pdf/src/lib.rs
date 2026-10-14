@@ -29,6 +29,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod color_out;
 mod export;
 mod links;
 mod marks;
@@ -92,6 +93,46 @@ impl Default for Marks {
     fn default() -> Self {
         Self::NONE
     }
+}
+
+/// Export PDF › Output › Color Conversion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorConversion {
+    /// Colours and images stay in their own spaces.
+    #[default]
+    None,
+    /// RGB colours and images become CMYK through the destination profile.
+    ToDestination,
+    /// As `ToDestination`; CMYK numbers are kept (they are in both modes today: placed CMYK is
+    /// untagged).
+    PreserveNumbers,
+}
+
+impl ColorConversion {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "" | "none" | "nocolorconversion" => Some(Self::None),
+            "destination" | "converttodestination" | "convert" => Some(Self::ToDestination),
+            "preservenumbers" | "converttodestinationpreservenumbers" => Some(Self::PreserveNumbers),
+            _ => None,
+        }
+    }
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ToDestination => "destination",
+            Self::PreserveNumbers => "preserveNumbers",
+        }
+    }
+}
+
+/// Export PDF › Output.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Output {
+    pub conversion: ColorConversion,
+    /// Destination CMYK profile (a name from the colour settings' profiles); `None` = the
+    /// working CMYK.
+    pub destination: Option<String>,
 }
 
 /// Export PDF › Compression, for one class of raster images (colour, greyscale or monochrome).
@@ -166,6 +207,8 @@ pub struct PdfOptions {
     pub compress_images: bool,
     /// Compression: downsampling and JPEG quality per image class.
     pub images: ImageCompression,
+    /// Output: colour conversion to a CMYK destination.
+    pub output: Output,
     /// Flate-compress content streams.
     pub compress: bool,
     /// Title for the metadata; `None` = the document title.
@@ -211,6 +254,7 @@ impl Default for PdfOptions {
             standard: Standard::None,
             compress_images: false,
             images: ImageCompression::NONE,
+            output: Output::default(),
             compress: true,
             title: None,
             author: None,

@@ -21,6 +21,7 @@ use krilla::paint::{Fill, FillRule, LinearGradient, RadialGradient, SpreadMethod
 use krilla::surface::Surface;
 use krilla::tagging::{Artifact, ArtifactType, ContentTag, Identifier, Tag, TagGroup, TagTree};
 
+use crate::color_out::{CmykConverter, ColorOut};
 use crate::{ExportReport, PdfError, PdfOptions, Result, Standard};
 
 /// Export `doc` as PDF bytes.
@@ -155,6 +156,7 @@ fn export_pdf_with_report_inner(doc: &Document, cache: &Cache, opts: &PdfOptions
         fonts: HashMap::new(),
         reverse_cmaps: HashMap::new(),
         rgb_only: archival.is_some(),
+        to_cmyk: if archival.is_some() { None } else { CmykConverter::for_output(&opts.output)? },
         interpolate: archival.is_none(),
         tags: Vec::new(),
         story_tags: HashMap::new(),
@@ -344,6 +346,7 @@ fn export_booklet_inner(doc: &Document, cache: &Cache, opts: &BookletOptions) ->
         fonts: HashMap::new(),
         reverse_cmaps: HashMap::new(),
         rgb_only: false,
+        to_cmyk: None,
         interpolate: true,
         tags: Vec::new(),
         story_tags: HashMap::new(),
@@ -488,6 +491,8 @@ pub(crate) struct Exporter<'a> {
     pub reverse_cmaps: HashMap<u32, Arc<HashMap<u32, char>>>,
     /// Convert CMYK to RGB (PDF/A: krilla needs a CMYK output profile we don't ship yet).
     pub rgb_only: bool,
+    /// Output › Convert to Destination: RGB colours and rasters become CMYK.
+    pub to_cmyk: Option<Arc<CmykConverter>>,
     /// Ask viewers to smooth upscaled images (`/Interpolate`). Off for PDF/A, which forbids it.
     interpolate: bool,
     /// Tagged PDF: the structure in reading order (stories gather their frames' content).
@@ -535,9 +540,10 @@ fn q(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn regular(c: &Color, rgb_only: bool) -> krilla::color::RegularColor {
+fn regular(c: &Color, out: &ColorOut<'_>) -> krilla::color::RegularColor {
     use krilla::color::RegularColor as R;
-    if rgb_only && matches!(c, Color::Cmyk { .. }) {
+    let c = &out.resolve(c);
+    if out.rgb_only && matches!(c, Color::Cmyk { .. }) {
         let [r, g, b] = c.to_rgb();
         return R::Rgb(rgb::Color::new(q(r), q(g), q(b)));
     }
@@ -550,9 +556,10 @@ fn regular(c: &Color, rgb_only: bool) -> krilla::color::RegularColor {
 }
 
 /// A process colour in its own device space (CMYK → DeviceCMYK, RGB → DeviceRGB, Gray → DeviceGray).
-/// `rgb_only` converts CMYK to RGB (PDF/A without a CMYK output profile).
-pub(crate) fn device(c: &Color, rgb_only: bool) -> krilla::color::Color {
-    match regular(c, rgb_only) {
+/// `out.rgb_only` converts CMYK to RGB (PDF/A without a CMYK output profile); `out.to_cmyk`
+/// converts RGB to CMYK (Output › Convert to Destination).
+pub(crate) fn device(c: &Color, out: &ColorOut<'_>) -> krilla::color::Color {
+    match regular(c, out) {
         krilla::color::RegularColor::Rgb(v) => v.into(),
         krilla::color::RegularColor::Cmyk(v) => v.into(),
         krilla::color::RegularColor::Luma(v) => v.into(),
@@ -560,9 +567,9 @@ pub(crate) fn device(c: &Color, rgb_only: bool) -> krilla::color::Color {
 }
 
 /// `[Registration]` prints on every plate: `/Separation /All`.
-pub(crate) fn registration(tint: f32, rgb_only: bool) -> krilla::color::Color {
+pub(crate) fn registration(tint: f32, out: &ColorOut<'_>) -> krilla::color::Color {
     use krilla::color::separation::{Color as SepColor, SeparationColorant, SeparationSpace};
-    let alt = regular(&Color::cmyk(1.0, 1.0, 1.0, 1.0), rgb_only);
+    let alt = regular(&Color::cmyk(1.0, 1.0, 1.0, 1.0), out);
     SepColor::new(q(tint), SeparationSpace::new(SeparationColorant::AllColorants, alt)).into()
 }
 
@@ -622,12 +629,12 @@ impl Exporter<'_> {
                 // [Paper] prints no ink (it knocks out what lies below); its colour is only what
                 // the screen shows. Written as RGB white (`1 1 1 rg`) it would put DeviceRGB in a
                 // CMYK print file.
-                SwatchValue::Paper { .. } if self.for_print() => return Some(device(&Color::cmyk(0.0, 0.0, 0.0, 0.0), self.rgb_only)),
+                SwatchValue::Paper { .. } if self.for_print() => return Some(device(&Color::cmyk(0.0, 0.0, 0.0, 0.0), &self.color_out())),
                 SwatchValue::Tint { base, tint: bt } => {
                     t *= bt;
                     n = base;
                 }
-                SwatchValue::Registration => return Some(registration(t, self.rgb_only)),
+                SwatchValue::Registration => return Some(registration(t, &self.color_out())),
                 SwatchValue::Color { color: _, color_type: ColorType::Spot } => {
                     // Ink Manager: an alias prints on another ink; converted inks go to process.
                     let (ink, process) = self.doc.inks.resolve(&sw.name);
@@ -635,15 +642,15 @@ impl Exporter<'_> {
                         self.doc.swatch(ink).filter(|w| matches!(w.value, SwatchValue::Color { color_type: ColorType::Spot, .. })).unwrap_or(sw);
                     let SwatchValue::Color { color, .. } = &target.value else { break };
                     if process {
-                        return Some(device(&designcraft_color::swatch::apply_tint(*color, t), self.rgb_only));
+                        return Some(device(&designcraft_color::swatch::apply_tint(*color, t), &self.color_out()));
                     }
-                    let space = SeparationSpace::new(SeparationColorant::Custom(target.name.clone()), regular(color, self.rgb_only));
+                    let space = SeparationSpace::new(SeparationColorant::Custom(target.name.clone()), regular(color, &self.color_out()));
                     return Some(SepColor::new(q(t), space).into());
                 }
                 _ => break,
             }
         }
-        self.doc.resolve_color(name, tint).map(|c| device(&c, self.rgb_only))
+        self.doc.resolve_color(name, tint).map(|c| device(&c, &self.color_out()))
     }
 
     fn spread(&mut self, s: &mut Surface, si: usize) {
@@ -1034,6 +1041,7 @@ impl Exporter<'_> {
             // when every authored stop is CMYK/Gray; PDF/A can also change the output space.
             let components = |c: &Color| match c {
                 Color::Cmyk { .. } if !self.rgb_only => 4,
+                Color::Rgb { .. } if self.to_cmyk.is_some() && !self.rgb_only => 4,
                 Color::Gray { .. } => 1,
                 _ => 3,
             };
@@ -1052,7 +1060,7 @@ impl Exporter<'_> {
                 } else {
                     // Preserve RGB values, including already-interpolated display RGB, and
                     // leave every homogeneous gradient on its existing device-space path.
-                    device(&c, self.rgb_only)
+                    device(&c, &self.color_out())
                 };
                 stops.push(Stop { offset: norm(o), color, opacity: norm(a) });
             }
@@ -1256,6 +1264,11 @@ impl Exporter<'_> {
         None
     }
 
+    /// How this export writes colours.
+    pub(crate) fn color_out(&self) -> ColorOut<'_> {
+        ColorOut { rgb_only: self.rgb_only, to_cmyk: self.to_cmyk.as_deref() }
+    }
+
     /// Fail with the names of placed PDFs too new for this export (see [`Exporter::placed_pdf`]).
     fn check_placed_versions(&self) -> Result<()> {
         if self.too_new.is_empty() {
@@ -1290,8 +1303,18 @@ impl Exporter<'_> {
         let mut mode = RasterMode::for_standard(self.opts.standard);
         mode.interpolate &= self.interpolate;
         let placed = self.placed_widths.get(&id).copied();
-        let compression = Compression { classes: self.opts.images, legacy_jpeg: self.opts.compress_images, placed };
+        let compression = Compression {
+            classes: self.opts.images,
+            legacy_jpeg: self.opts.compress_images,
+            placed,
+            to_cmyk: if self.rgb_only { None } else { self.to_cmyk.clone() },
+        };
         let img = match fmt {
+            // A CMYK Photoshop file keeps its inks like a CMYK TIFF.
+            _ if !self.rgb_only && designcraft_images::is_cmyk_psd(&data) => match designcraft_images::decode_cmyk_psd(&data) {
+                Some(r) => cmyk_image(r, mode, &compression),
+                None => raster(&data, fmt, mode, &compression.lossless()),
+            },
             // A CMYK TIFF keeps its ink values (`image` decodes it to RGB, and 100% K would print
             // as four-colour black). PDF/A exports are RGB only.
             Some(image::ImageFormat::Tiff) if !self.rgb_only && designcraft_images::is_cmyk_tiff(&data) => match cmyk_tiff(&data, mode, &compression)
@@ -1589,7 +1612,12 @@ impl krilla::image::CustomImage for CmykImage {
 /// A CMYK TIFF as a DeviceCMYK image, downsampled when its colour class asks for it (always
 /// lossless: the inks are kept exactly).
 fn cmyk_tiff(data: &[u8], mode: RasterMode, compression: &Compression) -> Option<Image> {
-    let mut r = designcraft_images::decode_cmyk_tiff(data)?;
+    cmyk_image(designcraft_images::decode_cmyk_tiff(data)?, mode, compression)
+}
+
+/// A decoded CMYK raster as a DeviceCMYK image, downsampled when the colour class asks for it
+/// (always lossless: the inks are kept exactly).
+fn cmyk_image(mut r: designcraft_images::CmykRaster, mode: RasterMode, compression: &Compression) -> Option<Image> {
     // krilla panics when the channel lengths don't match the size.
     let pixels = usize::try_from(r.width).ok()?.checked_mul(usize::try_from(r.height).ok()?)?;
     if r.cmyk.len() != pixels.checked_mul(4)? || r.alpha.as_ref().is_some_and(|a| a.len() != pixels) {
@@ -1620,6 +1648,8 @@ struct Compression {
     legacy_jpeg: bool,
     /// The asset's narrowest placement in points (`None`: not placed, so never downsampled).
     placed: Option<f64>,
+    /// Output › Convert to Destination: RGB rasters become CMYK (lossless).
+    to_cmyk: Option<Arc<CmykConverter>>,
 }
 
 /// How a raster goes into the PDF: resized to `size` (when downsampling applies) and JPEG at
@@ -1635,7 +1665,7 @@ impl Compression {
     fn lossless(&self) -> Compression {
         let keep = |c: crate::ImageClass| crate::ImageClass { quality: None, ..c };
         let classes = crate::ImageCompression { color: keep(self.classes.color), gray: keep(self.classes.gray), mono: keep(self.classes.mono) };
-        Compression { classes, legacy_jpeg: false, placed: self.placed }
+        Compression { classes, legacy_jpeg: false, placed: self.placed, to_cmyk: self.to_cmyk.clone() }
     }
 
     /// The plan for a raster of `px` pixels in `class`; `lossy` allows JPEG (not for monochrome).
@@ -1720,7 +1750,9 @@ fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode
     // Decoding is needed to downsample or to (re)compress; a grey image may turn out to be
     // monochrome, whose class may downsample when the grey class doesn't.
     let mono_may_shrink = gray && compression.plan(classes.mono, false, px).size.is_some();
-    if plan.size.is_none() && !mono_may_shrink {
+    // Grey images stay DeviceGray (they print as K); colour ones convert to the destination.
+    let convert = compression.to_cmyk.as_deref().filter(|_| !gray);
+    if plan.size.is_none() && !mono_may_shrink && convert.is_none() {
         // A JPEG is never re-encoded (a second lossy generation) unless it is downsampled.
         if fmt == Some(image::ImageFormat::Jpeg) {
             return jpeg(data.clone().into(), || embedded_icc(data), mode);
@@ -1734,13 +1766,17 @@ fn raster(data: &Arc<Vec<u8>>, fmt: Option<image::ImageFormat>, mode: RasterMode
         None => image::load_from_memory(data).ok()?,
     };
     let plan = if gray && is_mono(&img) { compression.plan(classes.mono, false, px) } else { plan };
-    if plan.size.is_none() && plan.quality.is_none() {
+    if plan.size.is_none() && plan.quality.is_none() && convert.is_none() {
         return lossless(data, fmt, mode);
     }
     let img = match plan.size {
         Some((w, h)) => img.resize_exact(w, h, DOWNSAMPLE),
         None => img,
     };
+    if let Some(conv) = convert {
+        let r = conv.raster(&img.to_rgba8());
+        return Image::from_custom(CmykImage(Arc::new(r)), mode.interpolate).ok();
+    }
     let transparent = typed_alpha && img.to_rgba8().pixels().any(|p| p[3] < 255);
     if let Some(q) = plan.quality.filter(|_| !transparent) {
         let mut buf = Vec::new();
@@ -1805,6 +1841,7 @@ mod image_content_cache_tests {
             fonts: HashMap::new(),
             reverse_cmaps: HashMap::new(),
             rgb_only: false,
+            to_cmyk: None,
             interpolate: true,
             tags: Vec::new(),
             story_tags: HashMap::new(),
