@@ -8,6 +8,7 @@ use designcraft_geom::{Affine, Point, Rect as DRect, Vec2 as DVec2};
 use designcraft_tools::{CanvasLayout, Cursor, Mods, Overlay, PointerEvent, PointerKind, ToolKey};
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::{DesignApp, ScreenMode, View, theme::Tokens};
 
@@ -241,8 +242,15 @@ fn mods(i: &egui::InputState, space: bool) -> Mods {
     Mods { shift: i.modifiers.shift, alt: i.modifiers.alt, cmd: i.modifiers.command, ctrl: i.modifiers.ctrl, space }
 }
 
-pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
-    let t = Tokens::get(ui.ctx());
+struct PreparedCanvas {
+    full: Rect,
+    screen: Rect,
+    rect: Rect,
+    rulers: bool,
+    response: egui::Response,
+}
+
+fn prepare(app: &mut DesignApp, ui: &mut egui::Ui) -> PreparedCanvas {
     let full = ui.available_rect_before_wrap();
     let rot = app.view().map_or(0, |v| v.rotation % 4);
     // Rulers measure the unrotated layout, so they hide while the view is rotated.
@@ -254,7 +262,74 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     if !app.view().is_some_and(|v| v.fitted) {
         fit(app, rect, "spread");
     }
-    handle_input(app, ui, &resp, rect);
+    PreparedCanvas { full, screen, rect, rulers, response: resp }
+}
+
+pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
+    cancel_missing_guide_owner(app, ui, false);
+    let canvas = prepare(app, ui);
+    handle_input(app, ui, &canvas.response, canvas.rect);
+    paint(app, ui, &canvas);
+}
+
+/// Both panes share one document and tool: dispatch input before painting either one.
+pub fn show_split(app: &mut DesignApp, ui: &mut egui::Ui, halves: [Rect; 2]) {
+    cancel_missing_guide_owner(app, ui, true);
+    let mut panes = Vec::with_capacity(2);
+    for (k, half) in halves.into_iter().enumerate() {
+        let pane = k as u8;
+        app.switch_pane(pane);
+        // A new pane starts at the other pane's view.
+        if pane == 1 && app.view().is_none() {
+            app.switch_pane(0);
+            let v = app.view().copied();
+            app.switch_pane(1);
+            if let (Some(mut v), Some(m)) = (v, app.view_mut()) {
+                v.fitted = false;
+                *m = v;
+            }
+        }
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(half));
+        let canvas = prepare(app, &mut child);
+        panes.push((pane, child, canvas, None));
+    }
+    for (pane, child, canvas, input) in &mut panes {
+        app.switch_pane(*pane);
+        *input = begin_input(app, child, &canvas.response, canvas.rect);
+    }
+    for event in ui.input(|i| i.events.clone()) {
+        // Preserve pane focus for secondary clicks and ruler gestures too, at their own event.
+        if let egui::Event::PointerButton { pos, pressed: true, .. } = &event
+            && let Some((pane, child, canvas, input)) = panes.iter_mut().find(|(_, child, canvas, _)| owns_press(child, &canvas.response, *pos))
+        {
+            app.focus_pane = *pane;
+            if let Some(input) = input {
+                input.keyboard = !child.ctx().text_edit_focused() || canvas.response.has_focus();
+            }
+        }
+        for (pane, child, canvas, input) in &mut panes {
+            if let Some(input) = input {
+                app.switch_pane(*pane);
+                input.event(app, child, &canvas.response, canvas.rect, event.clone());
+            }
+        }
+    }
+    for (pane, mut child, canvas, input) in panes {
+        app.switch_pane(pane);
+        if let Some(input) = input {
+            input.finish(app, &mut child, &canvas.response, canvas.rect);
+        }
+        paint(app, &mut child, &canvas);
+        // new_child leaves parent allocation to us; dropping it registers its final rect.
+        ui.advance_cursor_after_rect(child.min_rect());
+    }
+    app.switch_pane(app.focus_pane);
+}
+
+fn paint(app: &mut DesignApp, ui: &mut egui::Ui, canvas: &PreparedCanvas) {
+    let PreparedCanvas { full, screen, rect, rulers, response: resp } = canvas;
+    let (full, screen, rect, rulers) = (*full, *screen, *rect, *rulers);
+    let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let Some(&v) = app.view() else { return };
     let xf = Xf::new(rect, &v);
@@ -305,6 +380,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     if !preview {
         draw_guides(app, &painter, &xf, &doc, &layout, &t);
         if let Some(g) = ui.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG)))
+            && g.pane == app.pane
             && let Some(p) = g.at
         {
             let col = Color32::from_rgb(74, 227, 255);
@@ -334,7 +410,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     draw_tool_overlays(app, &painter, &xf);
     if rulers {
         draw_rulers(app, ui, full, rect, &xf, &doc, &layout, &t);
-        ruler_units_menus(app, &resp, full, rect, &doc);
+        ruler_units_menus(app, resp, full, rect, &doc);
     }
     if let Some(r) = sel_rect
         && !preview
@@ -342,8 +418,15 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     {
         crate::taskbar::show(app, &ui.ctx().clone(), r, screen);
     }
-    // Cursor.
-    if let Some(p) = resp.hover_pos().filter(|p| screen.contains(*p)) {
+    // A captured guide owns the cursor even on a held frame without pointer motion.
+    if let Some(g) = ui.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))) {
+        if g.pane == app.pane {
+            ui.ctx().set_cursor_icon(match g.orientation {
+                designcraft_doc::Orientation::Horizontal => egui::CursorIcon::ResizeVertical,
+                designcraft_doc::Orientation::Vertical => egui::CursorIcon::ResizeHorizontal,
+            });
+        }
+    } else if let Some(p) = resp.hover_pos().filter(|p| screen.contains(*p)) {
         let space = ui.input(|i| i.key_down(egui::Key::Space)) && !app.session.wants_text();
         let middle = ui.input(|i| i.pointer.middle_down());
         let c = if middle {
@@ -1518,8 +1601,16 @@ fn fmt_tick(v: f64) -> String {
     if (v - r).abs() < 1e-6 { format!("{}", r as i64) } else { format!("{v:.1}") }
 }
 
-fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
-    let Some(v) = app.view().copied() else { return };
+struct CanvasInput {
+    m: Mods,
+    keyboard: bool,
+    down: bool,
+    origin: Option<(Pos2, f64)>,
+    dragging: bool,
+}
+
+fn begin_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) -> Option<CanvasInput> {
+    let v = app.view().copied()?;
     let xf = Xf::new(rect, &v);
     let wants_text = app.session.wants_text();
     let space = ui.input(|i| i.key_down(egui::Key::Space)) && !wants_text && !ui.ctx().text_edit_focused();
@@ -1548,116 +1639,137 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
         if let Some(v) = app.view_mut() {
             v.origin = Point::new(v.origin.x - d.x as f64 / v.zoom, v.origin.y - d.y as f64 / v.zoom);
         }
-        return;
+        return None;
     }
-    // Ruler guides need the rulers (hidden while the view is rotated).
-    if !space && xf.rot == 0 && guide_drag(app, ui, resp, rect, &xf) {
-        return;
-    }
-    let m = ui.input(|i| mods(i, space));
-    let vi = app.view_info();
-    let pos = |p: Pos2| xf.to_canvas(p);
-    let mut events: Vec<PointerEvent> = Vec::new();
     let down_id = egui::Id::new(("canvas_pointer_down", app.pane));
-    let mut down: bool = ui.data(|d| d.get_temp(down_id)).unwrap_or(false);
-    let clicks_id = egui::Id::new(("canvas_clicks", app.pane));
-    let (pressed, released, origin, latest, now) =
-        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos(), i.time));
-    if pressed
-        && !space
-        && let Some(o) = origin.filter(|o| (if xf.rot == 0 { rect.contains(*o) } else { resp.rect.contains(*o) }) && resp.hovered())
-    {
-        // Count presses in a row here: egui reports double and triple clicks only on release and
-        // stops at three, but a press must know (word, line, paragraph, story).
-        let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
-        let n = press_count(ui.data(|d| d.get_temp(clicks_id)), o, now, delay, dist);
-        ui.data_mut(|d| d.insert_temp(clicks_id, Clicks { at: f64::NEG_INFINITY, pos: o, n }));
-        events.push(PointerEvent { kind: PointerKind::Down, pos: pos(o), mods: m, clicks: n });
-        down = true;
+    let gesture_id = egui::Id::new(("canvas_pointer_gesture", app.pane));
+    let (origin, dragging) = ui.data(|d| d.get_temp(gesture_id)).unwrap_or((None, false));
+    let modifiers_id = egui::Id::new(("canvas_modifiers", app.pane));
+    let mut m: Mods = ui.data(|d| d.get_temp(modifiers_id)).unwrap_or_else(|| ui.input(|i| mods(i, space)));
+    m.space = space;
+    Some(CanvasInput {
+        m,
+        keyboard: !ui.ctx().text_edit_focused() || resp.has_focus(),
+        down: ui.data(|d| d.get_temp(down_id)).unwrap_or(false),
+        origin,
+        dragging,
+    })
+}
+
+fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
+    let Some(mut input) = begin_input(app, ui, resp, rect) else { return };
+    for event in ui.input(|i| i.events.clone()) {
+        input.event(app, ui, resp, rect, event);
     }
-    if down
-        && resp.dragged()
-        && resp.drag_delta() != egui::Vec2::ZERO
-        && let Some(p) = latest
-    {
-        events.push(PointerEvent { kind: PointerKind::Drag, pos: pos(p), mods: m, clicks: 1 });
-    }
-    // Power Zoom: holding the Hand tool still for half a second turns the press into one.
-    let hold_id = egui::Id::new(("canvas_hold", app.pane));
-    if down && !released && app.session.tool_id() == "hand" && !m.alt {
-        let (now, origin_pos) = ui.input(|i| (i.time, i.pointer.press_origin()));
-        let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
-        let still = origin_pos.zip(latest).is_some_and(|(o, l)| (o - l).length() < 3.0);
-        if !fired && still && now - start >= 0.5 {
-            let p = pos(latest.unwrap_or(rect.center()));
-            events.push(PointerEvent { kind: PointerKind::Up, pos: p, mods: m, clicks: 1 });
-            events.push(PointerEvent { kind: PointerKind::Down, pos: p, mods: Mods { alt: true, ..m }, clicks: 1 });
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
-        } else {
-            ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
-            if !fired {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-            }
-        }
-    } else {
-        ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
-    }
-    if down && released {
-        if let Some(c) = ui.data(|d| d.get_temp::<Clicks>(clicks_id)) {
-            let dist = ui.ctx().options(|o| o.input_options.max_click_dist);
-            ui.data_mut(|d| d.insert_temp(clicks_id, release_clicks(c, latest.unwrap_or(c.pos), now, dist)));
-        }
-        let p = latest.unwrap_or(rect.center());
-        events.push(PointerEvent { kind: PointerKind::Up, pos: pos(p), mods: m, clicks: 1 });
-        down = false;
-    } else if !down && let Some(p) = resp.hover_pos() {
-        events.push(PointerEvent { kind: PointerKind::Move, pos: pos(p), mods: m, clicks: 1 });
-    }
-    ui.data_mut(|d| d.insert_temp(down_id, down));
-    for e in events {
-        if let Err(err) = app.session.pointer(&e, vi) {
-            app.status(err.to_string());
-        }
+    input.finish(app, ui, resp, rect);
+}
+
+fn send_pointer(app: &mut DesignApp, rect: Rect, kind: PointerKind, p: Pos2, m: Mods, clicks: u8) {
+    let Some(v) = app.view().copied() else { return };
+    let e = PointerEvent { kind, pos: Xf::new(rect, &v).to_canvas(p), mods: m, clicks };
+    let vi = app.view_info();
+    if let Err(err) = app.session.pointer(&e, vi) {
+        app.status(err.to_string());
     }
     app.after_engine();
-    if resp.clicked() || resp.drag_started() {
-        resp.request_focus();
-    }
-    // Both split panes show the same document, but only the focused pane dispatches its keys.
-    if app.pane != app.focus_pane || (ui.ctx().text_edit_focused() && !resp.has_focus()) {
-        return;
-    }
-    let evs = ui.input(|i| i.events.clone());
-    for e in evs {
+}
+
+// Canvas panes do not overlap. Test the event's point against their clipped responses and
+// egui's public layer/modal ownership, not a frame-wide hover at a later event's position.
+fn owns_press(ui: &egui::Ui, resp: &egui::Response, p: Pos2) -> bool {
+    resp.enabled()
+        && resp.interact_rect.contains(p)
+        && ui.ctx().layer_id_at(p) == Some(resp.layer_id)
+        && ui.memory(|m| m.allows_interaction(resp.layer_id))
+}
+
+impl CanvasInput {
+    fn event(&mut self, app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, e: egui::Event) {
+        // Bookkeeping must survive guide ownership just as it survives normal tool input.
+        match &e {
+            egui::Event::ModifiersChanged(modifiers) | egui::Event::PointerButton { button: egui::PointerButton::Primary, modifiers, .. } => {
+                self.m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space: self.m.space };
+            }
+            egui::Event::WindowFocused(false) => {
+                self.m = Mods::default();
+                self.keyboard = false;
+            }
+            _ => {}
+        }
+        let Some(v) = app.view().copied() else { return };
+        let xf = Xf::new(rect, &v);
+        let space = self.m.space;
+        if guide_drag(app, ui, resp, rect, &xf, &e, !space && xf.rot == 0) {
+            return;
+        }
+        let keyboard = self.keyboard && app.pane == app.focus_pane;
+        let clicks_id = egui::Id::new(("canvas_clicks", app.pane));
         match e {
-            egui::Event::Text(t) if wants_text => {
+            egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, .. } => {
+                if pressed {
+                    if !space && (if xf.rot == 0 { rect.contains(p) } else { resp.rect.contains(p) }) && owns_press(ui, resp, p) {
+                        app.focus_pane = app.pane;
+                        let now = ui.input(|i| i.time);
+                        let (delay, dist) = ui.ctx().options(|o| (o.input_options.max_double_click_delay, o.input_options.max_click_dist));
+                        let clicks = press_count(ui.data(|d| d.get_temp(clicks_id)), p, now, delay, dist);
+                        ui.data_mut(|d| d.insert_temp(clicks_id, Clicks { at: f64::NEG_INFINITY, pos: p, n: clicks }));
+                        send_pointer(app, rect, PointerKind::Down, p, self.m, clicks);
+                        self.down = true;
+                        self.origin = Some((p, now));
+                        ui.data_mut(|d| d.remove::<(f64, bool)>(egui::Id::new(("canvas_hold", app.pane))));
+                        self.dragging = false;
+                        resp.request_focus();
+                        self.keyboard = true;
+                    } else {
+                        ui.data_mut(|d| d.remove::<Clicks>(clicks_id));
+                        self.keyboard = false;
+                    }
+                } else if self.down {
+                    if let Some(c) = ui.data(|d| d.get_temp::<Clicks>(clicks_id)) {
+                        let now = ui.input(|i| i.time);
+                        let dist = ui.ctx().options(|o| o.input_options.max_click_dist);
+                        ui.data_mut(|d| d.insert_temp(clicks_id, release_clicks(c, p, now, dist)));
+                    }
+                    send_pointer(app, rect, PointerKind::Up, p, self.m, 0);
+                    self.down = false;
+                    self.origin = None;
+                    self.dragging = false;
+                }
+            }
+            egui::Event::PointerMoved(p) if self.down => {
+                let (distance, duration) = ui.ctx().options(|o| (o.input_options.max_click_dist, o.input_options.max_click_duration));
+                let now = ui.input(|i| i.time);
+                self.dragging |=
+                    self.origin.is_some_and(|(o, at)| o.distance(p) > distance || now - at > duration) || !resp.interact_rect.contains(p);
+                if self.dragging {
+                    send_pointer(app, rect, PointerKind::Drag, p, self.m, 0);
+                }
+            }
+            egui::Event::Text(t) if keyboard && app.session.wants_text() => {
                 let _ = app.run("text.insert", json!({"text": t}));
             }
-            egui::Event::Paste(t) if wants_text => {
-                // Formatted when the system clipboard still holds what was copied here;
-                // Shift (⇧⌘V) pastes without formatting.
-                let plain = ui.input(|i| i.modifiers.shift);
-                let id = if plain { "edit.pasteWithoutFormatting" } else { "edit.paste" };
+            egui::Event::Paste(t) if keyboard && app.session.wants_text() => {
+                let id = if self.m.shift { "edit.pasteWithoutFormatting" } else { "edit.paste" };
                 let _ = app.run(id, json!({"text": t}));
             }
-            egui::Event::Copy | egui::Event::Cut if wants_text => {
+            egui::Event::Copy | egui::Event::Cut if keyboard && app.session.wants_text() => {
                 // `run` puts the copied text on the system clipboard.
                 let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
                 let _ = app.run(id, json!({}));
             }
             // Without a native menu bar the copy and paste keys arrive only as these events.
-            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if !app.native_menu => {
+            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if keyboard && !app.native_menu => {
                 let (id, params) = match e {
                     egui::Event::Copy => ("edit.copy", serde_json::Value::Null),
                     egui::Event::Cut => ("edit.cut", serde_json::Value::Null),
                     egui::Event::Paste(t) => ("edit.paste", json!({"text": t})),
-                    _ => continue,
+                    _ => return,
                 };
                 if crate::menus::enabled(app, id) {
                     crate::menus::activate(app, id, &params);
                 }
             }
-            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+            egui::Event::Key { key, pressed: true, modifiers, .. } if keyboard => {
                 let k = match key {
                     egui::Key::ArrowLeft => Some(ToolKey::Left),
                     egui::Key::ArrowRight => Some(ToolKey::Right),
@@ -1674,6 +1786,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                 };
                 if let Some(k) = k {
                     let m = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command, ctrl: modifiers.ctrl, space: false };
+                    let vi = app.view_info();
                     let handled = app.session.tool_key(k, m, vi).unwrap_or(false);
                     if !handled && k == ToolKey::Escape {
                         let _ = app.run("edit.deselectAll", json!({}));
@@ -1684,7 +1797,42 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
             _ => {}
         }
     }
-    let _ = DVec2::ZERO;
+
+    fn finish(self, app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect) {
+        let Self { m, down, origin, dragging, .. } = self;
+        ui.data_mut(|d| {
+            d.insert_temp(egui::Id::new(("canvas_pointer_down", app.pane)), down);
+            d.insert_temp(egui::Id::new(("canvas_pointer_gesture", app.pane)), (origin, dragging));
+            d.insert_temp(egui::Id::new(("canvas_modifiers", app.pane)), m);
+        });
+        if ui.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_some() {
+            return;
+        }
+        // Keep the existing Hand-tool hold behavior after the ordered pointer events.
+        let hold_id = egui::Id::new(("canvas_hold", app.pane));
+        if down && app.session.tool_id() == "hand" && !m.alt {
+            let (now, latest) = ui.input(|i| (i.time, i.pointer.latest_pos()));
+            let (start, fired): (f64, bool) = ui.data(|d| d.get_temp(hold_id)).unwrap_or((now, false));
+            let still = origin.zip(latest).is_some_and(|((o, _), l)| (o - l).length() < 3.0);
+            if !fired && still && now - start >= 0.5 {
+                let p = latest.unwrap_or(rect.center());
+                send_pointer(app, rect, PointerKind::Up, p, m, 0);
+                send_pointer(app, rect, PointerKind::Down, p, Mods { alt: true, ..m }, 1);
+                ui.data_mut(|d| d.insert_temp(hold_id, (start, true)));
+            } else {
+                ui.data_mut(|d| d.insert_temp(hold_id, (start, fired)));
+                if !fired {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        } else {
+            ui.data_mut(|d| d.remove::<(f64, bool)>(hold_id));
+        }
+        if !down && let Some(p) = resp.hover_pos() {
+            send_pointer(app, rect, PointerKind::Move, p, m, 0);
+        }
+        let _ = DVec2::ZERO;
+    }
 }
 
 /// View → Show Hidden Characters: ¶ paragraph ends, » tabs, · spaces, ¬ forced line breaks, # end of story.
@@ -1803,10 +1951,28 @@ const GUIDE_DRAG: &str = "canvas_guide_drag";
 /// A ruler guide being dragged: out of a ruler (`from` None) or an existing one.
 #[derive(Clone, Debug)]
 struct GuideDrag {
+    doc_uid: u64,
+    doc: Arc<Document>,
+    pane: u8,
     orientation: designcraft_doc::Orientation,
     from: Option<(designcraft_doc::SpreadRef, usize, usize)>,
     /// Pointer position (screen).
     at: Option<Pos2>,
+}
+
+// Called by the actual single/split drawing route, before any input suppression.
+// A surviving secondary window still owns pane 1; disappearing owners only cancel.
+fn cancel_missing_guide_owner(app: &DesignApp, ui: &egui::Ui, split: bool) {
+    let active = app.session.active();
+    let secondary = split || (app.second_window && app.ui.screen_mode != ScreenMode::Presentation);
+    let id = egui::Id::new(GUIDE_DRAG);
+    ui.data_mut(|d| {
+        if d.get_temp::<GuideDrag>(id)
+            .is_some_and(|g| active.is_none_or(|st| st.uid != g.doc_uid || !Arc::ptr_eq(&st.doc, &g.doc)) || (g.pane == 1 && !secondary))
+        {
+            d.remove::<GuideDrag>(id);
+        }
+    });
 }
 
 /// The guide under a screen point (within 3 px), as (spread, page, index, orientation).
@@ -1840,13 +2006,25 @@ fn guide_at(app: &DesignApp, xf: &Xf, p: Pos2) -> Option<(designcraft_doc::Sprea
 
 /// Ruler guides: drag one out of a ruler, drag an existing one (Selection tools, not over an
 /// object) to move it, drop it back on a ruler to delete it. Returns true while it owns the pointer.
-fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, xf: &Xf) -> bool {
+fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, xf: &Xf, event: &egui::Event, can_start: bool) -> bool {
     let id = egui::Id::new(GUIDE_DRAG);
-    let (pressed, released, origin, latest) =
-        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.press_origin(), i.pointer.latest_pos()));
     let mut drag: Option<GuideDrag> = ui.data(|d| d.get_temp(id));
-    if drag.is_none() && pressed && resp.hovered() && app.ui.guides && !app.ui.guides_locked {
-        let Some(o) = origin else { return false };
+    if drag.as_ref().is_some_and(|g| g.pane != app.pane) {
+        return true;
+    }
+    let (o, pressed, released) = match event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } => (*pos, *pressed, !*pressed),
+        egui::Event::PointerMoved(pos) => (*pos, false, false),
+        _ => return drag.is_some(),
+    };
+    if drag.is_none()
+        && pressed
+        && can_start
+        && owns_press(ui, resp, o)
+        && app.ui.guides
+        && !app.ui.guides_locked
+        && let Some((doc_uid, doc)) = app.session.active().map(|st| (st.uid, st.doc.clone()))
+    {
         let full = resp.rect;
         if full.contains(o) && !rect.contains(o) {
             // In a ruler (not the corner).
@@ -1858,7 +2036,7 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
                 None
             };
             if let Some(orientation) = orientation {
-                drag = Some(GuideDrag { orientation, from: None, at: Some(o) });
+                drag = Some(GuideDrag { doc_uid, doc, pane: app.pane, orientation, from: None, at: Some(o) });
             }
         } else if rect.contains(o)
             && matches!(app.session.tool_id(), "selection" | "directSelection")
@@ -1873,19 +2051,13 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
                 })
             });
             if !over_item {
-                drag = Some(GuideDrag { orientation, from: Some((r, pi, gi)), at: Some(o) });
+                drag = Some(GuideDrag { doc_uid, doc, pane: app.pane, orientation, from: Some((r, pi, gi)), at: Some(o) });
             }
         }
     }
     let Some(mut g) = drag else { return false };
-    if let Some(p) = latest {
-        g.at = Some(p);
-    }
+    g.at = Some(o);
     if !released {
-        ui.ctx().set_cursor_icon(match g.orientation {
-            designcraft_doc::Orientation::Horizontal => egui::CursorIcon::ResizeVertical,
-            designcraft_doc::Orientation::Vertical => egui::CursorIcon::ResizeHorizontal,
-        });
         ui.data_mut(|d| d.insert_temp(id, g));
         return true;
     }
@@ -2233,6 +2405,756 @@ mod tests {
         assert!(h.query_by_label("   Points").is_none());
     }
 
+    fn primary(p: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    fn story_text(h: &Harness<'_, DesignApp>) -> String {
+        h.state().session.doc().unwrap().doc.stories.values().next().unwrap().text.clone()
+    }
+
+    fn assert_released(h: &Harness<'_, DesignApp>) {
+        assert!(!h.state().session.tool_busy());
+        assert!(h.state().session.doc().unwrap().interaction.is_none());
+        assert!(h.state().ui.status.is_empty(), "{}", h.state().ui.status);
+    }
+
+    fn guide_history(h: &Harness<'_, DesignApp>) -> Value {
+        let st = h.state().session.doc().unwrap();
+        let entries = |v: &[designcraft_engine::HistoryEntry]| {
+            v.iter().map(|e| json!([&e.label, std::sync::Arc::as_ptr(&e.doc) as usize, &e.selection])).collect::<Vec<_>>()
+        };
+        json!({"undo": entries(&st.history.undo), "redo": entries(&st.history.redo), "limit": st.history.limit})
+    }
+
+    fn guide_preview_lines(h: &Harness<'_, DesignApp>) -> Vec<(Rect, [Pos2; 2])> {
+        fn collect(shape: &egui::Shape, clip: Rect, out: &mut Vec<(Rect, [Pos2; 2])>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, clip, out);
+                    }
+                }
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == Color32::from_rgb(74, 227, 255)
+                        && stroke.width == 1.0
+                        && ((points[0].x == clip.min.x && points[1].x == clip.max.x && points[0].y == points[1].y)
+                            || (points[0].y == clip.min.y && points[1].y == clip.max.y && points[0].x == points[1].x)) =>
+                {
+                    // Pending guides span the clipped canvas, unlike saved page guides.
+                    out.push((clip, *points));
+                }
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        for shape in &h.output().shapes {
+            collect(&shape.shape, shape.clip_rect, &mut out);
+        }
+        out
+    }
+
+    fn guide_screen(h: &mut Harness<'_, DesignApp>, pane: u8, p: Point) -> Pos2 {
+        h.state_mut().switch_pane(pane);
+        let app = h.state();
+        let cp = app.session.layout().to_canvas(SpreadRef::Doc(0), p);
+        Xf::new(app.canvas_rect.unwrap(), app.view().unwrap()).to_screen(cp)
+    }
+
+    fn raw_frame_text_before_ruler_press(paste: bool) {
+        for batched in [false, true] {
+            let (mut h, _) = typing("AB");
+            let sid = *h.state().session.doc().unwrap().doc.stories.keys().next().unwrap();
+            h.state_mut().run("text.select", json!({"story": sid.0, "anchor": 0, "focus": 0})).unwrap();
+            h.state_mut().ui.rulers = true;
+            h.state_mut().ui.guides = true;
+            h.state_mut().ui.guides_locked = false;
+            h.state_mut().ui.task_bar = false;
+            h.run_steps(3);
+            let rect = h.state().canvas_rect.unwrap();
+            let p = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+            h.hover_at(p);
+            h.step();
+            assert!(h.state_mut().session.wants_text());
+            let original = h.state().session.doc().unwrap().doc.clone();
+            let previous_history = guide_history(&h);
+            let undo = h.state().session.doc().unwrap().history.undo.len();
+            assert!(h.state().session.doc().unwrap().history.redo.is_empty());
+            // A fresh Session's plain Paste executes the nested Type as well as Paste.
+            let labels: &[&str] = if paste { &["Type", "Paste"] } else { &["Type"] };
+            let mut expected = h.state().session.doc().unwrap().selection.clone();
+            let caret = expected.text.as_mut().unwrap();
+            assert_eq!((caret.anchor, caret.focus), (0, 0));
+            caret.anchor = 1;
+            caret.focus = 1;
+            // Harness::event serializes queued events. The batch must be one RawInput;
+            // the ordinary control consumes the payload one 60 Hz frame earlier.
+            h.input_mut().events.push(if paste { egui::Event::Paste("X".into()) } else { egui::Event::Text("X".into()) });
+            if !batched {
+                h.step();
+            }
+            h.input_mut().events.extend([egui::Event::PointerMoved(p), primary(p, true)]);
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_some());
+            assert_eq!(story_text(&h), "XAB", "paste={paste}, batched={batched}");
+            assert_eq!(h.state().session.doc().unwrap().selection, expected);
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + labels.len());
+            assert_eq!(h.state().session.doc().unwrap().history.undo[undo..].iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), labels);
+            assert!(h.state().session.doc().unwrap().history.redo.is_empty());
+            h.state().session.doc().unwrap().doc.check().unwrap();
+            let typed = h.state().session.doc().unwrap().doc.clone();
+            let history = guide_history(&h);
+            // Releasing the new guide onto its ruler cancels it without another edit.
+            h.input_mut().events.push(primary(p, false));
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &typed));
+            assert_eq!(h.state().session.doc().unwrap().selection, expected);
+            assert_eq!(guide_history(&h), history);
+            assert_released(&h);
+            for (i, label) in labels.iter().rev().enumerate() {
+                assert_eq!(h.state_mut().run("edit.undo", json!({})).unwrap()["undone"], *label);
+                assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+                assert_eq!(story_text(&h), "AB");
+                // This engine records post-command Selection with each old document.
+                assert_eq!(h.state().session.doc().unwrap().selection, expected);
+                assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + labels.len() - i - 1);
+                assert_eq!(h.state().session.doc().unwrap().history.redo.len(), i + 1);
+            }
+            assert_eq!(guide_history(&h)["undo"], previous_history["undo"]);
+            for (i, label) in labels.iter().enumerate() {
+                assert_eq!(h.state_mut().run("edit.redo", json!({})).unwrap()["redone"], *label);
+                let last = i + 1 == labels.len();
+                assert_eq!(story_text(&h), if last { "XAB" } else { "AB" });
+                assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, if last { &typed } else { &original }));
+                assert_eq!(h.state().session.doc().unwrap().selection, expected);
+                assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + i + 1);
+                assert_eq!(h.state().session.doc().unwrap().history.redo.len(), labels.len() - i - 1);
+            }
+            assert_eq!(guide_history(&h), history);
+            h.state().session.doc().unwrap().doc.check().unwrap();
+            assert_released(&h);
+        }
+    }
+
+    #[test]
+    fn raw_frame_text_before_ruler_press_keeps_edit_and_history() {
+        raw_frame_text_before_ruler_press(false);
+    }
+
+    #[test]
+    fn raw_frame_paste_before_ruler_press_keeps_edit_and_history() {
+        raw_frame_text_before_ruler_press(true);
+    }
+
+    #[test]
+    fn guide_presentation_cancels_hidden_owner_without_events_but_preview_keeps_it() {
+        for (second_window, existing) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (mut h, id) = typing("AB");
+            let sid = *h.state().session.doc().unwrap().doc.stories.keys().next().unwrap();
+            if existing {
+                h.state_mut().run("guide.add", json!({"orientation": "horizontal", "position": 500, "at": 100})).unwrap();
+                h.state_mut().run("tool.select", json!({"tool": "selection"})).unwrap();
+            }
+            h.state_mut().run("text.select", json!({"story": sid.0, "anchor": 0, "focus": 0})).unwrap();
+            h.state_mut().ui.rulers = true;
+            h.state_mut().ui.guides = true;
+            h.state_mut().ui.guides_locked = false;
+            h.state_mut().ui.task_bar = false;
+            h.state_mut().run("window.split", json!({"on": true})).unwrap();
+            h.run_steps(4);
+            h.state_mut().switch_pane(1);
+            let rect = h.state().canvas_rect.unwrap();
+            let ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+            let inside = rect.center();
+            let press = if existing { guide_screen(&mut h, 1, Point::new(100.0, 500.0)) } else { ruler };
+            h.hover_at(press);
+            h.step();
+            let before = h.state().session.doc().unwrap().doc.clone();
+            let selection = h.state().session.doc().unwrap().selection.clone();
+            let history = guide_history(&h);
+            let revision = h.state().session.doc().unwrap().revision;
+            let guides = h.state_mut().run("guide.list", json!({})).unwrap();
+            h.input_mut().events.extend([primary(press, true), egui::Event::PointerMoved(inside)]);
+            h.step();
+            let drag = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+            assert_eq!(drag.pane, 1);
+            assert_eq!(drag.from.is_some(), existing);
+            assert_eq!(guide_preview_lines(&h).len(), 1);
+            assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeVertical);
+
+            h.state_mut().run("view.screenMode", json!({"mode": "preview"})).unwrap();
+            h.step();
+            assert!(h.ctx.input(|i| i.events.is_empty() && i.pointer.primary_down()));
+            assert!(h.state().split);
+            assert_eq!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap().pane, 1);
+            assert!(guide_preview_lines(&h).is_empty(), "Preview hides guide paint, not the displayed owner");
+            h.state_mut().run("view.screenMode", json!({"mode": "normal"})).unwrap();
+            h.step();
+            assert_eq!(guide_preview_lines(&h).len(), 1);
+            if second_window {
+                // The supported command keeps pane1 but changes its requested host.
+                // Presentation prevents that host from being drawn in this next frame.
+                h.state_mut().run("window.newWindow", json!({"on": true})).unwrap();
+            }
+            h.state_mut().run("view.screenMode", json!({"mode": "presentation"})).unwrap();
+            assert_eq!(h.state().split, !second_window);
+            assert_eq!(h.state().second_window, second_window);
+            h.step();
+            assert!(h.ctx.input(|i| i.events.is_empty() && i.pointer.primary_down()));
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert!(guide_preview_lines(&h).is_empty());
+            assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeVertical);
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+            assert_eq!(h.state().session.doc().unwrap().selection, selection);
+            assert_eq!(h.state().session.doc().unwrap().revision, revision);
+            assert_eq!(guide_history(&h), history);
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), guides);
+            h.input_mut().events.push(primary(inside, false));
+            h.step();
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+            assert_eq!(h.state().session.doc().unwrap().selection, selection);
+            assert_eq!(guide_history(&h), history);
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), guides);
+            // Recalculate geometry, then establish normal text focus with a real click.
+            h.state_mut().run("tool.select", json!({"tool": "type"})).unwrap();
+            let text_start = screen_at(&mut h, id, 0..1);
+            h.hover_at(text_start);
+            h.step();
+            click(&mut h, text_start);
+            assert_eq!(selected(&h), 0..0);
+            let mut expected = h.state().session.doc().unwrap().selection.clone();
+            expected.text.as_mut().unwrap().anchor = 1;
+            expected.text.as_mut().unwrap().focus = 1;
+            h.input_mut().events.push(egui::Event::Text("X".into()));
+            h.step();
+            assert_eq!(story_text(&h), "XAB");
+            assert_eq!(h.state().session.doc().unwrap().selection, expected);
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), history["undo"].as_array().unwrap().len() + 1);
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), guides);
+            h.state().session.doc().unwrap().doc.check().unwrap();
+            assert_released(&h);
+        }
+    }
+
+    #[test]
+    fn guide_split_owner_release_uses_event_position_and_keeps_lifecycle_and_cursor() {
+        for owner in [0, 1] {
+            let (mut h, _) = typing("AB");
+            h.state_mut().run("tool.select", json!({"tool": "selection"})).unwrap();
+            h.state_mut().ui.rulers = true;
+            h.state_mut().ui.guides = true;
+            h.state_mut().ui.guides_locked = false;
+            h.state_mut().ui.task_bar = false;
+            h.state_mut().run("window.split", json!({"on": true})).unwrap();
+            h.run_steps(4);
+            for pane in [0, 1] {
+                h.state_mut().switch_pane(pane);
+                let rect = h.state().canvas_rect.unwrap();
+                let cp = h.state().session.layout().to_canvas(SpreadRef::Doc(0), Point::new(500.0, if pane == 0 { 200.0 } else { 320.0 }));
+                let zoom = if pane == 0 { 0.75 } else { 1.25 };
+                *h.state_mut().view_mut().unwrap() = View {
+                    zoom,
+                    origin: Point::new(cp.x - rect.width() as f64 / (2.0 * zoom), cp.y - rect.height() as f64 / (2.0 * zoom)),
+                    fitted: true,
+                    rotation: 0,
+                };
+            }
+            h.step();
+            let p200 = guide_screen(&mut h, owner, Point::new(500.0, 200.0));
+            let p240 = guide_screen(&mut h, owner, Point::new(500.0, 240.0));
+            let p260 = guide_screen(&mut h, owner, Point::new(500.0, 260.0));
+            let rect = h.state().canvas_rect.unwrap();
+            let ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+            h.hover_at(ruler);
+            h.step();
+            let before = h.state().session.doc().unwrap().doc.clone();
+            let selection = h.state().session.doc().unwrap().selection.clone();
+            let history = guide_history(&h);
+            let undo = h.state().session.doc().unwrap().history.undo.len();
+            h.input_mut().events.extend([primary(ruler, true), egui::Event::PointerMoved(p200)]);
+            h.step();
+            assert_eq!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap().pane, owner);
+            for _ in 0..2 {
+                // Sample after BOTH paints, including a frame with no input events.
+                let lines = guide_preview_lines(&h);
+                assert_eq!(lines.len(), 1, "only owner{owner} paints the pending guide");
+                assert_eq!(lines[0].1, [pos2(rect.min.x, p200.y), pos2(rect.max.x, p200.y)]);
+                assert_eq!(lines[0].0, rect);
+                assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeVertical);
+                assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+                assert_eq!(h.state().session.doc().unwrap().selection, selection);
+                assert_eq!(guide_history(&h), history);
+                h.step();
+                assert!(h.ctx.input(|i| i.events.is_empty()));
+            }
+            h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers { shift: true, ..Default::default() }));
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<Mods>(egui::Id::new(("canvas_modifiers", owner)))).unwrap().shift);
+            h.input_mut().events.push(egui::Event::WindowFocused(false));
+            h.step();
+            let mods = h.ctx.data(|d| d.get_temp::<Mods>(egui::Id::new(("canvas_modifiers", owner)))).unwrap();
+            assert!(!mods.shift && !mods.alt && !mods.cmd && !mods.ctrl && !mods.space);
+            h.input_mut().events.extend([primary(p200, false), egui::Event::PointerMoved(p260)]);
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            let guides = h.state_mut().run("guide.list", json!({})).unwrap();
+            assert_eq!(guides.as_array().unwrap().len(), 1);
+            assert_eq!(guides[0]["orientation"], "horizontal");
+            assert_eq!(guides[0]["page"], 0);
+            assert_eq!(guides[0]["index"], 0);
+            assert_eq!(guides[0]["spread"], false);
+            assert!((guides[0]["position"].as_f64().unwrap() - 200.0).abs() < 1e-4, "{guides}");
+            assert_eq!(h.state().session.doc().unwrap().selection, selection);
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + 1);
+            assert_released(&h);
+
+            h.hover_at(p200);
+            h.step();
+            h.input_mut().events.extend([
+                primary(p200, true),
+                egui::Event::PointerMoved(p240),
+                primary(p240, false),
+                egui::Event::PointerMoved(p260),
+            ]);
+            h.step();
+            let guides = h.state_mut().run("guide.list", json!({})).unwrap();
+            assert_eq!(guides.as_array().unwrap().len(), 1);
+            assert!((guides[0]["position"].as_f64().unwrap() - 240.0).abs() < 1e-4, "{guides}");
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + 2);
+            h.hover_at(p240);
+            h.step();
+            h.input_mut().events.extend([primary(p240, true), primary(ruler, false), egui::Event::PointerMoved(p260)]);
+            h.step();
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), json!([]));
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + 3);
+            let deleted = h.state().session.doc().unwrap().doc.clone();
+            let history = guide_history(&h);
+            h.hover_at(ruler);
+            h.step();
+            h.input_mut().events.extend([primary(ruler, true), primary(ruler, false), egui::Event::PointerMoved(p200)]);
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &deleted));
+            assert_eq!(guide_history(&h), history, "new guide returned to ruler performs no command");
+            assert_eq!(h.state().session.doc().unwrap().selection, selection);
+            h.state().session.doc().unwrap().doc.check().unwrap();
+            assert_released(&h);
+        }
+    }
+
+    #[test]
+    fn guide_capture_cancels_when_split_owner_disappears() {
+        let history = |h: &Harness<'_, DesignApp>| {
+            let st = h.state().session.doc().unwrap();
+            let entries = |v: &[designcraft_engine::HistoryEntry]| {
+                v.iter().map(|e| (e.label.clone(), std::sync::Arc::as_ptr(&e.doc) as usize, e.selection.clone())).collect::<Vec<_>>()
+            };
+            (entries(&st.history.undo), entries(&st.history.redo), st.history.limit)
+        };
+        for existing in [false, true] {
+            let (mut h, _) = typing("AB");
+            let sid = *h.state().session.doc().unwrap().doc.stories.keys().next().unwrap();
+            h.state_mut().ui.rulers = true;
+            h.state_mut().ui.guides = true;
+            h.state_mut().ui.guides_locked = false;
+            h.state_mut().ui.task_bar = false;
+            if existing {
+                h.state_mut().run("guide.add", json!({"orientation": "horizontal", "position": 500, "at": 100})).unwrap();
+                h.state_mut().run("tool.select", json!({"tool": "selection"})).unwrap();
+            }
+            h.state_mut().run("text.select", json!({"story": sid.0, "anchor": 0, "focus": 0})).unwrap();
+            h.state_mut().run("window.split", json!({"on": true})).unwrap();
+            h.run_steps(4);
+            h.state_mut().switch_pane(1);
+            let app = h.state();
+            let rect = app.canvas_rect.unwrap();
+            let p = if existing {
+                let cp = app.session.layout().to_canvas(SpreadRef::Doc(0), Point::new(100.0, 500.0));
+                Xf::new(rect, app.view().unwrap()).to_screen(cp)
+            } else {
+                pos2(rect.center().x, rect.min.y - RULER / 2.0)
+            };
+            h.hover_at(p);
+            h.step();
+            let before = h.state().session.doc().unwrap().doc.clone();
+            let selection = h.state().session.doc().unwrap().selection.clone();
+            let previous_history = history(&h);
+            let guides = h.state_mut().run("guide.list", json!({})).unwrap();
+            h.input_mut().events.push(primary(p, true));
+            h.step();
+            let drag = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+            assert_eq!(drag.pane, 1);
+            assert_eq!(drag.from.is_some(), existing);
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+            assert_eq!(h.state().session.doc().unwrap().selection, selection);
+            assert_eq!(history(&h), previous_history);
+
+            h.state_mut().run("window.split", json!({"on": false})).unwrap();
+            assert!(!h.state().split && !h.state().second_window);
+            let rect = h.state().canvas_rect.unwrap();
+            let release = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+            if !existing {
+                // The owner is already absent: cancel before even the first Text event,
+                // not after consuming release or at the end of the surviving pane's frame.
+                h.input_mut().events.push(egui::Event::Text("X".into()));
+            }
+            h.input_mut().events.push(primary(release, false));
+            h.step();
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), guides);
+
+            if existing {
+                // Disappearance cannot reinterpret this as dropping an existing guide
+                // onto the ruler and deleting it, or transfer it into pane 0.
+                assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+                assert_eq!(h.state().session.doc().unwrap().selection, selection);
+                assert_eq!(history(&h), previous_history);
+                h.state_mut().run("tool.select", json!({"tool": "type"})).unwrap();
+                h.state_mut().run("text.select", json!({"story": sid.0, "anchor": 0, "focus": 0})).unwrap();
+                h.input_mut().events.push(egui::Event::Text("X".into()));
+                h.step();
+            }
+            assert_eq!(story_text(&h), "XAB");
+            assert_eq!(selected(&h), 1..1);
+            let mut expected = selection.clone();
+            let caret = expected.text.as_mut().unwrap();
+            caret.anchor = 1;
+            caret.focus = 1;
+            assert_eq!(h.state().session.doc().unwrap().selection, expected);
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), previous_history.0.len() + 1);
+            assert!(h.state().session.doc().unwrap().history.redo.is_empty());
+            assert_eq!(h.state_mut().run("guide.list", json!({})).unwrap(), guides);
+            h.state().session.doc().unwrap().doc.check().unwrap();
+            assert_released(&h);
+        }
+    }
+
+    #[test]
+    fn batched_click_text_click_preserves_event_order_and_history() {
+        for paste in [false, true] {
+            for batched in [false, true] {
+                let (mut h, id) = typing("Hello brave world");
+                let a = screen_at(&mut h, id, 14..15);
+                let b = screen_at(&mut h, id, 2..3);
+                let original = h.state().session.doc().unwrap().doc.clone();
+                let undo = h.state().session.doc().unwrap().history.undo.len();
+                let previous_history = guide_history(&h);
+                assert!(h.state().session.doc().unwrap().history.redo.is_empty());
+                let labels: &[&str] = if paste { &["Type", "Paste", "Type"] } else { &["Type", "Type"] };
+                let events = [
+                    primary(a, true),
+                    primary(a, false),
+                    primary(a, true),
+                    primary(a, false),
+                    if paste { egui::Event::Paste("X".into()) } else { egui::Event::Text("X".into()) },
+                    primary(b, true),
+                    primary(b, false),
+                    egui::Event::Text("!".into()),
+                ];
+                // Push directly into RawInput: Harness::event would serialize the
+                // batched path. The serial control still steps once per event at 60 Hz.
+                for event in events {
+                    h.input_mut().events.push(event);
+                    if !batched {
+                        h.step();
+                    }
+                }
+                if batched {
+                    h.step();
+                }
+                assert_eq!(story_text(&h), "He!llo brave X", "batched={batched}");
+                assert_eq!(selected(&h), 3..3);
+                let final_doc = h.state().session.doc().unwrap().doc.clone();
+                let final_selection = h.state().session.doc().unwrap().selection.clone();
+                let caret = final_selection.text.unwrap();
+                assert_eq!((caret.anchor, caret.focus), (3, 3));
+                assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + labels.len());
+                assert_eq!(h.state().session.doc().unwrap().history.undo[undo..].iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), labels);
+                assert!(h.state().session.doc().unwrap().history.redo.is_empty());
+                let final_history = guide_history(&h);
+                assert_released(&h);
+                for (i, label) in labels.iter().rev().enumerate() {
+                    assert_eq!(h.state_mut().run("edit.undo", json!({})).unwrap()["undone"], *label);
+                    assert_eq!(story_text(&h), if i == 0 { "Hello brave X" } else { "Hello brave world" });
+                    if i > 0 {
+                        assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+                    }
+                    assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + labels.len() - i - 1);
+                    assert_eq!(h.state().session.doc().unwrap().history.redo.len(), i + 1);
+                }
+                assert_eq!(guide_history(&h)["undo"], previous_history["undo"]);
+                for (i, label) in labels.iter().enumerate() {
+                    assert_eq!(h.state_mut().run("edit.redo", json!({})).unwrap()["redone"], *label);
+                    let text = if i + 1 == labels.len() {
+                        "He!llo brave X"
+                    } else if paste && i == 0 {
+                        "Hello brave world"
+                    } else {
+                        "Hello brave X"
+                    };
+                    assert_eq!(story_text(&h), text);
+                    if paste && i == 0 {
+                        assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+                    }
+                    assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + i + 1);
+                    assert_eq!(h.state().session.doc().unwrap().history.redo.len(), labels.len() - i - 1);
+                }
+                assert_eq!(story_text(&h), "He!llo brave X");
+                assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &final_doc));
+                assert_eq!(h.state().session.doc().unwrap().selection, final_selection);
+                assert_eq!(guide_history(&h), final_history);
+                h.state().session.doc().unwrap().doc.check().unwrap();
+                assert_released(&h);
+            }
+        }
+    }
+
+    #[test]
+    fn batched_clicks_retain_upstream_word_line_paragraph_with_return_and_story_counts() {
+        let text = "One two. Three four! Five six.\nSecond para here.";
+        for (clicks, expected) in [(2, "Three"), (3, "One two. Three four! Five six."), (4, "One two. Three four! Five six.\n"), (5, text)] {
+            let (mut h, id) = typing(text);
+            let p = screen_at(&mut h, id, 10..14);
+            let original = h.state().session.doc().unwrap().doc.clone();
+            // All presses/releases share one input frame and timestamp.
+            for _ in 0..clicks {
+                h.input_mut().events.push(primary(p, true));
+                h.input_mut().events.push(primary(p, false));
+            }
+            h.step();
+            assert_eq!(&text[selected(&h)], expected);
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+            assert_released(&h);
+        }
+    }
+
+    fn split_start(h: &mut Harness<'_, DesignApp>, id: u64, pane: u8) -> Pos2 {
+        h.state_mut().switch_pane(pane);
+        screen_at(h, id, 0..1)
+    }
+
+    #[test]
+    fn split_click_text_then_other_pane_click_or_hover_keeps_order() {
+        for first in [0, 1] {
+            for tail_click in [false, true] {
+                let (mut h, id) = typing("AB");
+                h.state_mut().split = true;
+                h.run_steps(4);
+                let a = split_start(&mut h, id, first);
+                let b = split_start(&mut h, id, 1 - first);
+                let undo = h.state().session.doc().unwrap().history.undo.len();
+                // Both panes consume this same ordered RawInput event list.
+                h.input_mut().events.push(primary(a, true));
+                h.input_mut().events.push(primary(a, false));
+                h.input_mut().events.push(egui::Event::Text("X".into()));
+                if tail_click {
+                    h.input_mut().events.push(primary(b, true));
+                    h.input_mut().events.push(primary(b, false));
+                    h.input_mut().events.push(egui::Event::Text("Y".into()));
+                } else {
+                    h.input_mut().events.push(egui::Event::PointerMoved(b));
+                }
+                h.step();
+                assert_eq!(story_text(&h), if tail_click { "YXAB" } else { "XAB" });
+                assert_eq!(h.state().focus_pane, if tail_click { 1 - first } else { first });
+                assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + if tail_click { 2 } else { 1 });
+                assert_released(&h);
+            }
+        }
+    }
+
+    #[test]
+    fn split_secondary_focus_same_frame_paste_keeps_external_text() {
+        // Complete both positive controls in both directions before the secondary batch.
+        for (case, button, same_frame) in [
+            ("primary batch", egui::PointerButton::Primary, true),
+            ("secondary next frame", egui::PointerButton::Secondary, false),
+            ("secondary batch", egui::PointerButton::Secondary, true),
+        ] {
+            for first in [0_u8, 1] {
+                let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+                app.run("file.new", json!({})).unwrap();
+                let object = app.run("frame.create", json!({"rect": [72, 72, 200, 160]})).unwrap()["id"].as_u64().unwrap();
+                let object = designcraft_doc::ItemId(object);
+                app.run("selection.set", json!({"ids": [object.0]})).unwrap();
+                app.run("tool.select", json!({"tool": "selection"})).unwrap();
+                app.native_menu = false;
+                app.split = true;
+                app.ui.rulers = false;
+                app.ui.guides = false;
+                app.ui.task_bar = false;
+                let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+                    |ui, app: &mut DesignApp| {
+                        let ctx = ui.ctx().clone();
+                        let layer = ui.layer_id();
+                        ui.data_mut(|d| d.insert_temp(egui::Id::new("secondary_paste_root_layer"), layer));
+                        app.logic(&ctx);
+                        app.ui(ui);
+                    },
+                    app,
+                );
+                h.run_steps(4);
+                for pane in [0, 1] {
+                    h.state_mut().switch_pane(pane);
+                    let rect = h.state().canvas_rect.unwrap();
+                    let centre = h.state().session.layout().to_canvas(SpreadRef::Doc(0), Point::new(136.0, 116.0));
+                    *h.state_mut().view_mut().unwrap() = View {
+                        zoom: 1.0,
+                        origin: Point::new(centre.x - rect.width() as f64 / 2.0, centre.y - rect.height() as f64 / 2.0),
+                        fitted: true,
+                        rotation: 0,
+                    };
+                }
+                h.state_mut().focus_pane = first;
+                h.state_mut().switch_pane(first);
+                h.run_steps(2);
+                let mut points = [Pos2::ZERO; 2];
+                let mut rects = [Rect::NOTHING; 2];
+                for pane in [0, 1] {
+                    h.state_mut().switch_pane(pane);
+                    rects[pane as usize] = h.state().canvas_rect.unwrap();
+                    points[pane as usize] = guide_screen(&mut h, pane, Point::new(136.0, 116.0));
+                }
+                h.state_mut().switch_pane(first);
+                let layer = h.ctx.data(|d| d.get_temp::<egui::LayerId>(egui::Id::new("secondary_paste_root_layer"))).unwrap();
+                for pane in [0, 1] {
+                    let point = points[pane];
+                    assert!(rects[pane].shrink(20.0).contains(point), "{case}: owned canvas interior");
+                    assert!(!rects[1 - pane].contains(point));
+                    assert_eq!(h.ctx.layer_id_at(point), Some(layer), "{case}: no foreground interception");
+                    assert!(h.ctx.memory(|m| m.allows_interaction(layer)));
+                }
+                assert!(!h.ctx.text_edit_focused());
+                assert!(h.state().ui.dialog.is_none());
+                assert!(!h.state().native_menu && !h.state_mut().session.wants_text());
+                assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+                assert_eq!(h.state().session.doc().unwrap().selection.items, vec![object]);
+                assert!(h.state().session.doc().unwrap().selection.text.is_none());
+                assert!(h.state().session.doc().unwrap().doc.item(object).unwrap().text_frame().is_none());
+                assert!(crate::menus::enabled(h.state(), "edit.paste"));
+                assert_released(&h);
+                let before = h.state().session.doc().unwrap().doc.clone();
+                let undo = h.state().session.doc().unwrap().history.undo.len();
+                let a = points[first as usize];
+                let b = points[(1 - first) as usize];
+                h.input_mut().events.extend([primary(a, true), primary(a, false)]);
+                for pressed in [true, false] {
+                    h.input_mut().events.push(egui::Event::PointerButton { pos: b, button, pressed, modifiers: egui::Modifiers::NONE });
+                }
+                if !same_frame {
+                    h.step();
+                    assert_eq!(h.state().focus_pane, 1 - first, "{case}: secondary press acquired focus");
+                    assert_eq!(h.state().session.doc().unwrap().selection.items, vec![object]);
+                    assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &before));
+                    assert_released(&h);
+                }
+                h.input_mut().events.push(egui::Event::Paste("From elsewhere".into()));
+                h.step();
+                if same_frame {
+                    assert!(h.ctx.input(|i| i.pointer.primary_pressed() && i.pointer.primary_released() && !i.pointer.primary_down()));
+                }
+                assert_eq!(h.state().focus_pane, 1 - first, "{case}: final pane owns keyboard input");
+                assert_eq!(h.state().pane, 1 - first);
+                assert!(!h.ctx.text_edit_focused());
+                assert!(h.state().ui.dialog.is_none());
+                assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+                assert_released(&h);
+                let st = h.state().session.doc().unwrap();
+                assert_eq!(st.doc.spreads[0].items.len(), before.spreads[0].items.len() + 1, "{case}, first={first}: paste exactly once");
+                assert_eq!(st.doc.stories.len(), before.stories.len() + 1);
+                assert_eq!(st.doc.item(object), before.item(object));
+                assert!(st.selection.text.is_none(), "external text creates a selected frame, not an insertion point");
+                assert_eq!(st.selection.items.len(), 1);
+                let pasted = st.selection.items[0];
+                assert_ne!(pasted, object);
+                let story = st.doc.item(pasted).unwrap().text_frame().unwrap().story;
+                assert_eq!(st.doc.story(story).unwrap().text, "From elsewhere");
+                assert_eq!(st.history.undo.len(), undo + 1);
+                assert_eq!(st.history.undo.last().unwrap().label, "Paste");
+                st.doc.check().unwrap();
+                eprintln!("split secondary Paste completed: {case}, first={first}");
+            }
+        }
+    }
+
+    #[test]
+    fn split_pane_round_trip_interrupts_multi_click_sequence() {
+        for first in [0, 1] {
+            let (mut h, id) = typing("AB");
+            h.state_mut().split = true;
+            h.run_steps(4);
+            let a = split_start(&mut h, id, first);
+            let b = split_start(&mut h, id, 1 - first);
+            let original = h.state().session.doc().unwrap().doc.clone();
+            // The complete pane round trip occurs within a single frame.
+            for p in [a, b, a] {
+                h.input_mut().events.push(primary(p, true));
+                h.input_mut().events.push(primary(p, false));
+            }
+            h.step();
+            assert_eq!(selected(&h), 0..0, "returning to a pane is a new single click");
+            assert_eq!(h.state().focus_pane, first);
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+            assert_released(&h);
+            // Keep the ordinary secondary-click control on two successive 60 Hz frames.
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos: b,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.step();
+            }
+            assert_eq!(h.state().focus_pane, 1 - first, "upstream secondary-click pane focus is preserved");
+            assert!(std::sync::Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &original));
+        }
+    }
+
+    #[test]
+    fn foreground_press_followed_by_canvas_hover_does_not_reach_document() {
+        let ctx = egui::Context::default();
+        let p = pos2(120.0, 120.0);
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.run("frame.create", json!({"rect": [40, 40, 400, 400], "content": "text", "text": "AB"})).unwrap();
+        app.run("tool.select", json!({"tool": "type"})).unwrap();
+        *app.view_mut().unwrap() = View { zoom: 1.0, origin: Point::ZERO, fitted: true, rotation: 0 };
+        app.ui.rulers = false;
+        app.ui.guides = false;
+        let before = app.session.doc().unwrap().doc.clone();
+        let selection = serde_json::to_value(&app.session.doc().unwrap().selection).unwrap();
+        for step in 0..4 {
+            let events = if step == 3 {
+                vec![primary(p, true), primary(p, false), egui::Event::Text("X".into()), egui::Event::PointerMoved(pos2(700.0, 500.0))]
+            } else {
+                vec![]
+            };
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                time: Some(step as f64 / 60.0),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let response = ui.allocate_rect(rect, Sense::click_and_drag());
+                if step == 3 {
+                    assert_ne!(ctx.layer_id_at(p), Some(response.layer_id), "actual foreground ownership control");
+                }
+                handle_input(&mut app, ui, &response, rect);
+                egui::Area::new(egui::Id::new("ordering_overlay")).order(egui::Order::Foreground).fixed_pos(pos2(100.0, 100.0)).show(&ctx, |ui| {
+                    ui.allocate_exact_size(vec2(200.0, 100.0), Sense::drag());
+                });
+            });
+            output.textures_delta.clear();
+        }
+        assert!(std::sync::Arc::ptr_eq(&app.session.doc().unwrap().doc, &before));
+        assert_eq!(serde_json::to_value(&app.session.doc().unwrap().selection).unwrap(), selection);
+        assert!(!app.session.tool_busy());
+    }
+
     #[test]
     fn baseline_grid_lines_are_the_ones_on_the_page() {
         // A start far above the page used to be walked line by line, without end.
@@ -2245,5 +3167,299 @@ mod tests {
         assert_eq!(lines(-30.0, 12.0, 30.0), [6.0, 18.0], "a start above the page keeps its rhythm");
         assert_eq!(lines(f64::NAN, 12.0, 792.0), [0.0; 0]);
         assert_eq!(baseline_grid_lines(0.0, 12.0, f64::INFINITY).count(), MAX_BASELINES);
+    }
+
+    fn guide_document_owner_release(switch_document: bool, ruler: bool) {
+        use designcraft_engine::{DocState, History, HistoryEntry};
+        use std::sync::Arc;
+
+        let history = |history: &History| {
+            let entries = |v: &[HistoryEntry]| {
+                v.iter().map(|e| (e.label.clone(), e.doc.clone(), Arc::as_ptr(&e.doc) as usize, e.selection.clone())).collect::<Vec<_>>()
+            };
+            (entries(&history.undo), entries(&history.redo), history.limit)
+        };
+        let unchanged = |st: &DocState, before: &DocState| {
+            assert_eq!(st.uid, before.uid);
+            assert_eq!(st.doc, before.doc, "complete document must survive a foreign guide release");
+            assert!(Arc::ptr_eq(&st.doc, &before.doc));
+            assert_eq!(st.revision, before.revision);
+            assert_eq!(st.saved_revision, before.saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &before.saved_doc));
+            assert_eq!(st.selection, before.selection);
+            assert_eq!(history(&st.history), history(&before.history));
+            assert!(st.interaction.is_none());
+        };
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        for position in [200.0, 320.0] {
+            app.run("file.new", json!({"pages": 1})).unwrap();
+            app.run("guide.add", json!({"orientation": "horizontal", "position": position, "at": 500})).unwrap();
+            // Keep a real redo entry in BOTH documents: a foreign release must not clear it.
+            app.run("guide.move", json!({"page": 0, "index": 0, "position": position + 20.0})).unwrap();
+            assert_eq!(app.run("edit.undo", json!({})).unwrap()["undone"], "Move Guide");
+        }
+        app.run("tool.select", json!({"tool": "selection"})).unwrap();
+        app.ui.rulers = true;
+        app.ui.guides = true;
+        app.ui.guides_locked = false;
+        app.ui.task_bar = false;
+        let mut h = harness(app);
+        assert_eq!(h.state().session.active_index(), Some(1));
+        let b_page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let b_ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+        h.state_mut().run("window.previousDocument", Value::Null).unwrap();
+        h.run_steps(3);
+        assert_eq!(h.state().session.active_index(), Some(0));
+        let press = guide_screen(&mut h, 0, Point::new(500.0, 200.0));
+        let held = guide_screen(&mut h, 0, Point::new(500.0, 220.0));
+        let a_page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let a_ruler = pos2(rect.center().x, rect.min.y - RULER / 2.0);
+        let release = match (switch_document, ruler) {
+            (false, false) => a_page,
+            (false, true) => a_ruler,
+            (true, false) => b_page,
+            (true, true) => b_ruler,
+        };
+        h.hover_at(press);
+        h.step();
+        assert!(!h.ctx.text_edit_focused());
+        assert!(!h.state().native_shortcuts.contains("window.nextDocument"));
+        let before = h.state().session.documents().to_vec();
+        assert_eq!(before.len(), 2);
+        assert_ne!(before[0].uid, before[1].uid);
+        assert!(before.iter().all(|st| st.history.redo.len() == 1));
+        assert_eq!(before[0].doc.spreads[0].pages[0].guides[0].position, 200.0);
+        assert_eq!(before[1].doc.spreads[0].pages[0].guides[0].position, 320.0);
+        h.input_mut().events.extend([primary(press, true), egui::Event::PointerMoved(held)]);
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let capture = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+        assert_eq!(capture.pane, 0);
+        assert_eq!(capture.from, Some((SpreadRef::Doc(0), 0, 0)));
+        assert_eq!(h.state().session.doc().unwrap().uid, before[0].uid);
+        assert_eq!(guide_preview_lines(&h).len(), 1);
+        for (st, old) in h.state().session.documents().iter().zip(&before) {
+            unchanged(st, old);
+        }
+
+        // One actual RawInput: logic dispatches the supported shortcut before ui sees release.
+        // Harness::event would serialize these events across frames.
+        if switch_document {
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::Key {
+                    key: egui::Key::F6,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                });
+            }
+        }
+        h.input_mut().events.extend([egui::Event::PointerMoved(release), primary(release, false)]);
+        h.step();
+        let active = usize::from(switch_document);
+        assert_eq!(h.state().session.active_index(), Some(active), "the real Next Document shortcut must activate B");
+        assert_eq!(h.state().session.doc().unwrap().uid, before[active].uid);
+        assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+        assert!(guide_preview_lines(&h).is_empty());
+        assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+        assert_released(&h);
+        let docs = h.state().session.documents();
+        unchanged(&docs[1], &before[1]);
+        if switch_document {
+            unchanged(&docs[0], &before[0]);
+        } else {
+            let st = &docs[0];
+            let mut expected = (*before[0].doc).clone();
+            let guides = &mut Arc::make_mut(&mut expected.spreads[0]).pages[0].guides;
+            if ruler {
+                guides.clear();
+            } else {
+                let position = st.doc.spreads[0].pages[0].guides[0].position;
+                assert!((position - 240.0).abs() < 1e-4, "page release must move A's guide to 240: {position}");
+                guides[0].position = position; // Only this coordinate uses screen-conversion tolerance.
+            }
+            assert_eq!(*st.doc, expected, "the whole document may change only at the released guide");
+            assert!(!Arc::ptr_eq(&st.doc, &before[0].doc));
+            assert_eq!(st.revision, before[0].revision + 1);
+            assert_eq!(st.saved_revision, before[0].saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &before[0].saved_doc));
+            assert_eq!(st.selection, before[0].selection);
+            let mut expected_history = before[0].history.clone();
+            expected_history.undo.push(HistoryEntry {
+                label: if ruler { "Delete Guide" } else { "Move Guide" }.into(),
+                doc: before[0].doc.clone(),
+                selection: before[0].selection.clone(),
+            });
+            expected_history.redo.clear();
+            assert_eq!(history(&st.history), history(&expected_history));
+        }
+        let after = h.state().session.documents().to_vec();
+        h.step();
+        assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+        assert!(guide_preview_lines(&h).is_empty());
+        for (st, old) in h.state().session.documents().iter().zip(&after) {
+            unchanged(st, old);
+            st.doc.check().unwrap();
+        }
+        assert_released(&h);
+    }
+
+    #[test]
+    fn guide_capture_document_switch_page_release_preserves_both_documents() {
+        guide_document_owner_release(true, false);
+    }
+
+    #[test]
+    fn guide_capture_document_switch_ruler_release_preserves_both_documents() {
+        guide_document_owner_release(true, true);
+    }
+
+    #[test]
+    fn guide_capture_same_document_page_release_moves_once() {
+        guide_document_owner_release(false, false);
+    }
+
+    #[test]
+    fn guide_capture_same_document_ruler_release_deletes_once() {
+        guide_document_owner_release(false, true);
+    }
+
+    fn guide_capture_history_release(revert: bool, ruler: bool) {
+        use designcraft_engine::{History, HistoryEntry};
+        use std::sync::Arc;
+
+        let history = |history: &History| {
+            let entries = |v: &[HistoryEntry]| {
+                v.iter().map(|e| (e.label.clone(), e.doc.clone(), Arc::as_ptr(&e.doc) as usize, e.selection.clone())).collect::<Vec<_>>()
+            };
+            (entries(&history.undo), entries(&history.redo), history.limit)
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held-guide.designcraft");
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 1})).unwrap();
+        for position in [100.0, 200.0] {
+            app.run("guide.add", json!({"orientation": "horizontal", "position": position, "at": 500})).unwrap();
+        }
+        app.run("file.save", json!({"path": path.to_string_lossy()})).unwrap();
+        let saved = app.session.doc().unwrap().clone();
+        assert!(!saved.is_dirty());
+        assert_eq!(saved.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![100.0, 200.0]);
+        app.run("guide.delete", json!({"page": 0, "index": 0})).unwrap();
+        app.run("tool.select", json!({"tool": "selection"})).unwrap();
+        app.ui.rulers = true;
+        app.ui.guides = true;
+        app.ui.guides_locked = false;
+        app.ui.task_bar = false;
+        let mut h = harness(app);
+        let press = guide_screen(&mut h, 0, Point::new(500.0, 200.0));
+        let held = guide_screen(&mut h, 0, Point::new(500.0, 220.0));
+        let page = guide_screen(&mut h, 0, Point::new(500.0, 240.0));
+        let rect = h.state().canvas_rect.unwrap();
+        let release = if ruler { pos2(rect.center().x, rect.min.y - RULER / 2.0) } else { page };
+        h.hover_at(press);
+        h.step();
+        assert!(!h.ctx.text_edit_focused());
+        assert!(!h.state().native_shortcuts.contains("edit.undo"));
+        let captured = h.state().session.doc().unwrap().clone();
+        assert!(captured.is_dirty());
+        assert_eq!(captured.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![200.0]);
+        assert_eq!(captured.history.undo.last().unwrap().label, "Delete Guide");
+        assert!(captured.history.redo.is_empty());
+        h.input_mut().events.extend([primary(press, true), egui::Event::PointerMoved(held)]);
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let drag = h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).unwrap();
+        assert_eq!(drag.doc_uid, captured.uid);
+        assert_eq!(drag.pane, 0);
+        assert_eq!(drag.from, Some((SpreadRef::Doc(0), 0, 0)));
+        assert_eq!(guide_preview_lines(&h).len(), 1);
+        assert!(Arc::ptr_eq(&h.state().session.doc().unwrap().doc, &captured.doc));
+        assert_eq!(guide_history(&h)["redo"].as_array().unwrap().len(), 0);
+
+        if revert {
+            // The supported engine.execute control route also dispatches through app.run.
+            assert_eq!(h.state_mut().run("file.revert", json!({})).unwrap()["path"], path.to_string_lossy().as_ref());
+        } else {
+            // Undo while still holding: exercise the real shortcut before canvas input.
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::Key {
+                    key: egui::Key::Z,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                });
+            }
+        }
+        h.step();
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let restored = h.state().session.doc().unwrap().clone();
+        assert_eq!(restored.uid, captured.uid, "restoration must retain the captured document UID");
+        assert!(!Arc::ptr_eq(&restored.doc, &captured.doc));
+        assert_eq!(restored.doc, saved.doc, "restoration must recover the complete saved document before release");
+        assert_eq!(restored.doc.spreads[0].pages[0].guides.iter().map(|g| g.position).collect::<Vec<_>>(), vec![100.0, 200.0]);
+        assert_eq!(restored.revision, captured.revision + 1);
+        assert_eq!(restored.selection, saved.selection);
+        assert!(!restored.is_dirty());
+        if revert {
+            assert!(restored.history.undo.is_empty());
+            assert!(restored.history.redo.is_empty());
+        } else {
+            let mut expected_history = saved.history.clone();
+            expected_history.redo.push(HistoryEntry {
+                label: "Delete Guide".into(),
+                doc: captured.doc.clone(),
+                selection: captured.selection.clone(),
+            });
+            assert_eq!(history(&restored.history), history(&expected_history));
+        }
+
+        h.input_mut().events.extend([egui::Event::PointerMoved(release), primary(release, false)]);
+        h.step();
+        for idle in [false, true] {
+            if idle {
+                h.step();
+            }
+            let st = h.state().session.doc().unwrap();
+            assert_eq!(st.doc, restored.doc, "a stale guide release must preserve the whole restored document (revert={revert}, ruler={ruler})");
+            assert!(Arc::ptr_eq(&st.doc, &restored.doc));
+            assert_eq!(st.uid, restored.uid);
+            assert_eq!(st.revision, restored.revision);
+            assert_eq!(st.saved_revision, restored.saved_revision);
+            assert!(Arc::ptr_eq(&st.saved_doc, &restored.saved_doc));
+            assert_eq!(st.is_dirty(), restored.is_dirty());
+            assert_eq!(st.path, restored.path);
+            assert_eq!(st.selection, restored.selection);
+            assert_eq!(history(&st.history), history(&restored.history));
+            assert!(h.ctx.data(|d| d.get_temp::<GuideDrag>(egui::Id::new(GUIDE_DRAG))).is_none());
+            assert!(guide_preview_lines(&h).is_empty());
+            assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+            assert_released(&h);
+            st.doc.check().unwrap();
+        }
+    }
+
+    #[test]
+    fn guide_capture_undo_page_release_preserves_restored_document() {
+        guide_capture_history_release(false, false);
+    }
+
+    #[test]
+    fn guide_capture_undo_ruler_release_preserves_restored_document() {
+        guide_capture_history_release(false, true);
+    }
+
+    #[test]
+    fn guide_capture_revert_page_release_preserves_restored_document() {
+        guide_capture_history_release(true, false);
+    }
+
+    #[test]
+    fn guide_capture_revert_ruler_release_preserves_restored_document() {
+        guide_capture_history_release(true, true);
     }
 }
