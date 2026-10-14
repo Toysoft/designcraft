@@ -264,13 +264,14 @@ impl<'a> Exporter<'a> {
                 continue;
             }
             // The whole parent chain, deepest parent at the bottom.
-            for (it, dx) in doc.shown_parent_items(abs) {
-                if it.layer != layer.id {
+            for shown in doc.shown_parent_items(abs) {
+                if shown.item.layer != layer.id {
                     continue;
                 }
-                // Parent items compose per page (page numbers, running heads).
+                // Parent items compose per page (page numbers, running heads). One crossing the
+                // spine is cut by the slide's edge.
                 self.page = Some(abs);
-                self.item(it, Affine::translate((dx, 0.0)), 1.0);
+                self.item(shown.item, Affine::translate((shown.dx, 0.0)), 1.0);
                 self.page = None;
             }
             for it in &sp.items {

@@ -357,7 +357,7 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
     rr.threads = designcraft_render::default_threads();
     let k = ppi / 72.0;
     // Parent items involving transparency, across the page's whole parent chain.
-    let parent_transparent = |abs: usize| d.shown_parent_items(abs).iter().any(|(it, _)| transparent(it));
+    let parent_transparent = |abs: usize| d.shown_parent_items(abs).iter().any(|s| transparent(s.item));
     // An opaque image item showing `img` over `r`.
     let image_item =
         |out: &mut designcraft_doc::Document, r: designcraft_geom::Rect, img: designcraft_render::Rendered, layer: designcraft_doc::LayerId| {

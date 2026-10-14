@@ -244,8 +244,13 @@ impl ToolContext<'_> {
             .shown_parent_items(page)
             .into_iter()
             .rev()
-            .find(|(it, dx)| !it.locked && designcraft_doc::edit_hit(it, sp - designcraft_geom::Vec2::new(*dx, 0.0), self.tol(4.0)))
-            .map(|(it, _)| (page, it.id))
+            .find(|s| {
+                let at = sp - designcraft_geom::Vec2::new(s.dx, 0.0);
+                // An item cut at the spine is hit only on this page's side of it.
+                let inside = s.clip_x.is_none_or(|(x0, x1)| sp.x >= x0 && sp.x <= x1);
+                !s.item.locked && inside && designcraft_doc::edit_hit(s.item, at, self.tol(4.0))
+            })
+            .map(|s| (page, s.item.id))
     }
 
     fn hit_parent(&self, sr: SpreadRef, sp: Point) -> Option<(SpreadRef, ItemId)> {

@@ -642,9 +642,23 @@ impl Exporter<'_> {
             }
             for pi in 0..sp.pages.len() {
                 // The whole parent chain, deepest parent at the bottom.
-                for (it, dx) in doc.shown_parent_items(first + pi) {
-                    if it.layer == layer.id {
-                        self.top_item(s, it, Affine::translate((dx, 0.0)), Some(first + pi), true);
+                for shown in doc.shown_parent_items(first + pi) {
+                    if shown.item.layer != layer.id {
+                        continue;
+                    }
+                    let xf = Affine::translate((shown.dx, 0.0));
+                    // Crossing the spine: cut to this page's side.
+                    let clip = shown.clip_x.and_then(|(x0, x1)| {
+                        let b = sp.bounds();
+                        to_path(&designcraft_geom::Rect::new(x0, b.y0 - 1.0e4, x1, b.y1 + 1.0e4).to_path(0.1))
+                    });
+                    match clip {
+                        Some(c) => {
+                            s.push_clip_path(&c, &FillRule::NonZero);
+                            self.top_item(s, shown.item, xf, Some(first + pi), true);
+                            s.pop();
+                        }
+                        None => self.top_item(s, shown.item, xf, Some(first + pi), true),
                     }
                 }
             }

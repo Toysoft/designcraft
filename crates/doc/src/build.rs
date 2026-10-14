@@ -607,10 +607,11 @@ impl Document {
         chain
     }
 
-    /// The parent items showing on document page `abs`, each with the x offset from parent spread
-    /// to document spread. Deepest parent first (bottom of the stack), z-order within a level.
-    /// Items overridden by the document page, or by a parent page higher in the chain, are left out.
-    pub fn shown_parent_items(&self, abs: usize) -> Vec<(&Arc<Item>, f64)> {
+    /// The parent items showing on document page `abs`: deepest parent first (bottom of the
+    /// stack), z-order within a level. Items overridden by the document page, or by a parent page
+    /// higher in the chain, are left out. An item belongs to every parent page it overlaps; one that
+    /// crosses the spine shows on each document page applying such a page, cut at the spine.
+    pub fn shown_parent_items(&self, abs: usize) -> Vec<ShownParentItem<'_>> {
         let Some(page) = self.page(abs) else { return Vec::new() };
         if !page.show_parent_items {
             return Vec::new();
@@ -622,19 +623,44 @@ impl Document {
             let dx = page.x - parent.pages[idx].x;
             let above = chain.get(level + 1..).unwrap_or_default();
             for it in &parent.items {
-                // Parent items belong to the parent page their centre sits on.
-                if parent.pages.len() > 1 && parent.page_at_x(it.bounds().center().x) != Some(idx) {
-                    continue;
-                }
+                let clip = if parent.pages.len() > 1 {
+                    let b = it.bounds();
+                    let touched: Vec<usize> =
+                        parent.pages.iter().enumerate().filter(|(_, p)| b.x0 < p.x + p.width && b.x1 > p.x).map(|(j, _)| j).collect();
+                    match touched.as_slice() {
+                        // On the pasteboard: the nearest page's.
+                        [] if parent.page_at_x(b.center().x) == Some(idx) => None,
+                        [only] if *only == idx => None,
+                        many if many.contains(&idx) => {
+                            // Cut at the spine side(s), open towards the outside edge(s).
+                            let x0 = if idx == 0 { page.x - 1.0e4 } else { page.x };
+                            let x1 = if idx + 1 == parent.pages.len() { page.x + page.width + 1.0e4 } else { page.x + page.width };
+                            Some((x0, x1))
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    None
+                };
                 let overridden =
                     page.overridden.contains(&it.id) || above.iter().any(|&(api, aidx)| self.parents[api].pages[aidx].overridden.contains(&it.id));
                 if !overridden {
-                    items.push((it, dx));
+                    items.push(ShownParentItem { item: it, dx, clip_x: clip });
                 }
             }
         }
         items
     }
+}
+
+/// A parent item showing on a document page (see [`Document::shown_parent_items`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ShownParentItem<'a> {
+    pub item: &'a Arc<Item>,
+    /// x offset from the parent spread to the document spread.
+    pub dx: f64,
+    /// For an item crossing the spine: the document-spread x range it is cut to.
+    pub clip_x: Option<(f64, f64)>,
 }
 
 /// The page of parent spread `ps` behind a document page on side `side`: the left page of a facing
@@ -747,13 +773,13 @@ mod tests {
         // Page 3 is a right page (spread [2 3]).
         d.apply_parent(&[2], Some(c)).unwrap();
         assert_eq!(d.parent_chain_for(2), vec![(0, 1), (1, 1), (2, 1)]);
-        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|(it, _)| it.id).collect();
+        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|s| s.item.id).collect();
         assert_eq!(shown, ids);
         // B overrides A's box; the page overrides C's.
         Arc::make_mut(&mut d.parents[1]).pages[1].overridden.push(ids[0]);
         let (si, pi) = d.page_loc(2).unwrap();
         Arc::make_mut(&mut d.spreads[si]).pages[pi].overridden.push(ids[2]);
-        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|(it, _)| it.id).collect();
+        let shown: Vec<ItemId> = d.shown_parent_items(2).iter().map(|s| s.item.id).collect();
         assert_eq!(shown, vec![ids[1]]);
         // A parent hiding its own parent's items ends the chain.
         Arc::make_mut(&mut d.parents[2]).pages[1].show_parent_items = false;
@@ -762,6 +788,37 @@ mod tests {
         Arc::make_mut(&mut d.parents[2]).pages[1].show_parent_items = true;
         Arc::make_mut(&mut d.parents[0]).parent.as_mut().unwrap().based_on = Some(c);
         assert_eq!(d.parent_chain_for(2), vec![(0, 1), (1, 1), (2, 1)]);
+    }
+
+    /// A parent item crossing the spine shows on each document page applying that parent page,
+    /// cut at the spine; a page applying another parent doesn't show it. An item wholly on one
+    /// parent page stays on that page, uncut.
+    #[test]
+    fn parent_item_across_the_spine_shows_on_both_sides() {
+        let mut d = Document::new(&NewDocument { pages: 3, ..Default::default() });
+        let lid = d.default_layer();
+        // Parent pages: left x 0–612, right x 612–1224. One item across the spine (centre right of
+        // it), one on the right page only.
+        let mut ids = Vec::new();
+        for r in [designcraft_geom::Rect::new(100.0, 100.0, 1200.0, 700.0), designcraft_geom::Rect::new(700.0, 100.0, 800.0, 200.0)] {
+            let id = ItemId(d.alloc());
+            d.insert_item(crate::SpreadRef::Parent(0), Item::new(id, lid, crate::Shape::Rectangle, designcraft_geom::shapes::rectangle(r)), None)
+                .unwrap();
+            ids.push(id);
+        }
+        // Spread [2 3]: page index 1 is left, 2 is right; both apply A.
+        let left = d.shown_parent_items(1);
+        assert_eq!(left.iter().map(|s| s.item.id).collect::<Vec<_>>(), vec![ids[0]]);
+        let (x0, x1) = left[0].clip_x.unwrap();
+        assert!(x0 < 0.0 && (x1 - 612.0).abs() < 1e-9, "{x0} {x1}");
+        let right = d.shown_parent_items(2);
+        assert_eq!(right.iter().map(|s| s.item.id).collect::<Vec<_>>(), ids);
+        assert!((right[0].clip_x.unwrap().0 - 612.0).abs() < 1e-9 && right[1].clip_x.is_none());
+        // The right page applies another parent: the left page still shows its half.
+        let b = d.add_parent("B", "Parent", 1, 0.0, Margins::uniform(36.0));
+        d.apply_parent(&[2], Some(b)).unwrap();
+        assert!(d.shown_parent_items(2).is_empty());
+        assert_eq!(d.shown_parent_items(1).len(), 1);
     }
 
     #[test]

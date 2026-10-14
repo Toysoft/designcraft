@@ -193,8 +193,8 @@ fn pipeline(doc: &Document, sr: SpreadRef, opts: &RenderOptions) -> Pipeline {
         let first = doc.first_page_of_spread(si);
         for pi in 0..sp.pages.len() {
             // The whole parent chain behind the page.
-            for (item, _) in doc.shown_parent_items(first.saturating_add(pi)) {
-                if !inspect(item) {
+            for shown in doc.shown_parent_items(first.saturating_add(pi)) {
+                if !inspect(shown.item) {
                     return Pipeline::Proof;
                 }
             }
@@ -290,7 +290,7 @@ impl Renderer {
             let first = doc.first_page_of_spread(si);
             for pi in 0..sp.pages.len() {
                 // The whole parent chain behind the page.
-                if doc.shown_parent_items(first.saturating_add(pi)).iter().any(|(it, _)| visible(it) && transparent(it)) {
+                if doc.shown_parent_items(first.saturating_add(pi)).iter().any(|s| visible(s.item) && transparent(s.item)) {
                     return None;
                 }
             }

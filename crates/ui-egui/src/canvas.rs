@@ -844,7 +844,8 @@ fn draw_frames(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
         if let SpreadRef::Doc(si) = slot.spread {
             let first = doc.first_page_of_spread(si);
             for pi in 0..sp.pages.len() {
-                for (it, dx) in doc.shown_parent_items(first + pi) {
+                for shown in doc.shown_parent_items(first + pi) {
+                    let (it, dx) = (shown.item, shown.dx);
                     let col = doc.layer(it.layer).map(|l| c32(l.color)).unwrap_or(Color32::LIGHT_BLUE);
                     for poly in path_screen(it, xf, a * Affine::translate((dx, 0.0))) {
                         for w in poly.windows(2) {

@@ -158,6 +158,29 @@ fn text_stroke_keeps_its_join_and_miter_limit() {
     assert!(s.contains("6 w") && s.contains("2.5 M") && !s.contains("1 j"), "double weight, miter join with its limit");
 }
 
+/// A parent item crossing the spine, whose centre sits on the right parent page, is exported on
+/// a left page applying that parent while the right page applies another parent (a full-spread
+/// background on parent J behind page 134, with page 135 on parent I15).
+#[test]
+fn parent_item_across_the_spine_exports_on_the_left_page() {
+    use designcraft_doc::Margins;
+    let mut d = Document::new(&NewDocument { pages: 3, ..NewDocument::default() });
+    let lid = d.default_layer();
+    let mut it = Item::new(
+        ItemId(d.alloc()),
+        lid,
+        designcraft_doc::Shape::Rectangle,
+        designcraft_geom::shapes::rectangle(Rect::new(10.0, 10.0, 1220.0, 780.0)),
+    );
+    it.fill = Fill::swatch("C=100 M=0 Y=0 K=0");
+    d.insert_item(SpreadRef::Parent(0), it, None).unwrap();
+    let b = d.add_parent("B", "Parent", 1, 0.0, Margins::uniform(36.0));
+    d.apply_parent(&[0, 2], Some(b)).unwrap();
+    // Only page 2 (left page of spread [2 3]) applies A.
+    let s = uncompressed(&d, PdfOptions::default());
+    assert!(s.contains("1 0 0 0 k"), "the cyan background on page 2");
+}
+
 /// [Paper] went into print PDFs as `1 1 1 rg`, DeviceRGB white.
 #[test]
 fn paper_prints_as_no_ink() {

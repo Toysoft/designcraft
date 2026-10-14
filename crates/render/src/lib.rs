@@ -467,9 +467,21 @@ impl Renderer {
                 let first = doc.first_page_of_spread(si);
                 for pi in 0..sp.pages.len() {
                     // The whole parent chain, deepest parent at the bottom.
-                    for (it, dx) in doc.shown_parent_items(first + pi) {
-                        if it.layer == layer.id {
-                            self.draw_item(ctx, f, it, Affine::translate((dx, 0.0)), Some(first + pi));
+                    for shown in doc.shown_parent_items(first + pi) {
+                        if shown.item.layer != layer.id {
+                            continue;
+                        }
+                        let xf = Affine::translate((shown.dx, 0.0));
+                        match shown.clip_x {
+                            // Crossing the spine: cut to this page's side.
+                            Some((x0, x1)) => {
+                                let b = sp.bounds();
+                                ctx.set_transform(f.view);
+                                ctx.push_clip_layer(&kurbo::Rect::new(x0, b.y0 - 1.0e4, x1, b.y1 + 1.0e4).to_path(0.1));
+                                self.draw_item(ctx, f, shown.item, xf, Some(first + pi));
+                                ctx.pop_layer();
+                            }
+                            None => self.draw_item(ctx, f, shown.item, xf, Some(first + pi)),
                         }
                     }
                 }
