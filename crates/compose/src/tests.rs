@@ -834,6 +834,29 @@ fn break_characters_end_their_paragraph_and_keep_page_parity() {
     assert_eq!(cs.overset_at, Some(text.find("four").unwrap()));
 }
 
+/// A paragraph that starts at the top of a frame isn't pushed on by Next Page, but Next Odd Page
+/// (or Next Even Page) still moves it when that frame is on a page of the other parity.
+#[test]
+fn odd_and_even_page_starts_keep_parity_at_the_top_of_a_frame() {
+    use designcraft_doc::StartParagraph;
+    use designcraft_doc::story::PAGE_BREAK;
+    let pages_of = |start: StartParagraph| {
+        let mut d = Document::new(&NewDocument { pages: 4, facing_pages: false, primary_text_frame: true, ..Default::default() });
+        let sid = d.settings.primary_story.unwrap();
+        // "two" begins at the top of page 2, after the page break that ends "one".
+        d.story_mut(sid).unwrap().insert(0, &format!("one{PAGE_BREAK}\ntwo\nthree"));
+        d.story_mut(sid).unwrap().paras[1].para.start_paragraph = Some(start);
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        // Frame i is on page i + 1.
+        cs.frames.iter().enumerate().flat_map(|(fi, f)| f.lines.iter().map(move |l| (l.para, fi + 1))).collect::<Vec<_>>()
+    };
+    // Already at the top of an even page: Next Page and Next Even Page leave "two" where it is.
+    assert_eq!(pages_of(StartParagraph::NextPage), vec![(0, 1), (1, 2), (2, 2)]);
+    assert_eq!(pages_of(StartParagraph::NextEvenPage), vec![(0, 1), (1, 2), (2, 2)]);
+    // Next Odd Page takes it to page 3, leaving page 2 empty.
+    assert_eq!(pages_of(StartParagraph::NextOddPage), vec![(0, 1), (1, 3), (2, 3)]);
+}
+
 #[test]
 fn line_before_a_break_character_is_a_last_line() {
     // As in InDesign: column, frame and page breaks end the paragraph's last line (set with the

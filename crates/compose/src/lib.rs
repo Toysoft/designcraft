@@ -591,8 +591,11 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             .and_then(|t| t.chars().next_back())
             .and_then(break_start);
         if let Some(t) = story.para_table(pi) {
+            let start = after_break.unwrap_or(pp.start_paragraph);
             if cur.last_baseline.is_some() {
-                cur.start(after_break.unwrap_or(pp.start_paragraph), &cols, frames, doc);
+                cur.start(start, &cols, frames, doc);
+            } else {
+                cur.start_at_top(start, frames, doc);
             }
             let at_top = cur.last_baseline.is_none();
             let start_at = (cur.fi, cur.col);
@@ -847,17 +850,22 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             StartParagraph::NextColumn => next_column(cur),
             other => cur.start(other, &cols, frames, doc),
         };
-        // Paragraph start options.
-        if let Some(start) = after_break
-            && cur.last_baseline.is_some()
-        {
-            begin_at(&mut cur, start);
+        // Paragraph start options. At the top of a frame there is nothing to break away from, but
+        // an odd or even page start still has to land on a page of that parity.
+        if let Some(start) = after_break {
+            if cur.last_baseline.is_some() {
+                begin_at(&mut cur, start);
+            } else {
+                cur.start_at_top(start, frames, doc);
+            }
         }
         if force_col[pi] {
             next_column(&mut cur);
         }
         if cur.last_baseline.is_some() {
             begin_at(&mut cur, pp.start_paragraph);
+        } else {
+            cur.start_at_top(pp.start_paragraph, frames, doc);
         }
         if spanning && cur.fi < frames.len() {
             // Close the band: the paragraph goes below the deepest of its columns, which are
@@ -2068,6 +2076,20 @@ impl Cursor {
             StartParagraph::NextPage => self.next_page(frames, doc, None),
             StartParagraph::NextOddPage => self.next_page(frames, doc, Some(true)),
             StartParagraph::NextEvenPage => self.next_page(frames, doc, Some(false)),
+        }
+    }
+    /// A start option for a paragraph at the top of a frame: there is nothing to break away from,
+    /// but an odd or even page start still has to land on a page of that parity, so a paragraph
+    /// at the top of an even page that asks for the next odd page moves on (and vice versa).
+    fn start_at_top(&mut self, start: StartParagraph, frames: &[FrameSpec], doc: &Document) {
+        let want_odd = match start {
+            StartParagraph::NextOddPage => true,
+            StartParagraph::NextEvenPage => false,
+            _ => return,
+        };
+        let Some(page) = frames.get(self.fi).and_then(|f| f.page) else { return };
+        if (doc.page_number(page) % 2 == 1) != want_odd {
+            self.next_page(frames, doc, Some(want_odd));
         }
     }
     /// Move to the next frame on a later page, one with an odd page number (`odd` true) or an

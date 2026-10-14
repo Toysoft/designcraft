@@ -67,7 +67,7 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
         }
     }
     let use_clip = formatted && clip.as_ref().is_some_and(|(_, p)| text.as_ref().is_none_or(|x| x.replace("\r\n", "\n") == *p));
-    // Footnotes, cross-references and tables only paste into story text, not cells or footnotes.
+    // Footnotes, endnotes, editorial notes, cross-references and tables cannot be pasted into cells or footnotes.
     if use_clip && let Some((slice, _)) = clip {
         let slice = if t.cell.is_some() { strip_objects(&slice) } else { (*slice).clone() };
         return s.edit(|d, sel| {
@@ -152,7 +152,13 @@ fn paste_text_frame(s: &mut Session, p: &Value, text: &str, slice: Option<&desig
 
 fn strip_objects(st: &designcraft_doc::Story) -> designcraft_doc::Story {
     let mut out = st.clone();
-    let marks = [designcraft_doc::FOOTNOTE_REF, designcraft_doc::XREF_MARK, designcraft_doc::TABLE_ANCHOR];
+    let marks = [
+        designcraft_doc::FOOTNOTE_REF,
+        designcraft_doc::ENDNOTE_REF,
+        designcraft_doc::NOTE_MARK,
+        designcraft_doc::XREF_MARK,
+        designcraft_doc::TABLE_ANCHOR,
+    ];
     while let Some(i) = out.text.find(marks) {
         let n = out.text[i..].chars().next().map_or(1, char::len_utf8);
         out.delete(i..i + n);
@@ -503,6 +509,124 @@ mod text_clipboard_tests {
         assert_eq!(s.execute("edit.cut", &json!({})).unwrap()["text"], "Bold");
         assert!(s.doc().unwrap().doc.story(b).unwrap().text.starts_with(" wordsTarget"));
         s.doc().unwrap().doc.check().unwrap();
+    }
+
+    fn note_clipboard_session() -> (Session, designcraft_doc::StoryId) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let source = frame(&mut s, "aéz");
+        s.execute("text.select", &json!({"story": source.0, "anchor": 1, "focus": 1})).unwrap();
+        s.execute("endnote.insert", &json!({"text": "Citation A"})).unwrap();
+        s.execute("note.new", &json!({"text": "Memo A", "author": "Ed"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(source).unwrap().text, "a\u{E00F}\u{E010}éz");
+        s.execute("text.select", &json!({"story": source.0, "anchor": 0, "focus": 10})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"fontStyle": "Bold"}})).unwrap();
+        assert_eq!(s.execute("edit.copy", &json!({})).unwrap(), json!({"text": "aéz"}));
+        (s, source)
+    }
+
+    fn assert_child_note_paste(
+        s: &mut Session,
+        source: designcraft_doc::StoryId,
+        parent: designcraft_doc::StoryId,
+        cell: designcraft_doc::CellAddr,
+        endpoints: (usize, usize),
+    ) {
+        let before = s.doc().unwrap().doc.clone();
+        let selected = s.doc().unwrap().selection.text.unwrap();
+        assert_eq!((selected.story, selected.cell, selected.anchor, selected.focus), (parent, Some(cell), endpoints.0, endpoints.1));
+        assert_eq!(selected.frame, None);
+        let before_child = before.text_story(parent, Some(cell)).unwrap();
+        assert_eq!(before_child.text, "L----R");
+        let clipboard = s.text_clipboard.clone();
+        let history = s.execute("document.history", &json!({})).unwrap();
+        assert_eq!(history["redo"], json!([]));
+
+        let result = s.execute("edit.paste", &json!({})).unwrap();
+        let after = s.doc().unwrap().doc.clone();
+        let child = after.text_story(parent, Some(cell)).unwrap();
+        assert_eq!(child.text, "LaézR", "root-only note markers must not enter child text");
+        assert_eq!(child.len(), 6);
+        assert_eq!(result, json!({"pos": 5, "formatted": true}));
+        assert_eq!(s.doc().unwrap().selection, Selection::text(designcraft_doc::TextSel { anchor: 5, focus: 5, ..selected }));
+        assert!(child.endnotes.is_empty() && child.editorial.is_empty());
+        for pos in [1, 2, 4] {
+            let (_, format) = child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            assert_eq!(format.over.font_style.as_deref(), Some("Bold"));
+        }
+        // Inspect actual run coverage: char_format_at at a run boundary means the preceding run.
+        for pos in [0, 5] {
+            let (_, old_format) = before_child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            let (_, new_format) = child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            assert_eq!(new_format, old_format);
+        }
+        assert_eq!(after.story(parent).unwrap().text, before.story(parent).unwrap().text);
+        assert_eq!(after.story(parent).unwrap().chars, before.story(parent).unwrap().chars);
+        assert_eq!(after.story(source), before.story(source));
+        assert_eq!(s.text_clipboard, clipboard);
+
+        let mut pasted_history = history.clone();
+        pasted_history["undo"].as_array_mut().unwrap().push(json!("Paste"));
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), pasted_history);
+        assert_eq!(s.execute("edit.undo", &json!({})).unwrap(), json!({"undone": "Paste"}));
+        assert_eq!(s.doc().unwrap().doc, before);
+        let mut undone_history = history;
+        undone_history["redo"] = json!(["Paste"]);
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), undone_history);
+        // This filter does not change which selection Undo restores.
+        assert_eq!(s.execute("edit.redo", &json!({})).unwrap(), json!({"redone": "Paste"}));
+        assert_eq!(s.doc().unwrap().doc, after);
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), pasted_history);
+    }
+
+    #[test]
+    fn formatted_child_paste_filters_endnotes_and_editorial_in_cells() {
+        let (mut s, source) = note_clipboard_session();
+        let parent = frame(&mut s, "PZ");
+        s.execute("text.select", &json!({"story": parent.0, "anchor": 1, "focus": 1})).unwrap();
+        let table_id = s.execute("table.insert", &json!({"rows": 1, "cols": 2})).unwrap()["table"].as_u64().unwrap();
+        s.execute("text.insert", &json!({"text": "L----R"})).unwrap();
+        s.execute("table.nextCell", &json!({})).unwrap();
+        s.execute("text.insert", &json!({"text": "NEIGHBOR"})).unwrap();
+        s.execute("table.prevCell", &json!({})).unwrap();
+        s.execute("text.move", &json!({"dir": "storyStart"})).unwrap();
+        s.execute("text.move", &json!({"dir": "right"})).unwrap();
+        for _ in 0..4 {
+            s.execute("text.move", &json!({"dir": "right", "extend": true})).unwrap();
+        }
+        let before_table = s.doc().unwrap().doc.story(parent).unwrap().tables[&table_id].clone();
+        let cell = designcraft_doc::CellAddr { table: table_id, row: 0, col: 0 };
+        assert_child_note_paste(&mut s, source, parent, cell, (1, 5));
+        let table = &s.doc().unwrap().doc.story(parent).unwrap().tables[&table_id];
+        assert_eq!(table.cell(0, 1).unwrap().text.text, "NEIGHBOR");
+        let mut expected_table = (*before_table).clone();
+        expected_table.cells[0].text = table.cells[0].text.clone();
+        assert_eq!(table.as_ref(), &expected_table);
+
+        // The same clipboard must still retain both markers when pasted into an ordinary root story.
+        let root = frame(&mut s, "L----R");
+        s.execute("text.select", &json!({"story": root.0, "anchor": 1, "focus": 5})).unwrap();
+        assert_eq!(s.execute("edit.paste", &json!({})).unwrap(), json!({"pos": 11, "formatted": true}));
+        assert_eq!(s.doc().unwrap().doc.story(root).unwrap().text, "La\u{E00F}\u{E010}ézR");
+    }
+
+    #[test]
+    fn formatted_child_paste_filters_endnotes_and_editorial_in_footnotes() {
+        let (mut s, source) = note_clipboard_session();
+        let parent = frame(&mut s, "PZ");
+        let neighbor = s.execute("footnote.insert", &json!({"text": "NEIGHBOR"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("text.select", &json!({"story": parent.0, "anchor": 1, "focus": 1})).unwrap();
+        let target = s.execute("footnote.insert", &json!({"text": "L----R"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("text.move", &json!({"dir": "left"})).unwrap();
+        for _ in 0..4 {
+            s.execute("text.move", &json!({"dir": "left", "extend": true})).unwrap();
+        }
+        let before = s.doc().unwrap().doc.story(parent).unwrap().clone();
+        assert_child_note_paste(&mut s, source, parent, designcraft_doc::CellAddr::footnote(target), (5, 1));
+        let after = s.doc().unwrap().doc.story(parent).unwrap();
+        assert_eq!(after.note(neighbor).unwrap().text.text, "NEIGHBOR");
+        assert_eq!(after.note(neighbor), before.note(neighbor));
+        assert_eq!(after.notes.iter().map(|note| note.id).collect::<Vec<_>>(), before.notes.iter().map(|note| note.id).collect::<Vec<_>>());
     }
 
     #[test]

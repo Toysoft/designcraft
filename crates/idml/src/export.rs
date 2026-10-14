@@ -16,6 +16,8 @@ use crate::{DOM_VERSION, MIMETYPE, base64_encode};
 
 const PKG_NS: &str = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging";
 const NO_PARA_ID: &str = "ParagraphStyle/$ID/[No paragraph style]";
+const TOC_STYLE_ID: &str = "TOCStyle/Table of Contents";
+const TOC_STYLE_NAME: &str = "Table of Contents";
 const NO_CHAR_ID: &str = "CharacterStyle/$ID/[No character style]";
 
 /// Export options.
@@ -1050,7 +1052,44 @@ impl<'a> Ex<'a> {
         let mut ro = El::new("RootObjectStyleGroup").attr("Self", self.fresh());
         og.emit(&mut ro, "ObjectStyleGroup", "");
         root.push(ro);
+        if let Some(toc) = d.toc.as_ref().filter(|t| d.story(t.story).is_some()) {
+            root.push(self.toc_style_el(toc));
+        }
         document(&root)
+    }
+
+    /// The document's table of contents as a TOC style; its story names it in `AppliedTOCStyle`.
+    fn toc_style_el(&mut self, toc: &designcraft_doc::Toc) -> El {
+        let para = |n: &str| names::style_self("ParagraphStyle", PARA_BUILTINS, n);
+        let mut el = El::new("TOCStyle")
+            .attr("Self", TOC_STYLE_ID)
+            .attr("Name", TOC_STYLE_NAME)
+            .attr("Title", &toc.title)
+            .attr("TitleStyle", para(toc.title_style.as_deref().unwrap_or("TOC Title")))
+            .attr("RunIn", "false")
+            .attr("IncludeHidden", "false")
+            .attr("IncludeBookDocuments", "false")
+            .attr("CreatePdfBookmarks", "false");
+        for e in &toc.entries {
+            let format = e.entry_style.clone().unwrap_or_else(|| format!("TOC Level {}", e.level));
+            let position = match e.page_number {
+                _ if !toc.page_numbers => "NoPageNumber",
+                designcraft_doc::TocPageNumber::After => "AfterEntry",
+                designcraft_doc::TocPageNumber::Before => "BeforeEntry",
+                designcraft_doc::TocPageNumber::None => "NoPageNumber",
+            };
+            el.push(
+                El::new("TOCStyleEntry")
+                    .attr("Self", self.fresh())
+                    .attr("Name", names::style_name_out(PARA_BUILTINS, &e.style))
+                    .attr("FormatStyle", para(&format))
+                    .attr("Level", e.level)
+                    .attr("PageNumberPosition", position)
+                    .attr("Separator", names::toc_separator_out(e.separator.as_deref().unwrap_or("\t")))
+                    .attr("Sort", "false"),
+            );
+        }
+        el
     }
 
     fn char_attrs(&mut self, el: &mut El, props: &mut Vec<El>, a: &CharAttrs) {
@@ -1959,7 +1998,12 @@ impl<'a> Ex<'a> {
     // ---------- stories ----------
 
     fn story_el(&mut self, s: &Story) -> El {
-        let mut el = El::new("Story").attr("Self", uid(s.id.0)).attr("AppliedTOCStyle", "n").attr("TrackChanges", "false").attr("StoryTitle", "$ID/");
+        let toc = self.d.toc.as_ref().is_some_and(|t| t.story == s.id);
+        let mut el = El::new("Story")
+            .attr("Self", uid(s.id.0))
+            .attr("AppliedTOCStyle", if toc { TOC_STYLE_ID } else { "n" })
+            .attr("TrackChanges", "false")
+            .attr("StoryTitle", "$ID/");
         el.push(
             El::new("StoryPreference")
                 .attr("OpticalMarginAlignment", "false")

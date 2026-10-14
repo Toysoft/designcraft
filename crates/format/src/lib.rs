@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
@@ -108,12 +109,13 @@ fn load_zip(bytes: &[u8]) -> Result<Document, FormatError> {
     let names: Vec<String> = z.file_names().map(str::to_string).collect();
     // Files saved with one copy per placement: identical copies share one buffer as they are
     // read, so memory holds each distinct file once.
-    let mut loaded: HashMap<usize, Vec<Arc<Vec<u8>>>> = HashMap::new();
+    let fingerprint = std::collections::hash_map::RandomState::new();
+    let mut loaded: HashMap<u64, Vec<Arc<Vec<u8>>>> = HashMap::new();
     for name in names {
         let Some(stem) = name.strip_prefix("assets/") else { continue };
         let Some(id) = stem.split('.').next().and_then(|s| s.parse::<u64>().ok()) else { continue };
         if let (Some(data), Some(a)) = (read(&mut z, &name), doc.assets.get_mut(&AssetId(id))) {
-            let same = loaded.entry(data.len()).or_default();
+            let same = loaded.entry(fingerprint.hash_one(data.as_slice())).or_default();
             let data = match same.iter().find(|d| ***d == data) {
                 Some(d) => d.clone(),
                 None => {
@@ -502,6 +504,33 @@ mod tests {
                 .collect();
             assert_eq!(links, [Some("/p/a.png"), Some("/q/b.png"), None]);
         }
+    }
+
+    #[test]
+    fn equal_size_archive_assets_preserve_content_and_share_only_identical_buffers() {
+        let mut d = Document::new(&NewDocument::default());
+        let mut pairs = Vec::new();
+        for n in 0..128u64 {
+            let mut bytes = vec![42; 1024];
+            bytes[1016..].copy_from_slice(&n.to_le_bytes());
+            let a = png_asset(&mut d, &bytes);
+            let b = png_asset(&mut d, &bytes);
+            // Distinct links must remain independently relinkable even when their bytes match.
+            Arc::make_mut(d.assets.get_mut(&a).unwrap()).link = Some(format!("/a/{n}.png"));
+            Arc::make_mut(d.assets.get_mut(&b).unwrap()).link = Some(format!("/b/{n}.png"));
+            place(&mut d, a, 1.0);
+            place(&mut d, b, 2.0);
+            pairs.push((a, b));
+        }
+        let back = load(&save_uncompacted(&d)).unwrap();
+        assert_eq!(back.assets.len(), 256);
+        for (n, (a, b)) in pairs.into_iter().enumerate() {
+            assert_eq!(back.assets[&a].data[1016..], (n as u64).to_le_bytes());
+            assert!(Arc::ptr_eq(&back.assets[&a].data, &back.assets[&b].data));
+            assert_eq!(back.assets[&a].link, d.assets[&a].link);
+            assert_eq!(back.assets[&b].link, d.assets[&b].link);
+        }
+        assert_eq!(back.spreads, d.spreads);
     }
 
     #[test]

@@ -617,7 +617,7 @@ fn legacy_dock_menu_button_opens_the_active_panel_menu() {
     }
     h.run_steps(2);
     assert!(egui::Popup::is_any_open(&h.ctx), "the three-line button must open a menu");
-    h.get_by_label("Insert Page After").click();
+    h.get_by_label("Duplicate Spread").click();
     h.run_steps(3);
     assert_eq!(h.state().session.active().unwrap().doc.page_count(), pages + 1);
     assert!(!egui::Popup::is_any_open(&h.ctx));

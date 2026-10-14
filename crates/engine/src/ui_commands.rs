@@ -168,6 +168,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("window.panel.close", "Close Panel", None, "{panel} — hide a panel"),
     ("window.dockPanel", "Dock Panel", None, "{panel} — back into the dock's icon column"),
     ("window.controlBar", "Control", Some("Cmd+Alt+6"), "{}"),
+    // Object › Fitting with InDesign's shortcuts (one `object.fit` mode each).
+    ("fit.fillFrameProportionally", "Fill Frame Proportionally", Some("Cmd+Alt+Shift+C"), "{} — object.fit {mode: fillProportionally}"),
+    ("fit.contentProportionally", "Fit Content Proportionally", Some("Cmd+Alt+Shift+E"), "{} — object.fit {mode: fitProportionally}"),
+    ("fit.frameToContent", "Fit Frame to Content", Some("Cmd+Alt+C"), "{} — object.fit {mode: fitFrameToContent}"),
+    ("fit.contentToFrame", "Fit Content to Frame", Some("Cmd+Alt+E"), "{} — object.fit {mode: fitContentToFrame}"),
+    ("fit.centerContent", "Center Content", Some("Cmd+Shift+E"), "{} — object.fit {mode: centerContent}"),
     ("window.split", "Split Window", None, "{on?: bool} — two views of the document side by side, each with its own zoom and scroll"),
     ("window.newWindow", "New Window", None, "{on?: bool} — another view of the active document in its own window"),
     ("window.taskBar", "Contextual Task Bar", None, "{}"),

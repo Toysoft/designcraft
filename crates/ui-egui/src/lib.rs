@@ -418,6 +418,8 @@ impl Default for View {
 pub struct Shown {
     /// (doc uid, doc pointer, revision, preview).
     pub doc: (u64, u64, u64, bool),
+    /// Parent and document spreads have different canvas placement and content.
+    pub editing_parents: bool,
     /// Canvas point at the texture's top-left, zoom, and texture size in screen points.
     pub origin: Point,
     pub zoom: f64,
@@ -737,6 +739,7 @@ impl DesignApp {
     pub fn after_engine(&mut self) {
         let reqs = std::mem::take(&mut self.session.ui_requests);
         for r in reqs {
+            let was_find = self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange");
             match r {
                 UiRequest::Dialog { id, params } => self.ui.dialog = Some(dialogs::Dialog::new(&id, params)),
                 UiRequest::View { params } => canvas::apply_view_request(self, &params),
@@ -744,6 +747,10 @@ impl DesignApp {
                     let _ = params;
                     let _ = self.pick_and_open(&purpose);
                 }
+            }
+            // Release only when the request actually replaces Find, including a native PDF picker.
+            if was_find && !self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange") {
+                self.session.reset_find_scope();
             }
         }
         // New documents get a fitted view.
@@ -1104,6 +1111,9 @@ impl DesignApp {
         let r = self.run(cmd, params);
         if let Err(e) = &r {
             let title = if cmd == "file.place" { "Can't Place the File" } else { "Can't Open the File" };
+            if self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange") {
+                self.session.reset_find_scope();
+            }
             self.ui.dialog = Some(dialogs::Dialog::new("alert", json!({"title": title, "file": file, "message": e})));
         } else if let Ok(result) = &r {
             let warnings: Vec<&str> = result
@@ -2246,7 +2256,7 @@ mod browser_import_tests {
         result.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1));
         result.into_bytes()
     }
-    fn pdf() -> Vec<u8> {
+    pub(super) fn pdf() -> Vec<u8> {
         pdf_pages(3)
     }
 

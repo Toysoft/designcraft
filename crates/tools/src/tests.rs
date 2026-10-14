@@ -227,14 +227,22 @@ fn hand_tool_alt_press_power_zooms() {
 }
 
 #[test]
-fn page_tool_opens_page_size() {
+fn page_tool_selects_a_page_and_opens_page_size_on_double_click() {
     let d = Document::new(&NewDocument::default());
     let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));
     let cx = ctx(&d, &s, &c, &l);
     let off = l.xf(SpreadRef::Doc(0)).translation();
+    let (x, y) = (200.0 + off.x + d.spreads[0].pages[0].x, 200.0 + off.y);
     let mut t = create("page");
-    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 200.0 + off.x + d.spreads[0].pages[0].x, 200.0 + off.y));
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, x, y));
+    assert_eq!(a, vec![Action::Exec("layout.selectPage".into(), serde_json::json!({"page": 1, "ids": []}))]);
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::DoubleClick, x, y));
     assert_eq!(a, vec![Action::Dialog("cmd:layout.pageSize".into(), serde_json::json!({"pages": [1], "width": 612.0, "height": 792.0}))]);
+    // The selected page shows its handles and its liquid page rule.
+    let s = Selection { page: Some(0), ..Default::default() };
+    let cx = ctx(&d, &s, &c, &l);
+    let o = t.overlays(&cx);
+    assert!(matches!(o.as_slice(), [Overlay::PageHandles(_), Overlay::Tag { text, .. }] if text == "Off"), "{o:?}");
 }
 
 #[test]
