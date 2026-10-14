@@ -172,7 +172,9 @@ pub fn specs() -> Vec<CommandSpec> {
             let st = s.doc_mut()?;
             let e = st.history.undo.pop().ok_or_else(|| super::bad("edit.undo", "nothing to undo"))?;
             st.history.redo.push(HistoryEntry { label: e.label.clone(), doc: st.doc.clone(), selection: st.selection.clone() });
-            st.doc = e.doc;
+            let mut doc = e.doc;
+            super::rulers::keep_zero_point(&st.doc, &mut doc);
+            st.doc = doc;
             st.selection = e.selection;
             st.revision += 1;
             // Pending typing overrides belong to the current edit state, not a restored snapshot.
@@ -183,7 +185,9 @@ pub fn specs() -> Vec<CommandSpec> {
             let st = s.doc_mut()?;
             let e = st.history.redo.pop().ok_or_else(|| super::bad("edit.redo", "nothing to redo"))?;
             st.history.undo.push(HistoryEntry { label: e.label.clone(), doc: st.doc.clone(), selection: st.selection.clone() });
-            st.doc = e.doc;
+            let mut doc = e.doc;
+            super::rulers::keep_zero_point(&st.doc, &mut doc);
+            st.doc = doc;
             st.selection = e.selection;
             st.revision += 1;
             s.typing_format = None;
