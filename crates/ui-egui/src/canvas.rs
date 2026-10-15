@@ -2409,6 +2409,49 @@ mod tests {
     }
 
     #[test]
+    fn mouse_double_clicking_a_frame_handle_fits_with_one_undo_step() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = designcraft_doc::ItemId(
+            app.run("frame.create", json!({"rect": [100, 100, 400, 300], "content": "text", "text": "Fit this text"})).unwrap()["id"]
+                .as_u64()
+                .unwrap(),
+        );
+        app.run("selection.set", json!({"ids": [id.0]})).unwrap();
+        let original = app.session.doc().unwrap().doc.item(id).unwrap().bounds();
+        // 60 frames a second: the default 0.25 s step puts two clicks past egui's double-click delay.
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(4);
+        let app = h.state();
+        let st = app.session.doc().unwrap();
+        let layout = CanvasLayout::new(&st.doc, false);
+        let xf = Xf::new(app.canvas_rect.unwrap(), app.view().unwrap());
+        let p = xf.to_screen(layout.xf(SpreadRef::Doc(0)) * Point::new(original.x1, original.y1));
+        h.hover_at(p);
+        h.step();
+        // Separate frames model the actual mouse, including egui's release-time double click.
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+                h.step();
+            }
+        }
+        h.run_steps(2);
+        let fitted = h.state().session.doc().unwrap().doc.item(id).unwrap().bounds();
+        assert!(fitted.width() < original.width() && fitted.height() < original.height(), "{fitted:?}");
+        assert_eq!(h.state().session.tool_id(), "selection");
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.state().session.doc().unwrap().doc.item(id).unwrap().bounds(), original);
+    }
+
+    #[test]
     fn selected_merged_owners_paint_the_same_row_and_column_targets() {
         for column in [true, false] {
             for merged in [false, true] {

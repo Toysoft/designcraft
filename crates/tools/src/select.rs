@@ -2,7 +2,8 @@
 //!
 //! Click selects the frontmost item (Shift toggles), drag moves (Alt duplicates, Shift constrains),
 //! the 8 bounding-box handles resize (Shift keeps proportions, Alt from centre, Cmd scales content),
-//! empty-canvas drags make a marquee, double-clicking a text frame switches to the Type tool.
+//! empty-canvas drags make a marquee, double-clicking a text frame switches to the Type tool and
+//! double-clicking a handle fits the frame to its content (corner: both sides, edge: that one).
 //! A click on a selected text frame's in or out port loads the text cursor (see [`crate::thread`]).
 
 use designcraft_doc::{ItemId, SpreadRef};
@@ -229,6 +230,26 @@ fn handle_at(cx: &ToolContext, p: Point) -> Option<usize> {
     let b = cx.selection_bounds()?;
     let tol = cx.tol(5.0);
     handles(b).iter().position(|h| (h.x - p.x).abs() <= tol && (h.y - p.y).abs() <= tol)
+}
+
+/// Side handles are drawn on the canvas bounding box; fitting uses the frame's local axes.
+fn fitting_axis(cx: &ToolContext, handle: usize) -> &'static str {
+    if handle.is_multiple_of(2) {
+        return "both";
+    }
+    let canvas_height = matches!(handle, 1 | 5);
+    let local_width_is_vertical = cx
+        .selection
+        .items
+        .first()
+        .and_then(|id| {
+            let it = cx.doc.item(*id)?;
+            let xf = cx.item_canvas_xf(*id)? * it.xf;
+            let [a, b, _, _, _, _] = xf.as_coeffs();
+            Some(b.abs() > a.abs())
+        })
+        .unwrap_or(false);
+    if canvas_height == local_width_is_vertical { "width" } else { "height" }
 }
 
 /// Just outside a corner handle of the selection → rotate.
@@ -470,6 +491,16 @@ impl Tool for SelectionTool {
             && let Some(actions) = self.thread_pointer(cx, ev)
         {
             return actions;
+        }
+        // The second press of a double click on a selection handle: Fit Frame to Content, along
+        // that handle's side (InDesign).
+        if !self.direct
+            && matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
+            && ev.click_count() == 2
+            && let Some(h) = handle_at(cx, p)
+        {
+            self.drag = Drag::None;
+            return vec![Action::Exec("object.fit".into(), json!({"mode": "fitFrameToContent", "axis": fitting_axis(cx, h)}))];
         }
         // The second press of a double click on a text frame: edit its text.
         if matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
