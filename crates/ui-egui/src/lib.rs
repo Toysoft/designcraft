@@ -544,6 +544,10 @@ pub struct DesignApp {
     pub restyle: bool,
     fonts_ready: bool,
     pub integrated_titlebar: bool,
+    /// The desktop host uses our caption controls and window drag/resize regions (Windows).
+    pub custom_titlebar: bool,
+    pub(crate) window_maximized: bool,
+    pub(crate) pending_window_commands: Vec<egui::ViewportCommand>,
     /// The host installed a native menu bar (macOS): don't draw menus in the window.
     pub native_menu: bool,
     /// Shortcuts the native menu handles (skip them in the egui shortcut handler).
@@ -611,6 +615,9 @@ impl DesignApp {
             restyle: false,
             fonts_ready: false,
             integrated_titlebar: false,
+            custom_titlebar: false,
+            window_maximized: false,
+            pending_window_commands: vec![],
             native_menu: false,
             native_shortcuts: Default::default(),
             last_time: 0.0,
@@ -914,6 +921,7 @@ impl DesignApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.window_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         if self.egui_ctx.is_none() {
             self.egui_ctx = Some(ctx.clone());
         }
@@ -978,6 +986,7 @@ impl DesignApp {
         if self.fonts_ready {
             menus::shortcuts(self, ctx);
         }
+        self.flush_window_commands(ctx);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (dropped, pointer) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos()));
@@ -1206,6 +1215,13 @@ impl DesignApp {
         r
     }
 
+    /// Deliver window actions to the host without persisting them in UI preferences.
+    pub(crate) fn flush_window_commands(&mut self, ctx: &egui::Context) {
+        for command in std::mem::take(&mut self.pending_window_commands) {
+            ctx.send_viewport_cmd(command);
+        }
+    }
+
     /// Keep widget clipboard output private while a queued control event is running.
     pub(crate) fn install_clipboard_guard(&mut self, ctx: &egui::Context) {
         if self.clipboard_guard_installed {
@@ -1372,6 +1388,9 @@ impl DesignApp {
         dialogs::show(self, &ctx);
         about::show(self, &ctx);
         menus::palette(self, &ctx);
+        if self.custom_titlebar {
+            chrome::resize_borders(self, ui);
+        }
         for url in std::mem::take(&mut self.ui.pending_urls) {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }

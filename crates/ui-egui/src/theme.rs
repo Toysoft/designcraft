@@ -83,6 +83,9 @@ pub struct Tokens {
     /// Measurement labels on the canvas (smart dimensions, gaps).
     pub measure_bg: Color32,
     pub measure_text: Color32,
+    /// The Windows caption Close button when hovered, and its glyph.
+    pub caption_close: Color32,
+    pub caption_close_text: Color32,
 }
 
 fn hex(s: u32) -> Color32 {
@@ -125,6 +128,8 @@ impl Tokens {
             smart_guide: hex(0x00c853),
             measure_bg: Color32::from_rgba_unmultiplied(70, 70, 70, 230),
             measure_text: Color32::WHITE,
+            caption_close: hex(0xc42b1c),
+            caption_close_text: Color32::WHITE,
         };
         match b {
             Brightness::Dark => dark,
