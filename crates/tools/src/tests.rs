@@ -1367,7 +1367,7 @@ fn direct_selection_drags_content_inside_its_frame() {
 }
 
 #[test]
-fn selection_tool_grabber_moves_content_elsewhere_moves_the_frame() {
+fn selection_tool_moves_selected_content_and_the_frame_otherwise() {
     let mut d = Document::new(&NewDocument::default());
     let f = graphic_frame(&mut d);
     let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
@@ -1386,15 +1386,28 @@ fn selection_tool_grabber_moves_content_elsewhere_moves_the_frame() {
     let p = preview_params(&a);
     assert_eq!((p["dx"].as_f64(), p["dy"].as_f64(), &p["content"]), (Some(-20.0), Some(10.0), &serde_json::json!(true)));
     assert_eq!(t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Up, centre.x - 20.0, centre.y + 10.0)), vec![Action::Commit]);
-    // A press elsewhere in the frame keeps the content selection; dragging selects and moves the frame.
+    // With the content selected (the grabber, or a double-click), the pointer is a hand over it and
+    // a drag anywhere on it moves it, as in InDesign (Dansky's Exclude Overlap tutorial, 7:13).
     let edge = spread_pt(&l, 115.0, 185.0);
+    assert_eq!(t.cursor(&ctx(&d, &content, &c, &l), edge, Mods::default()), Cursor::Hand);
     assert!(t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Down, edge.x, edge.y)).is_empty());
     let a = t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Drag, edge.x + 30.0, edge.y));
-    assert_eq!(a[0], Action::Exec("selection.set".into(), serde_json::json!({"ids": [f.0]})));
-    assert_eq!(a[1], Action::Begin("Move".into()));
+    assert_eq!(a[0], Action::Begin("Move Content".into()));
     let p = preview_params(&a);
-    assert_eq!((p["dx"].as_f64(), p.get("content"), p.get("ids")), (Some(30.0), None, None));
-    t.pointer(&ctx(&d, &frame, &c, &l), &PointerEvent::new(PointerKind::Up, edge.x + 30.0, edge.y));
+    assert_eq!((p["dx"].as_f64(), &p["content"]), (Some(30.0), &serde_json::json!(true)));
+    t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Up, edge.x + 30.0, edge.y));
+    // Shift keeps it on one axis; the content stays selected.
+    let shift = Mods { shift: true, ..Default::default() };
+    t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Down, edge.x, edge.y).with_mods(shift));
+    let a = t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Drag, edge.x + 30.0, edge.y + 4.0).with_mods(shift));
+    let p = preview_params(&a);
+    assert_eq!((p["dx"].as_f64(), p["dy"].as_f64(), &p["content"]), (Some(30.0), Some(0.0), &serde_json::json!(true)));
+    assert_eq!(
+        t.pointer(&ctx(&d, &content, &c, &l), &PointerEvent::new(PointerKind::Up, edge.x + 30.0, edge.y).with_mods(shift)),
+        vec![Action::Commit]
+    );
+    // Off the content (the graphic overhangs the frame's sides only), a press selects as before.
+    assert_eq!(t.cursor(&ctx(&d, &content, &c, &l), spread_pt(&l, 150.0, 250.0), Mods::default()), Cursor::Arrow);
     // With the frame selected, a drag away from the grabber moves the frame.
     t.pointer(&ctx(&d, &frame, &c, &l), &PointerEvent::new(PointerKind::Down, edge.x, edge.y));
     let a = t.pointer(&ctx(&d, &frame, &c, &l), &PointerEvent::new(PointerKind::Drag, edge.x, edge.y + 30.0));

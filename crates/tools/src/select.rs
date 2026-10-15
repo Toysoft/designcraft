@@ -260,6 +260,18 @@ pub fn grabber_at(cx: &ToolContext, p: Point) -> Option<ItemId> {
     grabbers(cx, Some(p)).into_iter().find(|(_, c)| (*c - p).hypot() <= r).map(|(id, _)| id)
 }
 
+/// Is `p` on the selected content (a frame double-clicked into, or its grabber pressed)? A press
+/// there with the Selection tool moves the content, as in InDesign, where the pointer turns into a
+/// hand over it.
+fn on_selected_content(cx: &ToolContext, p: Point) -> bool {
+    cx.selection.content
+        && cx.hit(p).is_some_and(|(_, id)| {
+            let id = cx.doc.top_level_of(id).unwrap_or(id);
+            cx.selection.contains(id) && cx.doc.item(id).is_some_and(holds_content)
+        })
+        && content_bounds(cx).is_some_and(|b| b.contains(p))
+}
+
 /// Canvas union of the content of the selected frames (an item without content counts whole).
 fn content_bounds(cx: &ToolContext) -> Option<Rect> {
     let mut acc: Option<Rect> = None;
@@ -626,7 +638,8 @@ impl Tool for SelectionTool {
                         } else if !cx.selection.contains(id) || (self.direct && !cx.selection.content) {
                             out.push(Action::Exec("selection.set".into(), json!({"ids": [id.0], "content": self.direct})));
                         }
-                        self.drag = Drag::Pending { start: p, hit: true, content: self.direct };
+                        let content = self.direct || on_selected_content(cx, p);
+                        self.drag = Drag::Pending { start: p, hit: true, content };
                         let _ = sr;
                         out
                     }
@@ -1028,7 +1041,7 @@ impl Tool for SelectionTool {
         match handle_at(cx, p) {
             Some(h) => handle_cursor(h),
             None if rotate_zone(cx, p).is_some() => Cursor::Rotate,
-            None if grabber_at(cx, p).is_some() => Cursor::Hand,
+            None if grabber_at(cx, p).is_some() || on_selected_content(cx, p) => Cursor::Hand,
             None => Cursor::Arrow,
         }
     }
