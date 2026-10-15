@@ -190,7 +190,7 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
         let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
         let o = st.objects.get_mut(k).ok_or_else(|| bad("anchored.options", "no such anchored object"))?;
         Arc::make_mut(o).position = position.clone();
-        st.rev += 1;
+        st.rev = st.rev.wrapping_add(1);
         Ok(json!({"position": position}))
     })
 }

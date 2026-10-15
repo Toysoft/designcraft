@@ -997,7 +997,7 @@ impl Table {
 fn append_story(s: &mut Story, other: &Story) {
     if s.is_empty() {
         *s = Story { id: s.id, ..other.clone() };
-        s.rev += 1;
+        s.rev = s.rev.wrapping_add(1);
         return;
     }
     let base = s.len();
@@ -1074,7 +1074,7 @@ impl Story {
     /// Mutable table (copy-on-write); bumps the story revision.
     pub fn table_mut(&mut self, id: u64) -> Option<&mut Table> {
         let t = self.tables.get_mut(&id)?;
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
         Some(Arc::make_mut(t))
     }
 
@@ -1099,7 +1099,7 @@ impl Story {
         let api = self.para_at(anchor);
         self.paras[api].table = Some(id);
         self.fix_tables();
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
         anchor
     }
 

@@ -83,7 +83,7 @@ impl Story {
     /// Mutable endnote (copy-on-write); bumps the story revision.
     pub fn endnote_mut(&mut self, id: u64) -> Option<&mut Footnote> {
         let n = self.endnotes.iter_mut().find(|n| n.id == id)?;
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
         Some(Arc::make_mut(n))
     }
 
@@ -179,6 +179,6 @@ impl crate::Document {
         let Some(st) = self.stories.get_mut(&sid) else { return };
         let st = Arc::make_mut(st);
         let (frames, rev) = (std::mem::take(&mut st.frames), st.rev);
-        *st = Story { frames, rev: rev + 1, ..fresh };
+        *st = Story { frames, rev: rev.wrapping_add(1), ..fresh };
     }
 }

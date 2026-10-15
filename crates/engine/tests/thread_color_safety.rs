@@ -221,3 +221,57 @@ fn safety_empty_linked_parent_follows_survivor_only_on_explicit_update() {
         }
     }
 }
+
+#[test]
+fn safety_thread_revision_wrap_keeps_link_stale_through_native_reopen() {
+    let mut s = setup();
+    let (first, survivor) = frame(&mut s, "PREFIX");
+    let (incoming, parent) = frame(&mut s, "PARENT");
+    // The copied parent's token will coincide with the merged survivor's final revision.
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(parent).unwrap().rev = 1;
+    let (_, linked) = child(&mut s, parent);
+    assert_eq!(link(&mut s, linked)["outOfDate"], false);
+    let bytes = s.execute("file.serialize", &json!({})).unwrap();
+    let mut reopened = Session::new();
+    reopened.execute("file.openBytes", &json!({"name":"rollover.designcraft","base64":bytes["base64"]})).unwrap();
+    let mut s = reopened;
+    // Inject the in-memory rollover boundary after load, independently of cold-load normalization.
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(survivor).unwrap().rev = u64::MAX;
+    assert_eq!(s.doc().unwrap().doc.story(survivor).unwrap().rev, u64::MAX);
+    assert_eq!(s.doc().unwrap().doc.story(linked).unwrap().link, Some((parent, 1)));
+    let before = s.doc().unwrap().doc.clone();
+    let child_frames = before.story(linked).unwrap().frames.clone();
+
+    s.execute("text.thread", &json!({"from":first,"to":incoming})).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let st = d.story(survivor).unwrap();
+    assert_eq!(st.rev, 1, "append wraps MAX to 0, then threading increments to 1");
+    assert_eq!(st.text, "PREFIX\nPARENT");
+    assert_eq!(st.frames, [designcraft_doc::ItemId(first), designcraft_doc::ItemId(incoming)]);
+    assert!(d.story(parent).is_none());
+    assert_eq!(d.story(linked).unwrap().link, Some((survivor, 0)));
+    assert_eq!(d.story(linked).unwrap().text, "PARENT");
+    assert_eq!(d.story(linked).unwrap().frames, child_frames);
+    d.check().unwrap();
+    let after = d.clone();
+    assert_eq!(link(&mut s, linked)["outOfDate"], true);
+
+    let bytes = s.execute("file.serialize", &json!({})).unwrap();
+    let mut reopened = Session::new();
+    reopened.execute("file.openBytes", &json!({"name":"merged-rollover.designcraft","base64":bytes["base64"]})).unwrap();
+    assert_eq!(reopened.doc().unwrap().doc.story(survivor).unwrap().rev, 1);
+    assert_eq!(reopened.doc().unwrap().doc.story(linked).unwrap().link, Some((survivor, 0)));
+    assert_eq!(link(&mut reopened, linked)["outOfDate"], true);
+    reopened.execute("story.updateLink", &json!({"story":linked.0})).unwrap();
+    let st = reopened.doc().unwrap().doc.story(linked).unwrap();
+    assert_eq!(st.id, linked);
+    assert_eq!(st.frames, child_frames);
+    assert_eq!(st.text, "PREFIX\nPARENT");
+    assert_eq!(st.link, Some((survivor, 1)));
+    assert_eq!(link(&mut reopened, linked)["outOfDate"], false);
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, after);
+}

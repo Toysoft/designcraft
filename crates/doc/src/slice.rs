@@ -153,7 +153,7 @@ impl Story {
             }
         }
         let splits = self.fix_tables_with(&claims);
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
         // Past any return the fix-up put inside the pasted text.
         end + splits.iter().filter(|&&s| s < end).count()
     }
@@ -168,7 +168,7 @@ impl Story {
         }
         if self.text.is_empty() {
             let (id, frames, rev, link) = (self.id, std::mem::take(&mut self.frames), self.rev, self.link.take());
-            *self = Story { id, frames, rev: rev.saturating_add(1), link, ..other };
+            *self = Story { id, frames, rev: rev.wrapping_add(1), link, ..other };
             return;
         }
         if !other.tables.is_empty() {
@@ -215,7 +215,7 @@ impl Story {
         self.xrefs.extend(other.xrefs);
         self.index_refs.extend(other.index_refs);
         self.objects.extend(other.objects);
-        self.rev = self.rev.saturating_add(1);
+        self.rev = self.rev.wrapping_add(1);
     }
 }
 
@@ -441,7 +441,26 @@ mod tests {
         b.notes.push(note(1));
         a.append_story(b);
         assert_eq!(a.text, "Alpha\nBeta");
+        assert_eq!(a.rev, 0);
         assert_eq!(a.endnotes.len(), 2);
         assert_eq!(a.notes.len(), 2);
+    }
+
+    #[test]
+    fn append_to_empty_story_wraps_revision_and_keeps_identity() {
+        let mut a = Story::new(StoryId(1));
+        a.frames = vec![crate::ItemId(3)];
+        a.link = Some((StoryId(4), 7));
+        a.rev = u64::MAX;
+        let mut b = Story::with_text(StoryId(2), "Incoming", ParaFormat::default());
+        b.format_chars(0..8, |f| f.over.size = Some(18.0));
+        a.append_story(b);
+        assert_eq!(a.rev, 0);
+        assert_eq!(a.id, StoryId(1));
+        assert_eq!(a.frames, [crate::ItemId(3)]);
+        assert_eq!(a.link, Some((StoryId(4), 7)));
+        assert_eq!(a.text, "Incoming");
+        assert_eq!(a.char_format_at(0).over.size, Some(18.0));
+        a.check().unwrap();
     }
 }

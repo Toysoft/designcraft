@@ -142,7 +142,7 @@ fn replace(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
             if any {
-                st.rev += 1;
+                st.rev = st.rev.wrapping_add(1);
             }
         };
         let ids: Vec<_> = d.stories.keys().copied().collect();

@@ -156,7 +156,7 @@ impl Story {
     /// Mutable footnote (copy-on-write); bumps the story revision.
     pub fn note_mut(&mut self, id: u64) -> Option<&mut Footnote> {
         let n = self.notes.iter_mut().find(|n| n.id == id)?;
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
         Some(Arc::make_mut(n))
     }
 

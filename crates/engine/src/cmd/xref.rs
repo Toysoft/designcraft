@@ -162,7 +162,7 @@ fn set_format(s: &mut Session, p: &Value) -> Result<Value> {
         let st = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
         let x = st.xrefs.get_mut(k).ok_or_else(|| bad("xref.setFormat", "no such cross-reference"))?;
         std::sync::Arc::make_mut(x).format = format;
-        st.rev += 1;
+        st.rev = st.rev.wrapping_add(1);
         Ok(Value::Null)
     })
 }

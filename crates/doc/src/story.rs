@@ -328,7 +328,7 @@ impl Story {
         // Character runs.
         self.splice_runs(pos, 0, text.len(), fmt);
         self.normalize();
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
     }
 
     /// End the paragraph after every break character that isn't followed by a `\n`.
@@ -387,7 +387,7 @@ impl Story {
         self.remove_run_bytes(a, b - a);
         self.normalize();
         self.fix_tables_with(&claims);
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
     }
 
     /// Replace a range with text (delete + insert using the format at the start of the range).
@@ -428,7 +428,7 @@ impl Story {
             start = end;
         }
         self.normalize();
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
     }
 
     /// Apply `f` to every paragraph intersecting `range` (an empty range = the paragraph at it).
@@ -440,7 +440,7 @@ impl Story {
             f(p);
             p.table = table;
         }
-        self.rev += 1;
+        self.rev = self.rev.wrapping_add(1);
     }
 
     /// Plain text of a range.
@@ -620,6 +620,31 @@ mod tests {
         s.delete(1..2); // inside 'é' (2 bytes): clamps
         s.check().unwrap();
         s.format_chars(0..3, |f| f.over.size = Some(9.0));
+        s.check().unwrap();
+    }
+
+    #[test]
+    fn saved_revision_wraps_without_stopping_edits() {
+        let mut s = st("seed");
+        s.rev = u64::MAX;
+        // Revisions are serialized; a valid saved story can reach the boundary.
+        let bytes = serde_json::to_vec(&s).unwrap();
+        let mut s: Story = serde_json::from_slice(&bytes).unwrap();
+        s.insert(s.len(), " text");
+        assert_eq!(s.rev, 0);
+        assert_eq!(s.text, "seed text");
+        s.rev = u64::MAX;
+        s.delete(4..s.len());
+        assert_eq!(s.rev, 0);
+        assert_eq!(s.text, "seed");
+        s.rev = u64::MAX;
+        s.format_chars(0..s.len(), |f| f.over.size = Some(18.0));
+        assert_eq!(s.rev, 0);
+        assert_eq!(s.char_format_at(0).over.size, Some(18.0));
+        s.rev = u64::MAX;
+        s.format_paras(0..s.len(), |p| p.style = "Heading".into());
+        assert_eq!(s.rev, 0);
+        assert_eq!(s.paras[0].style, "Heading");
         s.check().unwrap();
     }
 

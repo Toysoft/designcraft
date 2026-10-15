@@ -489,7 +489,7 @@ impl CellStyle {
             for p in &mut cell.text.paras {
                 p.style = ps.clone();
             }
-            cell.text.rev += 1;
+            cell.text.rev = cell.text.rev.wrapping_add(1);
         }
         cell.style = if self.name == NO_CELL_STYLE { String::new() } else { self.name.clone() };
     }

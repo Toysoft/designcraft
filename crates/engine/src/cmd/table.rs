@@ -1152,7 +1152,7 @@ fn reapply_cell_styles(d: &mut Document, names: &[String]) {
                 }
             }
         }
-        st.rev += 1;
+        st.rev = st.rev.wrapping_add(1);
     }
 }
 
@@ -1274,7 +1274,7 @@ fn table_style_edit(s: &mut Session, p: &Value) -> Result<Value> {
                     ts.apply_to(std::sync::Arc::make_mut(t), &cells);
                 }
             }
-            st.rev += 1;
+            st.rev = st.rev.wrapping_add(1);
         }
         ok()
     })

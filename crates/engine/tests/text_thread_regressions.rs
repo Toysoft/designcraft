@@ -275,3 +275,68 @@ fn idml_partial_dropcap_bits_resolve_both_style_and_paragraph_inheritance() {
         }
     }
 }
+
+#[test]
+fn thread_extensions_and_removal_wrap_saved_revisions() {
+    let mut s = setup();
+    let (body, sid) = frame(&mut s, "Body");
+    let sid = StoryId(sid);
+    let (prefix, prefix_story) = frame(&mut s, "");
+    let extra = s.execute("frame.create", &json!({"rect":[72,320,300,500],"content":"unassigned"})).unwrap()["id"].as_u64().unwrap();
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(sid).unwrap().rev = u64::MAX;
+    s.execute("text.thread", &json!({"from":body,"to":extra})).unwrap();
+    let st = s.doc().unwrap().doc.story(sid).unwrap();
+    assert_eq!(st.rev, 0);
+    assert_eq!(st.text, "Body");
+    assert_eq!(st.frames, [designcraft_doc::ItemId(body), designcraft_doc::ItemId(extra)]);
+
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(sid).unwrap().rev = u64::MAX;
+    s.execute("text.thread", &json!({"from":prefix,"to":body})).unwrap();
+    let d = &s.doc().unwrap().doc;
+    assert!(d.story(StoryId(prefix_story)).is_none());
+    let st = d.story(sid).unwrap();
+    assert_eq!(st.rev, 0);
+    assert_eq!(st.text, "Body");
+    assert_eq!(st.frames, [designcraft_doc::ItemId(prefix), designcraft_doc::ItemId(body), designcraft_doc::ItemId(extra)]);
+    d.check().unwrap();
+
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(sid).unwrap().rev = u64::MAX;
+    let before = s.doc().unwrap().doc.clone();
+    s.execute("text.removeFromThread", &json!({"frame":extra})).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let st = d.story(sid).unwrap();
+    assert_eq!(st.rev, 0);
+    assert_eq!(st.text, "Body");
+    assert_eq!(st.frames, [designcraft_doc::ItemId(prefix), designcraft_doc::ItemId(body)]);
+    let detached = d.item(designcraft_doc::ItemId(extra)).unwrap().text_frame().unwrap().story;
+    assert_ne!(detached, sid);
+    assert!(d.story(detached).unwrap().text.is_empty());
+    d.check().unwrap();
+    let after = d.clone();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, after);
+}
+
+#[test]
+fn empty_story_character_format_wraps_saved_revision_and_undoes() {
+    let mut s = setup();
+    let (_, sid) = frame(&mut s, "");
+    s.execute("text.select", &json!({"story":sid,"anchor":0})).unwrap();
+    let sid = StoryId(sid);
+    Arc::make_mut(&mut s.doc_mut().unwrap().doc).story_mut(sid).unwrap().rev = u64::MAX;
+    let before = s.doc().unwrap().doc.clone();
+    s.execute("type.char", &json!({"attrs":{"size":18.0}})).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let st = d.story(sid).unwrap();
+    assert_eq!(st.rev, 0);
+    assert!(st.text.is_empty());
+    assert_eq!(st.chars[0].format.over.size, Some(18.0));
+    d.check().unwrap();
+    let after = d.clone();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().doc, after);
+}

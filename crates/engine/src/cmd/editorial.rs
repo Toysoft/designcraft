@@ -47,7 +47,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Some(a) = author {
                     n.author = a;
                 }
-                st.rev += 1;
+                st.rev = st.rev.wrapping_add(1);
                 ok()
             })
         }),

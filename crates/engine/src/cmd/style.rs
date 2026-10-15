@@ -585,7 +585,7 @@ fn redirect_style_refs(d: &mut designcraft_doc::Document, para: bool, from: &str
                     rename_char_refs(&mut f.para, from, to);
                 }
             }
-            st.rev += 1;
+            st.rev = st.rev.wrapping_add(1);
         });
     }
 }
