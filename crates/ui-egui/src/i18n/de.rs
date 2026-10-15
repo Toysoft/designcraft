@@ -30,6 +30,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "Ausschneiden"),
     ("Copy", "Kopieren"),
     ("Paste", "Einfügen"),
+    ("Capture", "Erfassen"),
+    ("Panel Locations", "Bedienfeldpositionen"),
     ("Clear", "Löschen"),
     ("Duplicate", "Duplizieren"),
     ("Select All", "Alles auswählen"),

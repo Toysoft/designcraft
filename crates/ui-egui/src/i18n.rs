@@ -58,6 +58,8 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    ("Capture", ["Erfassen", "Capturer", "Capturar", "取り込み", "捕捉"]),
+    ("Panel Locations", ["Bedienfeldpositionen", "Emplacements des panneaux", "Ubicaciones de paneles", "パネルの位置", "面板位置"]),
     (
         "Bulleted & Numbered Lists",
         [

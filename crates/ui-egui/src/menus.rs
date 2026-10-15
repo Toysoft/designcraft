@@ -218,7 +218,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         None,
         "{name: Advanced|Book|Digital Publishing|Essentials|Essentials Classic|Interactive for PDF|Printing and Proofing|Typography or a saved workspace}",
     ),
-    ("window.newWorkspace", "New Workspace…", None, "{name} — saves the current bars and panel arrangement"),
+    (
+        "window.newWorkspace",
+        "New Workspace…",
+        None,
+        "{name, panelLocations?: bool (default true: the bars and panels), menuCustomization?: bool (default true: the menu items hidden with Edit › Menus)} — saves the workspace",
+    ),
     ("window.deleteWorkspace", "Delete Workspace…", None, "{name}"),
     ("window.resetWorkspace", "Reset Workspace", None, "{} — back to the current workspace as saved (or its defaults)"),
     ("window.brightness", "Interface Color Theme", None, "{brightness: dark|mediumDark|mediumLight|light|highContrast}"),
@@ -1559,7 +1564,8 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
         "window.toolsDoubleColumn" => flag(&mut app.ui.tools_double_column),
         "window.newWorkspace" => {
             let Some(name) = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
-                app.ui.dialog = Some(crate::dialogs::Dialog::new("newWorkspace", json!({"name": ""})));
+                app.ui.dialog =
+                    Some(crate::dialogs::Dialog::new("newWorkspace", json!({"name": "", "panelLocations": true, "menuCustomization": true})));
                 return Some(Ok(Value::Null));
             };
             let u = &app.ui;
@@ -1576,6 +1582,8 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 docking: u.docking.clone(),
                 docking_hidden: u.docking_hidden.clone(),
                 icon_groups: u.icon_groups.clone(),
+                keep_panels: !p.get("panelLocations").and_then(Value::as_bool).unwrap_or(true),
+                hidden_menu_items: p.get("menuCustomization").and_then(Value::as_bool).unwrap_or(true).then(|| u.hidden_menu_items.clone()),
             };
             app.ui.custom_workspaces.retain(|x| x.name != name);
             app.ui.custom_workspaces.push(w);
@@ -1604,6 +1612,13 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             app.ui.docking_opened = None;
             let name = p.get("name").and_then(Value::as_str).unwrap_or("Essentials");
             if let Some(w) = app.ui.custom_workspaces.iter().find(|w| w.name == name).cloned() {
+                if let Some(hidden) = w.hidden_menu_items {
+                    app.ui.hidden_menu_items = hidden;
+                }
+                if w.keep_panels {
+                    app.ui.workspace = w.name;
+                    return Some(Ok(Value::Null));
+                }
                 app.ui.control_bar = w.control_bar;
                 app.ui.task_bar = w.task_bar;
                 app.ui.task_bar_pin = w.task_bar_pin;
@@ -3933,6 +3948,41 @@ mod tests {
         run_ui(&mut app, "window.deleteWorkspace", &json!({"name": "Mine"})).unwrap().unwrap();
         assert!(app.ui.custom_workspaces.is_empty());
         assert_eq!(app.ui.workspace, "Essentials");
+    }
+
+    /// New Workspace › Capture (Learn Skills Daily's InDesign course, 11:40): Panel Locations and
+    /// Menu Customization, both on by default.
+    #[test]
+    fn new_workspace_captures_panel_locations_and_menu_customization() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        // The dialog offers both, checked.
+        run_ui(&mut app, "window.newWorkspace", &json!({})).unwrap().unwrap();
+        let d = app.ui.dialog.take().unwrap();
+        assert_eq!(
+            (d.id.as_str(), d.fields["panelLocations"].clone(), d.fields["menuCustomization"].clone()),
+            ("newWorkspace", json!(true), json!(true))
+        );
+        // Both captured.
+        app.ui.dock_tab = "swatches".into();
+        app.ui.hidden_menu_items = vec!["Type/Glyphs".into()];
+        run_ui(&mut app, "window.newWorkspace", &json!({"name": "All"})).unwrap().unwrap();
+        // Menus only: choosing it leaves the panels where they are.
+        app.ui.hidden_menu_items = vec!["Layout/Pages".into()];
+        run_ui(&mut app, "window.newWorkspace", &json!({"name": "Menus", "panelLocations": false})).unwrap().unwrap();
+        // Panels only: the menus stay as they are.
+        app.ui.dock_tab = "layers".into();
+        run_ui(&mut app, "window.newWorkspace", &json!({"name": "Panels", "menuCustomization": false})).unwrap().unwrap();
+        app.ui.dock_tab = "properties".into();
+        app.ui.hidden_menu_items.clear();
+        run_ui(&mut app, "window.workspace", &json!({"name": "Menus"})).unwrap().unwrap();
+        assert_eq!((app.ui.dock_tab.as_str(), app.ui.hidden_menu_items.clone()), ("properties", vec!["Layout/Pages".to_string()]));
+        run_ui(&mut app, "window.workspace", &json!({"name": "Panels"})).unwrap().unwrap();
+        assert_eq!((app.ui.dock_tab.as_str(), app.ui.hidden_menu_items.clone()), ("layers", vec!["Layout/Pages".to_string()]));
+        run_ui(&mut app, "window.workspace", &json!({"name": "All"})).unwrap().unwrap();
+        assert_eq!((app.ui.dock_tab.as_str(), app.ui.hidden_menu_items.clone()), ("swatches", vec!["Type/Glyphs".to_string()]));
+        // A workspace saved before the options existed restores its panels.
+        let old: crate::SavedWorkspace = serde_json::from_value(json!({"name": "Old", "dockTab": "pages"})).unwrap();
+        assert!(!old.keep_panels && old.hidden_menu_items.is_none());
     }
 
     #[test]

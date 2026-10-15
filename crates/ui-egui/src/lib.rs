@@ -113,6 +113,13 @@ pub struct SavedWorkspace {
     /// The workspace's own icon column (see [`UiState::icon_groups`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_groups: Option<Vec<Vec<String>>>,
+    /// Saved with New Workspace › Capture › Panel Locations off: choosing the workspace leaves the
+    /// bars and panels where they are.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_panels: bool,
+    /// New Workspace › Capture › Menu Customization: the menu items hidden with Edit › Menus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_menu_items: Option<Vec<String>>,
 }
 
 /// A missing on-by-default bool stays on. `bool::default` is false.

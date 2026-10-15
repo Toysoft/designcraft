@@ -1537,7 +1537,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         let available = (ctx.content_rect().size() - frame_margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
         let preferred_width: f32 = match d.id.as_str() {
             "alert" => 440.0,
-            "closeDocument" | "updateLink" => 380.0,
+            "closeDocument" | "updateLink" | "newWorkspace" => 380.0,
             "newDocument" if crate::i18n::is_rtl(&app.ui.language) => 380.0,
             _ => 640.0,
         };
@@ -2036,10 +2036,10 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Name:"));
                         text_field(ui, &mut d, "name", 220.0);
                     });
-                    crate::rtl::label(
-                        ui,
-                        egui::RichText::new(crate::i18n::tr(&app.ui.language, "Saves which bars show and where the panels are.")).size(10.5),
-                    );
+                    ui.add_space(6.0);
+                    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Capture")).font(semibold(12.0)));
+                    check(ui, &mut d, "panelLocations", crate::i18n::tr(&app.ui.language, "Panel Locations"));
+                    check(ui, &mut d, "menuCustomization", crate::i18n::tr(&app.ui.language, "Menu Customization"));
                 }
                 "fittingOptions" => {
                     check(ui, &mut d, "autoFit", crate::i18n::tr(&app.ui.language, "Auto-Fit"));
@@ -2635,7 +2635,10 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             doc["glyphFallback"] = json!(d.b("glyphFallback"));
             app.run("document.preferences", doc)
         }
-        "newWorkspace" => app.run("window.newWorkspace", json!({"name": d.s("name")})),
+        "newWorkspace" => app.run(
+            "window.newWorkspace",
+            json!({"name": d.s("name"), "panelLocations": d.b("panelLocations"), "menuCustomization": d.b("menuCustomization")}),
+        ),
         "updateLink" => crate::panels::properties::run_update_links(app, d.fields.get("target").cloned().unwrap_or_else(|| json!({}))),
         "closeDocument" => {
             // The document may have moved in the tab row (or gone) while the dialog was open.
