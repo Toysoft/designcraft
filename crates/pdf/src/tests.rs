@@ -458,3 +458,26 @@ fn column_rules_are_drawn() {
     assert!((xs[0] - 214.0).abs() < 0.01 && (xs[1] - 398.0).abs() < 0.01, "{xs:?}");
     assert!(rules(false).is_empty());
 }
+
+#[test]
+fn extreme_page_selection_is_a_page_error_without_overflow() {
+    let doc = doc_with_text("Bounded page selection");
+    let opts = PdfOptions { pages: Some(vec![usize::MAX]), ..Default::default() };
+    assert_eq!(export_pdf(&doc, &Cache::new(), &opts), Err(PdfError::BadPage(usize::MAX)));
+}
+
+#[test]
+fn empty_and_populated_export_metadata_preserve_key_presence() {
+    let mut d = Document::new(&NewDocument::default());
+    d.title.clear();
+    let s = uncompressed(&d, PdfOptions::default());
+    for key in ["/Title", "/Author", "<dc:title>", "<dc:creator>"] {
+        assert!(!s.contains(key), "unexpected empty metadata {key}");
+    }
+    d.title = "Synthetic title".into();
+    let s = uncompressed(&d, PdfOptions { author: Some("Test author".into()), created: Some(1_700_000_000), ..Default::default() });
+    for key in ["/Title", "/Author", "/CreationDate", "<dc:title>", "<dc:creator>"] {
+        assert!(s.contains(key), "missing populated metadata {key}");
+    }
+    assert!(s.contains("Synthetic title") && s.contains("Test author"));
+}

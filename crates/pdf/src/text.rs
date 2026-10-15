@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use craft_pdf::write::backend as krilla;
 use designcraft_compose::{ComposedStory, FrameText, PlacedGlyph};
 use designcraft_fonts::{FontDb, FontFace};
 use designcraft_geom::kurbo::Shape as _;
@@ -66,13 +67,11 @@ impl Exporter<'_> {
         self.fonts
             .entry(face.id())
             .or_insert_with(|| {
-                if face.is_variable() {
-                    // A named instance: krilla embeds the font at these axis settings.
-                    let coords: Vec<(krilla::text::Tag, f32)> = face.coords.iter().map(|(t, v)| (krilla::text::Tag::new(t), *v)).collect();
-                    Font::new_variable(face.data().to_vec().into(), face.index(), &coords)
-                } else {
-                    Font::new(face.data().to_vec().into(), face.index())
-                }
+                // Keep the existing outline fallback and warning when embedding fails.
+                let variations = face.is_variable().then_some(face.coords.as_slice());
+                craft_pdf::write::font(face.data(), face.index(), variations)
+                    .inspect_err(|error| log::warn!("PDF font `{} {}` could not be embedded: {error}", face.family, face.style))
+                    .ok()
             })
             .clone()
     }
