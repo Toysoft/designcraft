@@ -195,6 +195,11 @@ pub struct UiState {
     pub flattener_preview: bool,
     /// Tab / Shift+Tab: 1 = every panel hidden, 2 = all but the Tools panel (0 = shown).
     pub hidden_panels: u8,
+    /// The Pages panel's parents part as its divider was last dragged, and the height the two
+    /// parts shared then (None: a few rows).
+    pub pages_parents_height: Option<[f32; 2]>,
+    /// The Pages panel's Panel Options.
+    pub pages_panel: panels::pages::PanelOptions,
     /// Edit › Color Settings (re-applied at start).
     pub color_settings: Option<designcraft_color::cms::ColorSettings>,
     /// View › Proof Colors and View › Proof Setup.
@@ -339,6 +344,8 @@ impl Default for UiState {
             tag_markers: false,
             flattener_preview: false,
             hidden_panels: 0,
+            pages_parents_height: None,
+            pages_panel: Default::default(),
             color_settings: None,
             proof_colors: false,
             proof_setup: Default::default(),

@@ -1512,6 +1512,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "userDictionary" => crate::i18n::tr(&app.ui.language, "User Dictionary"),
         "newWorkspace" => crate::i18n::tr(&app.ui.language, "New Workspace"),
         "closeDocument" => crate::i18n::tr(&app.ui.language, "Unsaved Changes"),
+        "pagesPanelOptions" => crate::i18n::tr(&app.ui.language, "Panel Options"),
         "updateLink" => crate::i18n::tr(&app.ui.language, "Update Link"),
         "menus" => crate::i18n::tr(&app.ui.language, "Menu Customization"),
         "importOptions" => crate::i18n::tr(&app.ui.language, "Import Options"),
@@ -1537,7 +1538,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         let available = (ctx.content_rect().size() - frame_margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
         let preferred_width: f32 = match d.id.as_str() {
             "alert" => 440.0,
-            "closeDocument" | "updateLink" => 380.0,
+            "closeDocument" | "updateLink" | "pagesPanelOptions" => 380.0,
             "newDocument" if crate::i18n::is_rtl(&app.ui.language) => 380.0,
             _ => 640.0,
         };
@@ -2022,6 +2023,42 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                     let text = crate::i18n::tr(&app.ui.language, "“{}” has changes that are not saved. Save them before closing?")
                         .replace("{}", &d.s("title"));
                     crate::rtl::label(ui, text);
+                }
+                "pagesPanelOptions" => {
+                    // As InDesign's: Pages, Parents, Panel Layout.
+                    use crate::panels::pages::{IconSize, PanelResize};
+                    let lang = app.ui.language.clone();
+                    let sizes: Vec<(&str, &str)> = IconSize::ALL.iter().map(|s| (s.key(), crate::i18n::tr(&lang, s.label()))).collect();
+                    let group = |ui: &mut egui::Ui, title: &str| {
+                        ui.add_space(4.0);
+                        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, title)).strong());
+                    };
+                    group(ui, "Pages");
+                    ui.horizontal(|ui| {
+                        crate::rtl::label(ui, crate::i18n::tr(&lang, "Size:"));
+                        combo(ui, &mut d, "pageSize", &sizes);
+                    });
+                    // Extra Small pages have no room for a thumbnail.
+                    ui.add_enabled_ui(d.s("pageSize") != "extraSmall", |ui| {
+                        check(ui, &mut d, "pageThumbnails", crate::i18n::tr(&lang, "Show Thumbnails"))
+                    });
+                    group(ui, "Parents");
+                    ui.horizontal(|ui| {
+                        crate::rtl::label(ui, crate::i18n::tr(&lang, "Size:"));
+                        combo(ui, &mut d, "parentSize", &sizes);
+                    });
+                    check(ui, &mut d, "parentsVertical", crate::i18n::tr(&lang, "Show Vertically"));
+                    group(ui, "Panel Layout");
+                    for (v, label) in [("pagesOnTop", "Pages on Top"), ("parentsOnTop", "Parents on Top")] {
+                        if ui.radio(d.s("layout") == v, crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).clicked() {
+                            d.fields.insert("layout".into(), json!(v));
+                        }
+                    }
+                    let resizes: Vec<(&str, &str)> = PanelResize::ALL.iter().map(|r| (r.key(), crate::i18n::tr(&lang, r.label()))).collect();
+                    ui.horizontal(|ui| {
+                        crate::rtl::label(ui, crate::i18n::tr(&lang, "Resize:"));
+                        combo(ui, &mut d, "resize", &resizes);
+                    });
                 }
                 "updateLink" => {
                     let text = crate::i18n::tr(
@@ -2636,6 +2673,17 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             app.run("document.preferences", doc)
         }
         "newWorkspace" => app.run("window.newWorkspace", json!({"name": d.s("name")})),
+        "pagesPanelOptions" => {
+            use crate::panels::pages::{IconSize, PanelResize};
+            let o = &mut app.ui.pages_panel;
+            o.page_size = IconSize::from_key(&d.s("pageSize")).unwrap_or(o.page_size);
+            o.page_thumbnails = d.b("pageThumbnails");
+            o.parent_size = IconSize::from_key(&d.s("parentSize")).unwrap_or(o.parent_size);
+            o.parents_vertical = d.b("parentsVertical");
+            o.pages_on_top = d.s("layout") == "pagesOnTop";
+            o.resize = PanelResize::from_key(&d.s("resize")).unwrap_or(o.resize);
+            Ok(Value::Null)
+        }
         "updateLink" => crate::panels::properties::run_update_links(app, d.fields.get("target").cloned().unwrap_or_else(|| json!({}))),
         "closeDocument" => {
             // The document may have moved in the tab row (or gone) while the dialog was open.

@@ -9,13 +9,14 @@ use serde_json::json;
 use crate::theme::Tokens;
 use crate::{DesignApp, icons};
 
-type ThumbKey = (u64, u64, usize);
+/// (document uid, revision, page, thumbnail height).
+type ThumbKey = (u64, u64, usize, u32);
 
 static THUMBS: Mutex<Option<HashMap<ThumbKey, egui::TextureHandle>>> = Mutex::new(None);
 
 fn thumb(app: &mut DesignApp, ctx: &egui::Context, abs: usize, h: f32) -> Option<egui::TextureHandle> {
     let st = app.session.active()?;
-    let key = (st.uid, st.revision, abs);
+    let key = (st.uid, st.revision, abs, h.round() as u32);
     let mut g = THUMBS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
     if let Some(t) = map.get(&key) {
@@ -34,12 +35,124 @@ fn thumb(app: &mut DesignApp, ctx: &egui::Context, abs: usize, h: f32) -> Option
         &designcraft_render::RenderOptions { printing_only: true, ..Default::default() },
     )?;
     let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels);
-    let tex = crate::widgets::load_texture(ctx, format!("thumb{abs}"), ci, egui::TextureOptions::LINEAR);
+    let tex = crate::widgets::load_texture(ctx, format!("thumb{abs}_{}", h.round()), ci, egui::TextureOptions::LINEAR);
     // Drop thumbnails of older revisions.
     let (uid, rev) = (st.uid, st.revision);
     map.retain(|k, _| !(k.0 == uid && k.1 != rev));
     map.insert(key, tex.clone());
     Some(tex)
+}
+
+/// Thumbnail sizes of the Pages panel (Panel Options › Size), InDesign's six.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IconSize {
+    ExtraSmall,
+    #[default]
+    Small,
+    Medium,
+    Large,
+    ExtraLarge,
+    Jumbo,
+}
+
+impl IconSize {
+    pub const ALL: [IconSize; 6] = [IconSize::ExtraSmall, IconSize::Small, IconSize::Medium, IconSize::Large, IconSize::ExtraLarge, IconSize::Jumbo];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IconSize::ExtraSmall => "Extra Small",
+            IconSize::Small => "Small",
+            IconSize::Medium => "Medium",
+            IconSize::Large => "Large",
+            IconSize::ExtraLarge => "Extra Large",
+            IconSize::Jumbo => "Jumbo",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            IconSize::ExtraSmall => "extraSmall",
+            IconSize::Small => "small",
+            IconSize::Medium => "medium",
+            IconSize::Large => "large",
+            IconSize::ExtraLarge => "extraLarge",
+            IconSize::Jumbo => "jumbo",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<IconSize> {
+        IconSize::ALL.into_iter().find(|s| s.key() == k)
+    }
+
+    /// Height of a page thumbnail.
+    fn page_h(self) -> f32 {
+        [14.0, 24.0, THUMB_H, 55.0, 80.0, 120.0][self as usize]
+    }
+
+    /// Height of a parent row.
+    fn row_h(self) -> f32 {
+        [18.0, ROW_H, 40.0, 56.0, 76.0, 110.0][self as usize]
+    }
+}
+
+/// How the Pages panel's parts share a change of the panel's height (Panel Options › Resize).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PanelResize {
+    Proportional,
+    PagesFixed,
+    #[default]
+    ParentsFixed,
+}
+
+impl PanelResize {
+    pub const ALL: [PanelResize; 3] = [PanelResize::Proportional, PanelResize::PagesFixed, PanelResize::ParentsFixed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelResize::Proportional => "Proportional",
+            PanelResize::PagesFixed => "Pages Fixed",
+            PanelResize::ParentsFixed => "Parents Fixed",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            PanelResize::Proportional => "proportional",
+            PanelResize::PagesFixed => "pagesFixed",
+            PanelResize::ParentsFixed => "parentsFixed",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<PanelResize> {
+        PanelResize::ALL.into_iter().find(|s| s.key() == k)
+    }
+}
+
+/// The Pages panel's Panel Options, as InDesign's (kept with the UI settings).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PanelOptions {
+    pub page_size: IconSize,
+    pub page_thumbnails: bool,
+    pub parent_size: IconSize,
+    pub parents_vertical: bool,
+    pub pages_on_top: bool,
+    pub resize: PanelResize,
+}
+
+impl Default for PanelOptions {
+    fn default() -> Self {
+        PanelOptions {
+            page_size: IconSize::Medium,
+            page_thumbnails: true,
+            parent_size: IconSize::Small,
+            parents_vertical: true,
+            pages_on_top: false,
+            resize: PanelResize::ParentsFixed,
+        }
+    }
 }
 
 /// What is being dragged in the Pages panel.
@@ -51,6 +164,12 @@ enum PageDrag {
     Parent(Option<String>),
 }
 
+/// The footer: page count and buttons, always at the panel's bottom.
+const FOOTER_H: f32 = 28.0;
+/// The draggable rule between the parents and the pages.
+const DIVIDER_H: f32 = 9.0;
+/// Parent rows shown at first; the divider shows more.
+const PARENTS_DEFAULT_ROWS: f32 = 4.5;
 /// Selected-page tint (multiplied over the thumbnail).
 const SELECTED_TINT: Color32 = Color32::from_rgb(0x88, 0xc7, 0xfb);
 /// Page-number badge of the selected page.
@@ -61,8 +180,7 @@ const THUMB_H: f32 = 37.0;
 const ROW_H: f32 = 29.0;
 
 /// Paint a blank page icon of `n` pages (parents list), right-aligned at `right`.
-fn blank_spread(p: &egui::Painter, right: egui::Pos2, n: usize, aspect: f32, t: &Tokens) {
-    let h = 24.0;
+fn blank_spread(p: &egui::Painter, right: egui::Pos2, n: usize, aspect: f32, h: f32, t: &Tokens) {
     let w = h * aspect;
     let n = n.max(1);
     for k in 0..n {
@@ -86,111 +204,266 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         let label = p.parent.as_ref().map(|i| i.label()).unwrap_or_default();
         rows.push((label, p.parent.as_ref().map(|i| i.prefix.clone()), p.pages.len()));
     }
-    for (label, prefix, n) in rows {
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
-        let active = editing_parents && prefix.is_some();
-        if active {
-            ui.painter().rect_filled(r, 0.0, t.row_selected);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(r, 0.0, t.hover);
-        }
-        ui.painter().text(r.left_center() + vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.5), t.text_strong);
-        blank_spread(ui.painter(), egui::pos2(r.max.x - 10.0, r.center().y), n, aspect, &t);
-        resp.dnd_set_drag_payload(PageDrag::Parent(prefix.clone()));
-        if resp.double_clicked() && prefix.is_some() {
-            let _ = app.run("layout.parents.edit", json!({"on": true}));
-            app.views.clear();
-        }
-        if resp.dragged() {
-            drag_ghost(ui, &label, &t);
-        }
+    // As in InDesign: parents and pages each scroll on their own (parents on top unless Panel
+    // Options says pages), a divider between them resizes them, the footer stays at the bottom.
+    let opts = app.ui.pages_panel.clone();
+    let total = {
+        let h = ui.available_height();
+        if h.is_finite() && h < 4000.0 { h } else { 480.0 }
     }
-    ui.add_space(4.0);
-    let r = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.min.x - 10.0, r.min.y), vec2(r.width() + 20.0, 1.5)), 0.0, t.section_divider);
-    ui.add_space(12.0);
+    .max(160.0);
+    let row_h = opts.parent_size.row_h();
+    let icon_h = row_h - 5.0;
+    // Parents side by side (Show Vertically off): tiles of the icon and the prefix, wrapping.
+    let tile_w = |n: usize| (icon_h * aspect * n.max(1) as f32 + 16.0).max(44.0);
+    let natural = if opts.parents_vertical {
+        rows.len() as f32 * row_h
+    } else {
+        let width = (ui.available_width() - 4.0).max(1.0);
+        let (mut lines, mut x) = (1.0_f32, 0.0_f32);
+        for (_, _, n) in &rows {
+            let w = tile_w(*n) + 6.0;
+            if x > 0.0 && x + w > width {
+                lines += 1.0;
+                x = 0.0;
+            }
+            x += w;
+        }
+        lines * (icon_h + 22.0)
+    };
+    let space = (total - FOOTER_H - DIVIDER_H).max(2.0 * ROW_H);
+    let parents_max = (space - 2.0 * ROW_H).max(ROW_H);
+    let parents_min = row_h.min(natural);
+    // The divider's place as last dragged, and how a change of the panel's height is shared.
+    let parents_h = match app.ui.pages_parents_height {
+        None => natural.min(PARENTS_DEFAULT_ROWS * ROW_H),
+        Some([h, at]) => match opts.resize {
+            PanelResize::ParentsFixed => h,
+            PanelResize::PagesFixed => h + (space - at),
+            PanelResize::Proportional => h * space / at.max(1.0),
+        },
+    }
+    .clamp(parents_min, parents_max)
+    .min(natural);
+    let pages_h = (space - parents_h).max(ROW_H);
+    let parents_part = |app: &mut DesignApp, ui: &mut egui::Ui| {
+        egui::ScrollArea::vertical().id_salt("pages_parents").max_height(parents_h).min_scrolled_height(parents_h).auto_shrink([false, true]).show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+                let each = |app: &mut DesignApp, ui: &mut egui::Ui, label: &str, prefix: &Option<String>, n: usize| {
+                    let (r, resp) = if opts.parents_vertical {
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag())
+                    } else {
+                        ui.allocate_exact_size(vec2(tile_w(n), icon_h + 22.0), Sense::click_and_drag())
+                    };
+                    let active = editing_parents && prefix.is_some();
+                    if active {
+                        ui.painter().rect_filled(r, 0.0, t.row_selected);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(r, 0.0, t.hover);
+                    }
+                    if opts.parents_vertical {
+                        ui.painter().text(
+                            r.left_center() + vec2(3.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            label,
+                            egui::FontId::proportional(11.5),
+                            t.text_strong,
+                        );
+                        blank_spread(ui.painter(), egui::pos2(r.max.x - 10.0, r.center().y), n, aspect, icon_h, &t);
+                    } else {
+                        let w = icon_h * aspect * n.max(1) as f32;
+                        blank_spread(ui.painter(), egui::pos2(r.center().x + w / 2.0, r.min.y + 3.0 + icon_h / 2.0), n, aspect, icon_h, &t);
+                        let short = prefix.clone().unwrap_or_else(|| label.to_string());
+                        ui.painter().text(
+                            egui::pos2(r.center().x, r.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            short,
+                            egui::FontId::proportional(11.0),
+                            t.text_strong,
+                        );
+                    }
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+                    let resp = if opts.parents_vertical { resp } else { resp.on_hover_text(label) };
+                    resp.dnd_set_drag_payload(PageDrag::Parent(prefix.clone()));
+                    if resp.double_clicked() && prefix.is_some() {
+                        let _ = app.run("layout.parents.edit", json!({"on": true}));
+                        app.views.clear();
+                    }
+                    if resp.dragged() {
+                        drag_ghost(ui, label, &t);
+                    }
+                };
+                if opts.parents_vertical {
+                    for (label, prefix, n) in &rows {
+                        each(app, ui, label, prefix, *n);
+                    }
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+                        for (label, prefix, n) in &rows {
+                            each(app, ui, label, prefix, *n);
+                        }
+                    });
+                }
+            },
+        );
+    };
     // ---- Document spreads.
     let cur = crate::canvas::current_page(app).unwrap_or(0);
     let cur_spread = doc.page_loc(cur).map(|l| l.0);
-    let center = ui.available_width() / 2.0;
     let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
     let tallest = doc.spreads.iter().flat_map(|sp| sp.pages.iter().map(|p| p.height)).fold(doc.settings.page_height, f64::max).max(1.0);
-    for (si, sp) in doc.spreads.iter().enumerate() {
-        let first = doc.first_page_of_spread(si);
-        // One scale for the whole document (pages of their own size show in proportion): the
-        // document's page size at the usual height, unless a taller page would pass 1.8 times it.
-        // Each row is as tall as its spread's tallest page.
-        let scale = (THUMB_H / doc.settings.page_height.max(1.0) as f32).min(1.8 * THUMB_H / tallest as f32);
-        let row_h = sp.pages.iter().map(|p| p.height as f32 * scale).fold(0.0, f32::max).max(THUMB_H * 0.25);
-        let spine = sp.spine_x() as f32;
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0 + row_h + 22.0), Sense::hover());
-        let top = row.min.y + 8.0;
-        // Marker above the current spread.
-        if cur_spread == Some(si) && !editing_parents {
-            let c = egui::pos2(row.min.x + center, row.min.y + 3.5);
-            ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-5.0, -3.0), c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)], t.icon, Stroke::NONE));
-        }
-        for (pi, p) in sp.pages.iter().enumerate() {
-            let abs = first + pi;
-            let x0 = row.min.x + center + (p.x as f32 - spine) * scale;
-            let pr = egui::Rect::from_min_size(egui::pos2(x0, top), vec2(p.width as f32 * scale, p.height as f32 * scale));
-            let resp = ui.interact(pr, ui.id().with(("page", abs)), Sense::click_and_drag());
-            let selected = abs == cur && !editing_parents;
-            let tint = if selected { SELECTED_TINT } else { Color32::WHITE };
-            if let Some(tex) = thumb(app, ui.ctx(), abs, THUMB_H) {
-                ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
-            } else {
-                ui.painter().rect_filled(pr, 0.0, tint);
-            }
-            ui.painter().rect_stroke(pr, 0.0, Stroke::new(0.5, Color32::from_gray(0x4a)), StrokeKind::Outside);
-            // Parent prefix in the outer top corner (black on white).
-            if let Some(pid) = p.parent
-                && let Some(pp) = doc.parents.iter().find(|x| x.id == pid)
-            {
-                let prefix = pp.parent.as_ref().map(|i| i.prefix.clone()).unwrap_or_default();
-                let g = ui.painter().layout_no_wrap(prefix, crate::theme::semibold(9.5), Color32::BLACK);
-                let w = g.size().x + 2.0;
-                let br = if p.side == designcraft_doc::PageSide::Left {
-                    egui::Rect::from_min_size(pr.left_top(), vec2(w, 10.0))
-                } else {
-                    egui::Rect::from_min_size(pr.right_top() - vec2(w, 0.0), vec2(w, 10.0))
-                };
-                ui.painter().rect_filled(br, 0.0, Color32::WHITE);
-                ui.painter().galley(br.min + vec2(1.0, -0.5), g, Color32::BLACK);
-            }
-            // Drag and drop: pages reorder, parents apply.
-            resp.dnd_set_drag_payload(PageDrag::Page(abs));
-            if resp.dragged() {
-                drag_ghost(ui, &app.session.page_label(abs), &t);
-            }
-            if dragging && resp.contains_pointer() {
-                ui.painter().rect_stroke(pr.expand(1.5), 0.0, Stroke::new(2.0, BADGE), StrokeKind::Outside);
-            }
-            if let Some(payload) = resp.dnd_release_payload::<PageDrag>() {
-                drop = Some(((*payload).clone(), abs));
-            }
-            if resp.clicked() || resp.double_clicked() {
-                if editing_parents {
-                    let _ = app.run("layout.parents.edit", json!({"on": false}));
-                    app.views.clear();
+    let th = opts.page_size.page_h();
+    // Extra Small has no room for a thumbnail; Show Thumbnails off draws blank pages.
+    let thumbnails = opts.page_thumbnails && opts.page_size != IconSize::ExtraSmall;
+    let mut pages_part = |app: &mut DesignApp, ui: &mut egui::Ui| {
+        let center = ui.available_width() / 2.0;
+        egui::ScrollArea::vertical().id_salt("pages_spreads").max_height(pages_h).min_scrolled_height(pages_h).auto_shrink([false, false]).show(
+            ui,
+            |ui| {
+                ui.add_space(4.0);
+                for (si, sp) in doc.spreads.iter().enumerate() {
+                    let first = doc.first_page_of_spread(si);
+                    // One scale for the whole document (pages of their own size show in proportion): the
+                    // document's page size at the panel's size, unless a taller page would pass 1.8 times it.
+                    // Each row is as tall as its spread's tallest page.
+                    let scale = (th / doc.settings.page_height.max(1.0) as f32).min(1.8 * th / tallest as f32);
+                    let row_h = sp.pages.iter().map(|p| p.height as f32 * scale).fold(0.0, f32::max).max(th * 0.25);
+                    let spine = sp.spine_x() as f32;
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0 + row_h + 22.0), Sense::hover());
+                    let top = row.min.y + 8.0;
+                    // Marker above the current spread.
+                    if cur_spread == Some(si) && !editing_parents {
+                        let c = egui::pos2(row.min.x + center, row.min.y + 3.5);
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![c + vec2(-5.0, -3.0), c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)],
+                            t.icon,
+                            Stroke::NONE,
+                        ));
+                    }
+                    // Pages narrower than their numbers ("10" under an Extra Small page) are labelled
+                    // once for the spread.
+                    let narrow = sp.pages.len() > 1
+                        && (first..first + sp.pages.len()).zip(&sp.pages).any(|(abs, p)| {
+                            let w = ui.painter().layout_no_wrap(app.session.page_label(abs), crate::theme::semibold(11.0), Color32::WHITE).size().x;
+                            (p.width as f32 * scale) < w + 6.0
+                        });
+                    for (pi, p) in sp.pages.iter().enumerate() {
+                        let abs = first + pi;
+                        let x0 = row.min.x + center + (p.x as f32 - spine) * scale;
+                        let pr = egui::Rect::from_min_size(egui::pos2(x0, top), vec2(p.width as f32 * scale, p.height as f32 * scale));
+                        let resp = ui.interact(pr, ui.id().with(("page", abs)), Sense::click_and_drag());
+                        let selected = abs == cur && !editing_parents;
+                        // Screen readers hear "Page 3".
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, format!("Page {}", app.session.page_label(abs)))
+                        });
+                        let tint = if selected { SELECTED_TINT } else { Color32::WHITE };
+                        match thumbnails.then(|| thumb(app, ui.ctx(), abs, th)).flatten() {
+                            Some(tex) => {
+                                ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+                            }
+                            None => {
+                                ui.painter().rect_filled(pr, 0.0, tint);
+                            }
+                        }
+                        ui.painter().rect_stroke(pr, 0.0, Stroke::new(0.5, Color32::from_gray(0x4a)), StrokeKind::Outside);
+                        // Parent prefix in the outer top corner (black on white).
+                        if let Some(pid) = p.parent
+                            && let Some(pp) = doc.parents.iter().find(|x| x.id == pid)
+                        {
+                            let prefix = pp.parent.as_ref().map(|i| i.prefix.clone()).unwrap_or_default();
+                            let g = ui.painter().layout_no_wrap(prefix, crate::theme::semibold(9.5), Color32::BLACK);
+                            let w = g.size().x + 2.0;
+                            let br = if p.side == designcraft_doc::PageSide::Left {
+                                egui::Rect::from_min_size(pr.left_top(), vec2(w, 10.0))
+                            } else {
+                                egui::Rect::from_min_size(pr.right_top() - vec2(w, 0.0), vec2(w, 10.0))
+                            };
+                            ui.painter().rect_filled(br, 0.0, Color32::WHITE);
+                            ui.painter().galley(br.min + vec2(1.0, -0.5), g, Color32::BLACK);
+                        }
+                        // Drag and drop: pages reorder, parents apply.
+                        resp.dnd_set_drag_payload(PageDrag::Page(abs));
+                        if resp.dragged() {
+                            drag_ghost(ui, &app.session.page_label(abs), &t);
+                        }
+                        if dragging && resp.contains_pointer() {
+                            ui.painter().rect_stroke(pr.expand(1.5), 0.0, Stroke::new(2.0, BADGE), StrokeKind::Outside);
+                        }
+                        if let Some(payload) = resp.dnd_release_payload::<PageDrag>() {
+                            drop = Some(((*payload).clone(), abs));
+                        }
+                        if resp.clicked() || resp.double_clicked() {
+                            if editing_parents {
+                                let _ = app.run("layout.parents.edit", json!({"on": false}));
+                                app.views.clear();
+                            }
+                            crate::canvas::go_to_page(app, abs);
+                        }
+                        resp.context_menu(|ui| page_menu(app, ui, &doc, abs, si));
+                        // Page number under the page: white on a blue badge when selected. Pages too
+                        // narrow for their numbers share one label under the spread (below).
+                        if narrow {
+                            continue;
+                        }
+                        let name = app.session.page_label(abs);
+                        let g = ui.painter().layout_no_wrap(name, crate::theme::semibold(11.0), Color32::WHITE);
+                        let c = egui::pos2(pr.center().x, pr.max.y + 11.0);
+                        if selected {
+                            let br = egui::Rect::from_center_size(c, vec2(g.size().x.max(7.0) + 7.0, 12.5));
+                            ui.painter().rect_filled(br, 0.0, BADGE);
+                        }
+                        ui.painter().galley(c - g.size() / 2.0, g, Color32::WHITE);
+                    }
+                    if narrow {
+                        let names: Vec<String> = (first..first + sp.pages.len()).map(|abs| app.session.page_label(abs)).collect();
+                        let label = match (names.first(), names.last()) {
+                            (Some(a), Some(b)) if names.len() > 1 => format!("{a}\u{2013}{b}"),
+                            (Some(a), _) => a.clone(),
+                            _ => String::new(),
+                        };
+                        let g = ui.painter().layout_no_wrap(label, crate::theme::semibold(11.0), Color32::WHITE);
+                        let c = egui::pos2(row.min.x + center, top + row_h + 11.0);
+                        if cur_spread == Some(si) && !editing_parents {
+                            ui.painter().rect_filled(egui::Rect::from_center_size(c, vec2(g.size().x + 7.0, 12.5)), 0.0, BADGE);
+                        }
+                        ui.painter().galley(c - g.size() / 2.0, g, Color32::WHITE);
+                    }
                 }
-                crate::canvas::go_to_page(app, abs);
-            }
-            resp.context_menu(|ui| page_menu(app, ui, &doc, abs, si));
-            // Page number under the page: white on a blue badge when selected.
-            let name = app.session.page_label(abs);
-            let g = ui.painter().layout_no_wrap(name, crate::theme::semibold(11.0), Color32::WHITE);
-            let c = egui::pos2(pr.center().x, pr.max.y + 11.0);
-            if selected {
-                let br = egui::Rect::from_center_size(c, vec2(g.size().x.max(7.0) + 7.0, 12.5));
-                ui.painter().rect_filled(br, 0.0, BADGE);
-            }
-            ui.painter().galley(c - g.size() / 2.0, g, Color32::WHITE);
+                // Right-click on the empty part of the panel: the short menu.
+                let rest = ui.available_rect_before_wrap();
+                let (_, empty) = ui.allocate_exact_size(vec2(ui.available_width(), rest.height().max(8.0)), Sense::click());
+                empty.context_menu(|ui| empty_menu(app, ui));
+            },
+        );
+    };
+    // The divider: drag it to show more or fewer parents.
+    let divider = |app: &mut DesignApp, ui: &mut egui::Ui| {
+        let (dr, dresp) = ui.allocate_exact_size(vec2(ui.available_width(), DIVIDER_H), Sense::drag());
+        let line = egui::Rect::from_center_size(dr.center(), vec2(dr.width() + 20.0, 1.5));
+        ui.painter().rect_filled(line, 0.0, if dresp.hovered() || dresp.dragged() { t.text_dim } else { t.section_divider });
+        let dresp = dresp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if dresp.dragged() {
+            let dy = dresp.drag_delta().y * if opts.pages_on_top { -1.0 } else { 1.0 };
+            app.ui.pages_parents_height = Some([(parents_h + dy).clamp(parents_min, parents_max), space]);
         }
+        dresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Parents and pages divider"));
+    };
+    if opts.pages_on_top {
+        pages_part(app, ui);
+        divider(app, ui);
+        parents_part(app, ui);
+    } else {
+        parents_part(app, ui);
+        divider(app, ui);
+        pages_part(app, ui);
     }
-    ui.add_space(6.0);
     ui.spacing_mut().item_spacing.y = 4.0;
     ui.horizontal(|ui| {
+        ui.set_min_height(FOOTER_H - 4.0);
         crate::rtl::label(
             ui,
             egui::RichText::new(
@@ -268,6 +541,39 @@ pub fn panel_menu(app: &mut DesignApp, ui: &mut egui::Ui) {
     let cur = crate::canvas::current_page(app).unwrap_or(0);
     let Some((si, _)) = doc.page_loc(cur) else { return };
     page_menu(app, ui, &doc, cur, si);
+}
+
+/// Right-click on the panel's empty part, as InDesign's: the commands that need no page.
+fn empty_menu(app: &mut DesignApp, ui: &mut egui::Ui) {
+    let lang = app.ui.language.clone();
+    let cur = crate::canvas::current_page(app).unwrap_or(0);
+    let item = |ui: &mut egui::Ui, label: &str| ui.button(crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).clicked();
+    if item(ui, "Insert Pages…") {
+        app.ui.dialog = Some(crate::dialogs::Dialog::new("cmd:layout.pages.insert", json!({"after": cur, "count": 1})));
+        ui.close();
+    }
+    if item(ui, "Move Pages…") {
+        app.ui.dialog = Some(crate::dialogs::Dialog::new("cmd:layout.pages.move", json!({"from": cur, "to": cur})));
+        ui.close();
+    }
+    ui.separator();
+    if item(ui, "Panel Options…") {
+        open_panel_options(app);
+        ui.close();
+    }
+}
+
+/// Panel Options…, with the panel's current options.
+pub fn open_panel_options(app: &mut DesignApp) {
+    let o = &app.ui.pages_panel;
+    app.ui.dialog = Some(crate::dialogs::Dialog::new(
+        "pagesPanelOptions",
+        json!({
+            "pageSize": o.page_size.key(), "pageThumbnails": o.page_thumbnails,
+            "parentSize": o.parent_size.key(), "parentsVertical": o.parents_vertical,
+            "layout": if o.pages_on_top { "pagesOnTop" } else { "parentsOnTop" }, "resize": o.resize.key(),
+        }),
+    ));
 }
 
 fn page_menu(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Document, abs: usize, si: usize) {
@@ -358,6 +664,11 @@ fn page_menu(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Docu
         let _ = app.run("layout.pages.toSpread", json!({"page": abs + 1, "spread": si - 1}));
         ui.close();
     }
+    ui.separator();
+    if item(ui, "Panel Options…") {
+        open_panel_options(app);
+        ui.close();
+    }
 }
 
 /// A small label following the pointer while dragging.
@@ -436,6 +747,96 @@ mod tests {
         h.get_by_label("Delete Page").click();
         h.run_steps(3);
         assert_eq!(h.state().session.doc().unwrap().doc.page_count(), 4, "only the clicked page");
+    }
+
+    /// As InDesign's: the footer stays at the bottom however many pages there are, and the
+    /// divider between parents and pages shows more or fewer parents.
+    #[test]
+    fn the_footer_stays_put_and_the_divider_resizes_the_parents() {
+        use egui::{Event, Modifiers, PointerButton};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 60, "facingPages": true})).unwrap();
+        for prefix in ["B", "C", "D", "E", "F", "G"] {
+            app.run("layout.parents.new", json!({"prefix": prefix})).unwrap();
+        }
+        app.ui.dock_tab = "pages".into();
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1400.0, 900.0));
+        for label in ["60 Pages in 31 Spreads", "Create new page", "Delete selected pages"] {
+            assert!(window.contains_rect(h.get_by_label(label).rect()), "{label} is on screen");
+        }
+        // Seven parent rows: four and a half show at first; the rest scroll.
+        let divider = h.get_by_label("Parents and pages divider").rect();
+        let before = divider.center().y;
+        assert!(h.query_by_label("G-Parent").is_none_or(|n| n.rect().top() > divider.top()), "the last parent is scrolled away");
+        let (a, b) = (divider.center(), divider.center() + vec2(0.0, 80.0));
+        h.input_mut().events.push(Event::PointerMoved(a));
+        h.input_mut().events.push(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for k in 1..=4 {
+            h.input_mut().events.push(Event::PointerMoved(a + (b - a) * (k as f32 / 4.0)));
+            h.step();
+        }
+        h.input_mut().events.push(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        let after = h.get_by_label("Parents and pages divider").rect().center().y;
+        assert!(after > before + 40.0, "the divider moved down: {before} → {after}");
+        assert!(h.state().app.ui.pages_parents_height.is_some());
+        assert!(window.contains_rect(h.get_by_label("Create new page").rect()), "the footer is still there");
+    }
+
+    /// InDesign's Panel Options: thumbnail sizes, blank pages without thumbnails, parents side by
+    /// side, pages on top.
+    #[test]
+    fn panel_options_size_and_arrange_the_panel() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 6, "facingPages": true})).unwrap();
+        app.run("layout.parents.new", json!({"prefix": "B"})).unwrap();
+        app.ui.dock_tab = "pages".into();
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        let page = |h: &Harness<'_, crate::test_window::Window>| h.get_by_label("Page 1").rect();
+        let medium = page(&h).height();
+        // The right-click menu on the panel's empty part leads to Panel Options.
+        let empty = h.get_by_label("Create new page").rect().center() - vec2(0.0, 60.0);
+        h.input_mut().events.push(egui::Event::PointerMoved(empty));
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos: empty,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.run_steps(3);
+        h.get_by_label("Panel Options…").click();
+        h.run_steps(3);
+        let d = h.state().app.ui.dialog.clone().unwrap();
+        assert_eq!(
+            (d.id.as_str(), d.fields["pageSize"].clone(), d.fields["parentSize"].clone(), d.fields["layout"].clone()),
+            ("pagesPanelOptions", json!("medium"), json!("small"), json!("parentsOnTop"))
+        );
+        // Jumbo pages, parents side by side, pages on top.
+        let set = |h: &mut Harness<'_, crate::test_window::Window>, k: &str, v: serde_json::Value| {
+            h.state_mut().app.ui.dialog.as_mut().unwrap().fields.insert(k.into(), v);
+        };
+        set(&mut h, "pageSize", json!("jumbo"));
+        set(&mut h, "parentsVertical", json!(false));
+        set(&mut h, "layout", json!("pagesOnTop"));
+        crate::dialogs::confirm(&mut h.state_mut().app).unwrap();
+        h.run_steps(4);
+        assert!(page(&h).height() > 2.5 * medium, "Jumbo: {} vs {medium}", page(&h).height());
+        let o = &h.state().app.ui.pages_panel;
+        assert_eq!((o.page_size, o.parents_vertical, o.pages_on_top), (IconSize::Jumbo, false, true));
+        // Pages on top: the parents come after the pages; side by side: [None] and A sit in one row.
+        let (none, a) = (h.get_by_label("[None]").rect(), h.get_by_label("A-Parent").rect());
+        assert!(none.top() > page(&h).top(), "parents below the pages");
+        assert!((none.top() - a.top()).abs() < 1.0 && a.left() > none.right(), "side by side");
+        // Extra Small: no thumbnails, just pages.
+        crate::panels::pages::open_panel_options(&mut h.state_mut().app);
+        set(&mut h, "pageSize", json!("extraSmall"));
+        crate::dialogs::confirm(&mut h.state_mut().app).unwrap();
+        h.run_steps(4);
+        assert!(page(&h).height() < 0.5 * medium);
     }
 
     #[test]
