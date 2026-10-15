@@ -120,7 +120,15 @@ pub fn sel_info(app: &DesignApp) -> Option<SelInfo> {
     let mut b: Option<Rect> = None;
     for id in &st.selection.items {
         let it = d.item(*id)?;
-        let ib = if with_stroke { it.visible_bounds() } else { it.bounds() };
+        // Direct Selection of a placed graphic: its bounds, as the Transform fields then set.
+        let ib = match it.graphic() {
+            Some(g) if st.selection.content => {
+                let full = d.find(*id).map_or(designcraft_geom::Affine::IDENTITY, |l| d.parent_xf(&l));
+                (full * it.xf * g.xf).transform_rect_bbox(Rect::new(0.0, 0.0, g.size.0, g.size.1))
+            }
+            _ if with_stroke => it.visible_bounds(),
+            _ => it.bounds(),
+        };
         b = Some(b.map_or(ib, |r| r.union(ib)));
     }
     let b = b?;
@@ -784,6 +792,35 @@ mod font_menu_ui_tests {
             assert!(!h.ctx.text_edit_focused(), "{what}: Escape closed the menu");
             assert_eq!(h.state().app.ui.dialog.as_ref().map(|d| d.id.clone()), dialog_id, "{what}: Escape in the menu leaves the dialog open");
         }
+    }
+}
+
+#[cfg(test)]
+mod content_selection_tests {
+    use serde_json::json;
+
+    /// With a placed graphic selected (Direct Selection), X/Y/W/H are the graphic's: what the
+    /// Transform fields then set.
+    #[test]
+    fn a_selected_graphic_shows_its_own_bounds() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let f = app.run("frame.create", json!({"rect": [100, 100, 300, 300], "content": "graphic"})).unwrap()["id"].clone();
+        let png = designcraft_render::Rendered { width: 400, height: 400, pixels: vec![200u8; 400 * 400 * 4] }.to_png();
+        let b64 = designcraft_engine::cmd::base64_encode(&png);
+        app.run("file.place", json!({"base64": b64, "name": "a.png", "frame": f})).unwrap();
+        app.run("selection.set", json!({"ids": [f]})).unwrap();
+        let frame = super::sel_info(&app).unwrap().page_rect;
+        assert!((frame.width() - 200.0).abs() < 1e-6, "{frame:?}");
+        app.run("selection.set", json!({"ids": [f], "content": true})).unwrap();
+        // Placing fitted it to 50%: back to its own 400 pt.
+        app.run("transform.set", json!({"scaleX": 100, "scaleY": 100})).unwrap();
+        let g = super::sel_info(&app).unwrap().page_rect;
+        assert!((g.width() - 400.0).abs() < 1e-6, "the graphic's width, not the frame's: {g:?}");
+        // So a width typed from it scales the graphic by that ratio, not by half.
+        app.run("transform.set", json!({"width": 401})).unwrap();
+        let after = super::sel_info(&app).unwrap().page_rect;
+        assert!((after.width() - 401.0).abs() < 1e-6, "{after:?}");
     }
 }
 

@@ -135,7 +135,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Transform Panel",
             [],
             None,
-            "{x?, y?, width?, height?, scaleX? (%), scaleY? (%), rotation? (°), shear? (°), ref?: 0..8, ids?} — reference-point based geometry; rotation and shear are absolute (Transformations are Totals decides whether nested objects measure them on the pasteboard)",
+            "{x?, y?, width?, height?, scaleX? (%), scaleY? (%), rotation? (°), shear? (°), ref?: 0..8, ids?, content?: bool (the placed graphic inside each frame; the frame stays. Default: whether the selection is content, when no ids are given)} — reference-point based geometry; rotation and shear are absolute (Transformations are Totals decides whether nested objects measure them on the pasteboard)",
             has_selection,
             transform_set
         ),
@@ -1298,15 +1298,32 @@ fn values_json(m: Affine) -> Value {
     json!({"scaleX": r(v.scale_x * 100.0), "scaleY": r(v.scale_y * 100.0), "rotation": r(v.rotation), "shear": r(v.shear)})
 }
 
+/// Whether `transform.set` / `transform.info` act on the placed graphic in each frame: `content`
+/// when given, else whether the selection is content (Direct Selection) when no `ids` or `id` name
+/// the targets.
+fn content_mode(s: &Session, p: &Value) -> Result<bool> {
+    if let Some(c) = p.get("content").and_then(Value::as_bool) {
+        return Ok(c);
+    }
+    let explicit = p.get("ids").is_some() || p.get("id").is_some();
+    Ok(!explicit && s.doc()?.selection.content)
+}
+
 fn transform_info(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = targets(s, p)?;
     let totals = s.prefs.transformations_are_totals;
+    let content = content_mode(s, p)?;
     let d = &s.doc()?.doc;
     let id = *ids.first().ok_or_else(|| bad("transform.info", "nothing selected"))?;
     let (_, m) = measured_xf(d, id, totals).ok_or_else(|| bad("transform.info", "no such object"))?;
     let mut out = values_json(m);
     if let Some(g) = d.item(id).and_then(Item::graphic) {
-        out["content"] = values_json(if totals { m * g.xf } else { g.xf });
+        let c = values_json(if totals { m * g.xf } else { g.xf });
+        // With the graphic selected, its values are the ones the Transform fields show and set.
+        if content {
+            out = c.clone();
+        }
+        out["content"] = c;
     }
     Ok(out)
 }
@@ -1359,6 +1376,10 @@ fn transform_values(s: &mut Session, p: &Value, ids: &[ItemId], rf: usize) -> Re
 
 fn transform_set(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = targets(s, p)?;
+    // Direct Selection of a placed graphic (or `content`): the graphic moves inside its frame.
+    if content_mode(s, p)? {
+        return transform_content(s, p, &ids);
+    }
     if ["rotation", "shear", "scaleX", "scaleY"].iter().any(|k| p.get(*k).is_some()) {
         let rf = p.get("ref").and_then(Value::as_u64).unwrap_or(4) as usize;
         if !["x", "y", "width", "height"].iter().any(|k| p.get(*k).is_some()) {
@@ -1422,6 +1443,88 @@ fn transform_set(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         ok()
+    })
+}
+
+/// `transform.set` on the placed graphics of `ids` (the frames stay): rotation, shear and scale are
+/// absolute, measured as `transform.info` reports the content (on the pasteboard with
+/// Transformations are Totals, else in the frame); x, y, width and height are the graphic's bounds
+/// on the page, about the reference point. Frames without a placed graphic are left alone.
+fn transform_content(s: &mut Session, p: &Value, ids: &[ItemId]) -> Result<Value> {
+    let totals = s.prefs.transformations_are_totals;
+    let get = |k: &str| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
+    let (rot, shear, sx, sy) = (get("rotation"), get("shear").map(|v| v.clamp(-85.0, 85.0)), get("scaleX"), get("scaleY"));
+    let (x, y, w, h) = (get("x"), get("y"), get("width").map(|v| v.max(0.01)), get("height").map(|v| v.max(0.01)));
+    if [sx, sy].iter().flatten().any(|v| v.abs() < 0.01) {
+        return Err(bad("transform.set", "scale too small"));
+    }
+    let rf = p.get("ref").and_then(Value::as_u64).unwrap_or(4).min(8) as usize;
+    {
+        let d = &s.doc()?.doc;
+        if !ids.iter().any(|i| d.item(*i).is_some_and(|it| it.graphic().is_some())) {
+            return Err(bad("transform.set", "no placed graphic to transform"));
+        }
+        // Only locked frames: nothing to change, and no undo step.
+        if !ids.iter().any(|i| d.item(*i).is_some_and(|it| it.graphic().is_some() && !it.locked)) {
+            return Ok(json!({ "changed": 0 }));
+        }
+    }
+    s.edit(|d, _| {
+        let mut changed = 0;
+        for id in ids {
+            let Some(loc) = d.find(*id) else { continue };
+            let full = d.parent_xf(&loc);
+            let Some(it) = d.item(*id) else { continue };
+            if it.locked {
+                continue;
+            }
+            let Some(g) = it.graphic() else { continue };
+            let frame = full * it.xf;
+            let rect = Rect::new(0.0, 0.0, g.size.0.max(1e-9), g.size.1.max(1e-9));
+            // Rotation, shear and scale in the measuring space (pasteboard or frame).
+            let q = if totals { frame } else { Affine::IDENTITY };
+            let mut cur = q * g.xf;
+            let lin = |m: Affine| {
+                let c = m.as_coeffs();
+                Affine::new([c[0], c[1], c[2], c[3], 0.0, 0.0])
+            };
+            if rot.is_some() || shear.is_some() || sx.is_some() || sy.is_some() {
+                let a = designcraft_geom::reference_point(cur.transform_rect_bbox(rect), rf).to_vec2();
+                let v = designcraft_geom::decompose::decompose(cur);
+                let mut t = v;
+                if let Some(r) = rot {
+                    t.rotation = r;
+                }
+                if let Some(k) = shear {
+                    t.shear = k;
+                }
+                if let Some(x) = sx {
+                    t.scale_x = x / 100.0;
+                }
+                if let Some(y) = sy {
+                    t.scale_y = y / 100.0;
+                }
+                let delta = designcraft_geom::decompose::compose(&t) * lin(cur).inverse();
+                cur = Affine::translate(a) * delta * Affine::translate(-a) * cur;
+            }
+            let mut gx = q.inverse() * cur;
+            // Position and size: the graphic's bounds on the page.
+            if x.is_some() || y.is_some() || w.is_some() || h.is_some() {
+                let b = (frame * gx).transform_rect_bbox(rect);
+                let a = designcraft_geom::reference_point(b, rf);
+                let (fx, fy) = (w.map_or(1.0, |w| w / b.width().max(1e-9)), h.map_or(1.0, |h| h / b.height().max(1e-9)));
+                let page_x =
+                    d.spread(loc.spread).and_then(|sp| sp.page_at_x(b.center().x).and_then(|pi| sp.pages.get(pi)).map(|pg| pg.x)).unwrap_or(0.0);
+                let to = Point::new(x.map_or(a.x, |x| x + page_x), y.map_or(a.y, |y| y));
+                let m = Affine::translate(to.to_vec2()) * Affine::scale_non_uniform(fx, fy) * Affine::translate(-a.to_vec2());
+                gx = frame.inverse() * m * frame * gx;
+            }
+            if let Some(Content::Graphic(g)) = d.item_mut(*id).map(|it| &mut it.content) {
+                g.xf = gx;
+                changed += 1;
+            }
+        }
+        Ok(json!({ "changed": changed }))
     })
 }
 
@@ -3458,6 +3561,86 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod content_transform_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// A rotated graphic frame holding a 200 x 100 image, its content selected.
+    fn rotated_frame_with_image() -> (Session, u64) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let f = s.execute("frame.create", &json!({"rect": [100, 100, 300, 300], "content": "graphic"})).unwrap()["id"].as_u64().unwrap();
+        let png = designcraft_render::Rendered { width: 200, height: 100, pixels: vec![200u8; 200 * 100 * 4] }.to_png();
+        s.execute("file.place", &json!({"base64": crate::cmd::file::base64_encode(&png), "name": "a.png", "frame": f})).unwrap();
+        s.execute("transform.rotate", &json!({"ids": [f], "angle": -45})).unwrap();
+        s.execute("selection.set", &json!({"ids": [f], "content": true})).unwrap();
+        (s, f)
+    }
+
+    #[test]
+    fn rotating_the_content_leaves_the_frame_as_it_is() {
+        let (mut s, f) = rotated_frame_with_image();
+        let before = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!((before["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6 && (before["content"]["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6);
+        // The tutorial's step: the image straightened inside its tilted frame.
+        s.execute("transform.set", &json!({"rotation": 0})).unwrap();
+        let after = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!((after["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6, "the frame stays at -45: {after}");
+        assert!(after["content"]["rotation"].as_f64().unwrap().abs() < 1e-6, "the image is upright: {after}");
+        // Scale and position act on the image too.
+        s.execute("transform.set", &json!({"scaleX": 50, "scaleY": 50})).unwrap();
+        let info = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!((info["content"]["scaleX"].as_f64().unwrap() - 50.0).abs() < 1e-6, "{info}");
+        assert!((info["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6);
+        // One undo step each.
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        let undone = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!((undone["content"]["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6, "{undone}");
+    }
+
+    #[test]
+    fn with_the_graphic_selected_transform_info_reports_the_graphic() {
+        let (mut s, f) = rotated_frame_with_image();
+        s.execute("transform.set", &json!({"rotation": 0})).unwrap();
+        // What the Control bar and Properties read: the graphic's 0, not the frame's -45, so a
+        // spinner step from it gives 1, not -44.
+        let info = s.execute("transform.info", &json!({})).unwrap();
+        assert!(info["rotation"].as_f64().unwrap().abs() < 1e-6, "{info}");
+        let rot = info["rotation"].as_f64().unwrap() + 1.0;
+        s.execute("transform.set", &json!({"rotation": rot})).unwrap();
+        let after = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!((after["content"]["rotation"].as_f64().unwrap() - 1.0).abs() < 1e-6, "{after}");
+        assert!((after["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6, "the frame stays: {after}");
+        // `id` names the target explicitly, like `ids`: the frame.
+        let by_id = s.execute("transform.info", &json!({"id": f})).unwrap();
+        assert!((by_id["rotation"].as_f64().unwrap() + 45.0).abs() < 1e-6, "{by_id}");
+    }
+
+    #[test]
+    fn a_locked_frame_records_no_undo_step() {
+        let (mut s, f) = rotated_frame_with_image();
+        s.execute("object.lock", &json!({"ids": [f]})).unwrap();
+        s.execute("selection.set", &json!({"ids": [f], "content": true})).unwrap();
+        let undo = s.doc().unwrap().history.undo.len();
+        assert_eq!(s.execute("transform.set", &json!({"rotation": 0})).unwrap()["changed"], 0);
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo, "no empty undo step");
+    }
+
+    #[test]
+    fn a_frame_selection_still_transforms_the_frame_and_an_empty_frame_has_no_content() {
+        let (mut s, f) = rotated_frame_with_image();
+        // `content: false` (or a frame selection) turns frame and image together.
+        s.execute("transform.set", &json!({"rotation": 0, "content": false})).unwrap();
+        let info = s.execute("transform.info", &json!({"ids": [f]})).unwrap();
+        assert!(info["rotation"].as_f64().unwrap().abs() < 1e-6, "{info}");
+        let e = s.execute("frame.create", &json!({"rect": [400, 100, 500, 200], "content": "graphic"})).unwrap()["id"].as_u64().unwrap();
+        assert!(s.execute("transform.set", &json!({"ids": [e], "content": true, "rotation": 10})).is_err());
     }
 }
 
