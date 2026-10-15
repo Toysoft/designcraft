@@ -305,8 +305,73 @@ impl ComposedStory {
 /// A text-wrap exclusion in a frame's inner space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exclusion {
+    /// The area the wrap keeps text out of (for a contour: the contour's box, offset included).
     pub rect: Rect,
     pub mode: WrapMode,
+    /// Contour wrap: the wrapped shape as closed polygons in the same space as `rect`, and the
+    /// wrap offset around it. A line gives up the shape's horizontal extent within its band.
+    pub contour: Option<Arc<Contour>>,
+}
+
+/// The flattened shape of a contour wrap (see [`Exclusion::contour`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contour {
+    pub polygons: Vec<Vec<Point>>,
+    pub offset: f64,
+}
+
+impl Exclusion {
+    /// A box (bounding box or jump) exclusion.
+    pub fn rect(rect: Rect, mode: WrapMode) -> Self {
+        Exclusion { rect, mode, contour: None }
+    }
+
+    /// The horizontal interval this exclusion takes from the band `y0..y1`, or None when it
+    /// doesn't reach into the band. A contour gives the extent of its shape within the band
+    /// (grown by the offset), as InDesign wraps text around the path rather than its box.
+    pub fn band_extent(&self, y0: f64, y1: f64) -> Option<(f64, f64)> {
+        let r = self.rect;
+        if !(r.y0 < y1 && r.y1 > y0) {
+            return None;
+        }
+        let Some(c) = &self.contour else { return Some((r.x0, r.x1)) };
+        let (y0, y1) = (y0 - c.offset, y1 + c.offset);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for poly in &c.polygons {
+            let n = poly.len();
+            for i in 0..n {
+                let (Some(a), Some(b)) = (poly.get(i), poly.get((i + 1) % n)) else { continue };
+                if a.y.max(b.y) < y0 || a.y.min(b.y) > y1 {
+                    continue;
+                }
+                let mut take = |x: f64| {
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                };
+                if a.y >= y0 && a.y <= y1 {
+                    take(a.x);
+                }
+                if b.y >= y0 && b.y <= y1 {
+                    take(b.x);
+                }
+                for yc in [y0, y1] {
+                    if (a.y - yc) * (b.y - yc) < 0.0 {
+                        take(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x));
+                    }
+                }
+            }
+        }
+        (lo <= hi && lo.is_finite() && hi.is_finite()).then_some((lo - c.offset, hi + c.offset))
+    }
+
+    /// The same exclusion carried by `a` (its box as the bounding box of the moved box).
+    fn transformed(&self, a: designcraft_geom::Affine) -> Self {
+        let contour = self
+            .contour
+            .as_ref()
+            .map(|c| Arc::new(Contour { polygons: c.polygons.iter().map(|p| p.iter().map(|&q| a * q).collect()).collect(), offset: c.offset }));
+        Exclusion { rect: a.transform_rect_bbox(self.rect), mode: self.mode, contour }
+    }
 }
 
 /// One frame of the thread, ready for composition.
@@ -387,26 +452,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
         if !tf.options.ignore_wrap
             && let Some(sp) = spread
         {
-            for other in &sp.items {
-                if other.id == item.id || other.wrap.mode == WrapMode::None || other.hidden {
-                    continue;
-                }
-                if doc.layer(other.layer).is_some_and(|l| !l.visible) {
-                    continue;
-                }
-                let o = other.wrap.offsets;
-                let b = other.bounds();
-                let r = Rect::new(b.x0 - o[1], b.y0 - o[0], b.x1 + o[3], b.y1 + o[2]);
-                let inner = inv.transform_rect_bbox(r);
-                // Only objects that reach the frame wrap its text: one elsewhere on the spread
-                // leaves it alone (a small frame beside it would otherwise lose its gaps to the
-                // minimum gap width, see `free_slot`).
-                let reach = inner.intersect(item.inner_bounds());
-                if !(reach.width() > 0.0 && reach.height() > 0.0) {
-                    continue;
-                }
-                exclusions.push(Exclusion { rect: inner, mode: other.wrap.mode });
-            }
+            wrap_exclusions(doc, &sp.items, designcraft_geom::Affine::IDENTITY, item, inv, &mut exclusions, 0);
         }
         let (page_name, page, left_page) = match (loc.spread, spread) {
             (designcraft_doc::SpreadRef::Doc(si), Some(sp)) => {
@@ -462,7 +508,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
         let vertical = doc.frame_vertical(item);
         let (area, exclusions, grid, page_rect) = if vertical {
             let v = designcraft_doc::vertical_text_xf(area).inverse();
-            let ex = exclusions.into_iter().map(|e| Exclusion { rect: v.transform_rect_bbox(e.rect), ..e }).collect();
+            let ex = exclusions.iter().map(|e| e.transformed(v)).collect();
             let pr = page_rect.map(|(a, b)| (v.transform_rect_bbox(a), v.transform_rect_bbox(b)));
             (Rect::new(0.0, 0.0, area.height(), area.width()), ex, None, pr)
         } else {
@@ -2334,17 +2380,17 @@ fn wrap_slot(f: &FrameSpec, col: Rect, baseline: f64, asc: f64, desc: f64, jump:
             } else {
                 jumped + top
             }
-        } else if let Some(slot) = free_slot(f, col, b - asc, b + desc, size) {
+        } else if let Some(slot) = free_slot(f, col, b - asc, b + desc, b, size) {
             return Some((b, slot));
         } else {
             let (y0, y1) = (b - asc, b + desc);
+            // Below a box, or a point lower past a contour (its extent changes with the band).
             let edge = f
                 .exclusions
                 .iter()
-                .filter(|e| e.mode != WrapMode::JumpObject)
-                .map(|e| e.rect)
-                .filter(|r| r.y0 < y1 && r.y1 > y0)
-                .fold(f64::INFINITY, |m, r| m.min(r.y1));
+                .filter(|e| e.mode != WrapMode::JumpObject && e.band_extent(y0, if e.contour.is_some() { b } else { y1 }).is_some())
+                .map(|e| if e.contour.is_some() { (y0 + 1.0).min(e.rect.y1) } else { e.rect.y1 })
+                .fold(f64::INFINITY, f64::min);
             edge + asc
         };
         if b.is_nan() || b > col.y1 {
@@ -2354,19 +2400,24 @@ fn wrap_slot(f: &FrameSpec, col: Rect, baseline: f64, asc: f64, desc: f64, jump:
     None
 }
 
-/// Widest free horizontal interval of `col` in the band, or None if blocked. A gap a wrap object
-/// cuts narrower than 1.5 em of `size` is skipped (a sliver beside the object); when no object
-/// reaches the column in the band the whole column is free, however narrow (a one-character frame
-/// such as an article's closing tombstone, or a narrow column beside another that wraps).
-fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64) -> Option<(f64, f64)> {
+/// Widest free horizontal interval of `col` in the band `y0..y1` of a line on `baseline`, or None if
+/// blocked. A gap a wrap object cuts narrower than 1.5 em of `size` is skipped (a sliver beside the
+/// object); when no object reaches the column in the band the whole column is free, however narrow
+/// (a one-character frame such as an article's closing tombstone, or a narrow column beside another
+/// that wraps). A contour cuts the line only where the shape is level with its letters above the
+/// baseline, as in InDesign: descenders may pass into the curve (a bounding box takes the whole
+/// band).
+fn free_slot(f: &FrameSpec, col: Rect, y0: f64, y1: f64, baseline: f64, size: f64) -> Option<(f64, f64)> {
     let mut free = vec![(col.x0, col.x1)];
     let mut cut = false;
     for ex in &f.exclusions {
         let r = ex.rect;
-        let overlaps_band = r.y0 < y1 && r.y1 > y0;
         match ex.mode {
             WrapMode::JumpToNextColumn if y1 > r.y0 && r.x0 < col.x1 && r.x1 > col.x0 => return None,
-            WrapMode::BoundingBox | WrapMode::Contour if overlaps_band => {
+            WrapMode::BoundingBox | WrapMode::Contour => {
+                let y1 = if ex.contour.is_some() { baseline } else { y1 };
+                let Some((x0, x1)) = ex.band_extent(y0, y1) else { continue };
+                let r = Rect::new(x0, r.y0, x1, r.y1);
                 // Held to the minimum width only when the object reaches this column: one beside
                 // another column of the frame leaves this one whole, however narrow.
                 cut |= r.x0 < col.x1 && r.x1 > col.x0;
@@ -3764,6 +3815,94 @@ pub fn path_glyphs(
         }
     }
     runs
+}
+
+/// The closed polygons of a contour-wrap path, flattened to 0.25 pt.
+fn contour_polygons(bp: &designcraft_geom::BezPath) -> Vec<Vec<Point>> {
+    use designcraft_geom::kurbo::PathEl;
+    let mut out: Vec<Vec<Point>> = Vec::new();
+    let mut cur: Vec<Point> = Vec::new();
+    designcraft_geom::kurbo::flatten(bp.iter(), 0.25, |el| match el {
+        PathEl::MoveTo(p) => {
+            if cur.len() > 2 {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.clear();
+            cur.push(p);
+        }
+        PathEl::LineTo(p) => cur.push(p),
+        PathEl::ClosePath => {
+            if cur.len() > 2 {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.clear();
+        }
+        _ => {}
+    });
+    if cur.len() > 2 {
+        out.push(cur);
+    }
+    out
+}
+
+/// Text-wrap exclusions from `items` (and the items inside their groups, which wrap text on their
+/// own as in InDesign) for the frame `frame`, in its inner space (`inv` takes spread space there).
+/// `to_spread` takes the items' space to spread space.
+fn wrap_exclusions(
+    doc: &Document,
+    items: &[Arc<designcraft_doc::Item>],
+    to_spread: designcraft_geom::Affine,
+    frame: &designcraft_doc::Item,
+    inv: designcraft_geom::Affine,
+    out: &mut Vec<Exclusion>,
+    depth: usize,
+) {
+    if depth > 64 {
+        return;
+    }
+    // Only objects that reach the frame wrap its text: one elsewhere on the spread leaves it alone
+    // (a small frame beside it would otherwise lose its gaps to the minimum gap width, see
+    // `free_slot`).
+    let frame_box = frame.inner_bounds();
+    let reaches = |r: Rect| {
+        let reach = r.intersect(frame_box);
+        reach.width() > 0.0 && reach.height() > 0.0
+    };
+    for other in items {
+        // A hidden layer's objects keep wrapping text unless the layer suppresses it (Layer Options ›
+        // Suppress Text Wrap When Layer Is Hidden), as in InDesign.
+        if other.id == frame.id || other.hidden || doc.layer(other.layer).is_some_and(|l| !l.visible && l.suppress_wrap_when_hidden) {
+            continue;
+        }
+        if other.shape == designcraft_doc::Shape::Group {
+            wrap_exclusions(doc, other.children(), to_spread * other.xf, frame, inv, out, depth + 1);
+        }
+        if other.wrap.mode == WrapMode::None {
+            continue;
+        }
+        let o = other.wrap.offsets;
+        let b = to_spread.transform_rect_bbox(other.bounds());
+        // Contour: the item's own path (InDesign's contour Same As Clipping for a shape); a group
+        // or an empty path keeps its box. The contour offset is the top offset.
+        let contour = (other.wrap.mode == WrapMode::Contour && other.shape != designcraft_doc::Shape::Group)
+            .then(|| contour_polygons(&other.path.transformed(inv * to_spread * other.xf).to_bezpath()))
+            .filter(|p| !p.is_empty());
+        match contour {
+            Some(polygons) => {
+                let off = o[0].max(0.0);
+                let bb = polygons.iter().flatten().fold(None, |r: Option<Rect>, p| Some(r.map_or(Rect::new(p.x, p.y, p.x, p.y), |r| r.union_pt(*p))));
+                let Some(bb) = bb.map(|bb| bb.inflate(off, off)).filter(|bb| reaches(*bb)) else { continue };
+                out.push(Exclusion { rect: bb, mode: other.wrap.mode, contour: Some(Arc::new(Contour { polygons, offset: off })) });
+            }
+            None => {
+                let r = Rect::new(b.x0 - o[1], b.y0 - o[0], b.x1 + o[3], b.y1 + o[2]);
+                let inner = inv.transform_rect_bbox(r);
+                if reaches(inner) {
+                    out.push(Exclusion::rect(inner, other.wrap.mode));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

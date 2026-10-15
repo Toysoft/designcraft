@@ -253,6 +253,97 @@ fn wrap_doc(para: ParaAttrs, objects: &[(Rect, [f64; 4], WrapMode)]) -> (Documen
     (d, sid)
 }
 
+/// Contour wrap follows the shape: under a triangle's slanted side, lines get back the width the
+/// shape doesn't take there; its bounding box would cut every line at the box's left edge.
+#[test]
+fn contour_wrap_follows_the_shape() {
+    use designcraft_geom::{PathData, Point, SubPath};
+    let triangle = |d: &mut Document, mode| {
+        let lid = d.default_layer();
+        let pts = [Point::new(180.0, 100.0), Point::new(324.0, 100.0), Point::new(324.0, 300.0)];
+        let mut it =
+            designcraft_doc::Item::new(ItemId(d.alloc()), lid, designcraft_doc::Shape::Polygon, PathData::single(SubPath::polyline(&pts, true)));
+        it.wrap.mode = mode;
+        d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    };
+    let right_end_near =
+        |cs: &ComposedStory, y: f64| cs.frames[0].lines.iter().min_by(|a, b| (a.baseline - y).abs().total_cmp(&(b.baseline - y).abs())).unwrap().x1;
+    let (mut d, sid) = wrap_doc(ParaAttrs::default(), &[]);
+    triangle(&mut d, WrapMode::Contour);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let low = right_end_near(&cs, 290.0);
+    assert!(low > 300.0, "near the tip the line almost reaches the frame edge: {low}");
+    let high = right_end_near(&cs, 112.0);
+    assert!(high < 200.0, "under the wide top the line stops at the slanted side: {high}");
+    let (mut d, sid) = wrap_doc(ParaAttrs::default(), &[]);
+    triangle(&mut d, WrapMode::BoundingBox);
+    let boxed = right_end_near(&compose_story(&d, sid, &ComposeOptions::default()), 290.0);
+    assert!(boxed <= 180.5, "a bounding box wrap cuts at the box: {boxed}");
+}
+
+/// A contour cuts a line only where the shape is level with the letters above the baseline: a
+/// shape starting just below a baseline leaves that line whole (its descenders pass into the
+/// curve, as in InDesign); a bounding box there still cuts it.
+#[test]
+fn a_contour_lets_descenders_pass() {
+    use designcraft_geom::{PathData, Point, SubPath};
+    let (d, sid) = wrap_doc(ParaAttrs::default(), &[]);
+    let plain = compose_story(&d, sid, &ComposeOptions::default());
+    let line = &plain.frames[0].lines[3];
+    let (b, desc) = (line.baseline, line.descent);
+    assert!(desc > 1.5);
+    let end = |mode| {
+        let (mut d, sid) = wrap_doc(ParaAttrs::default(), &[]);
+        let lid = d.default_layer();
+        let top = b + 1.0;
+        let pts = [Point::new(150.0, top), Point::new(330.0, top), Point::new(330.0, top + 60.0), Point::new(150.0, top + 60.0)];
+        let mut it =
+            designcraft_doc::Item::new(ItemId(d.alloc()), lid, designcraft_doc::Shape::Polygon, PathData::single(SubPath::polyline(&pts, true)));
+        it.wrap.mode = mode;
+        d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        let l = cs.frames[0].lines.iter().find(|l| (l.baseline - b).abs() < 1e-6).unwrap();
+        l.x1
+    };
+    assert!((end(WrapMode::Contour) - line.x1).abs() < 1e-6, "the contour leaves the line whole");
+    assert!(end(WrapMode::BoundingBox) <= 150.5, "the box cuts it");
+}
+
+/// A wrap object inside a group wraps text on its own, as in InDesign; only top-level items used
+/// to count, so text ran over a grouped wrap shape.
+#[test]
+fn wrap_inside_a_group_pushes_text() {
+    use designcraft_doc::{Content, Item, Shape};
+    let (mut d, sid) = wrap_doc(ParaAttrs::default(), &[]);
+    let lid = d.default_layer();
+    let mut wrap = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, designcraft_geom::shapes::rectangle(Rect::new(200.0, 100.0, 330.0, 200.0)));
+    wrap.wrap.mode = WrapMode::BoundingBox;
+    let other = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, designcraft_geom::shapes::rectangle(Rect::new(400.0, 400.0, 420.0, 420.0)));
+    let mut g = Item::new(ItemId(d.alloc()), lid, Shape::Group, designcraft_geom::PathData::default());
+    g.content = Content::Group { items: vec![std::sync::Arc::new(wrap), std::sync::Arc::new(other)] };
+    d.insert_item(SpreadRef::Doc(0), g, None).unwrap();
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let beside = cs.frames[0].lines.iter().find(|l| l.baseline > 120.0 && l.baseline < 190.0).unwrap();
+    assert!(beside.x1 <= 200.5, "the line stops at the grouped wrap: {}", beside.x1);
+}
+
+/// An object on a hidden layer keeps wrapping text unless the layer suppresses its wrap (Layer
+/// Options › Suppress Text Wrap When Layer Is Hidden), as in InDesign.
+#[test]
+fn hidden_layer_wraps_unless_it_suppresses_wrap() {
+    let beside = |suppress: bool| {
+        let (mut d, sid) = wrap_doc(ParaAttrs::default(), &[(Rect::new(200.0, 100.0, 330.0, 200.0), [0.0; 4], WrapMode::BoundingBox)]);
+        for l in &mut d.layers {
+            l.visible = false;
+            l.suppress_wrap_when_hidden = suppress;
+        }
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        cs.frames[0].lines.iter().find(|l| l.baseline > 120.0 && l.baseline < 190.0).map_or(0.0, |l| l.x1)
+    };
+    assert!(beside(false) <= 200.5, "{}", beside(false));
+    assert!(beside(true) > 300.0, "{}", beside(true));
+}
+
 /// The first line whose baseline is below the top of `ex`.
 fn first_line_below<'a>(cs: &'a ComposedStory, ex: &Exclusion) -> &'a Line {
     cs.frames[0].lines.iter().find(|l| l.baseline > ex.rect.y0).unwrap()
@@ -462,7 +553,7 @@ fn page_number_wider_than_its_frame_stays_whole() {
 fn hostile_wrap_geometry_terminates() {
     let (d, sid) = wrap_doc(ParaAttrs { grid_align: Some(GridAlign::AllLines), ..Default::default() }, &[]);
     let mut specs = frame_specs(&d, sid);
-    let ex = |x0: f64, y0: f64, x1: f64, y1: f64, mode| Exclusion { rect: Rect::new(x0, y0, x1, y1), mode };
+    let ex = |x0: f64, y0: f64, x1: f64, y1: f64, mode| Exclusion::rect(Rect::new(x0, y0, x1, y1), mode);
     let f = &mut specs[0];
     f.exclusions.push(ex(f64::NAN, f64::NAN, f64::NAN, f64::NAN, WrapMode::JumpObject));
     f.exclusions.push(ex(-1e308, 300.0, 1e308, f64::INFINITY, WrapMode::JumpObject));
@@ -4551,6 +4642,8 @@ fn cache_recomposes_when_a_wrap_layer_is_hidden() {
     let cache = Cache::new();
     let a = cache.get(&d, sid, None);
     assert!(a.frames[0].lines[0].x0 >= 120.0 - 1e-6);
+    // A hidden layer's objects stop wrapping text only when the layer suppresses it.
+    d.layer_mut(lid).unwrap().suppress_wrap_when_hidden = true;
     d.layer_mut(lid).unwrap().visible = false;
     let b = cache.get(&d, sid, None);
     assert!(!Arc::ptr_eq(&a, &b));
