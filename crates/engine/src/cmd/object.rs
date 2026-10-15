@@ -3462,6 +3462,34 @@ mod spread_target_tests {
 }
 
 #[cfg(test)]
+mod tint_alone_tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_tint_alone_keeps_each_swatch_and_leaves_no_stroke_alone() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let a = s.execute("frame.create", &json!({"rect": [0, 0, 50, 50]})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("frame.create", &json!({"rect": [60, 0, 110, 50]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.fill", &json!({"swatch": "[Black]", "ids": [a]})).unwrap();
+        s.execute("object.fill", &json!({"swatch": "C=100 M=0 Y=0 K=0", "ids": [b]})).unwrap();
+        s.execute("object.stroke", &json!({"swatch": "[None]", "ids": [a, b]})).unwrap();
+        // Fill tint on both: each keeps its swatch.
+        s.execute("object.fill", &json!({"tint": 0.25, "ids": [a, b]})).unwrap();
+        let item = |s: &crate::Session, id: u64| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().clone();
+        assert_eq!((item(&s, a).fill.swatch.as_str(), item(&s, a).fill.tint), ("[Black]", 0.25));
+        assert_eq!((item(&s, b).fill.swatch.as_str(), item(&s, b).fill.tint), ("C=100 M=0 Y=0 K=0", 0.25));
+        // A swatch alone is 100%.
+        s.execute("object.fill", &json!({"swatch": "[Paper]", "ids": [a]})).unwrap();
+        assert_eq!(item(&s, a).fill.tint, 1.0);
+        // A stroke tint on no stroke: still no stroke.
+        s.execute("object.stroke", &json!({"tint": 0.5, "ids": [a]})).unwrap();
+        assert!(item(&s, a).stroke.is_none(), "{:?}", item(&s, a).stroke);
+        assert!(s.execute("object.fill", &json!({"ids": [a]})).is_err(), "neither swatch nor tint");
+    }
+}
+
+#[cfg(test)]
 mod fill_tint_tests {
     use super::*;
 

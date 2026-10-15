@@ -657,9 +657,7 @@ fn appearance_section(app: &mut DesignApp, ui: &mut Ui, i: &SelInfo) {
     ui.painter().rect_stroke(chip, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     let resp = ui.interact(chip, ui.id().with("fillchip"), Sense::click()).on_hover_text(format!("Fill: {}", i.fill));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Fill swatch"));
-    swatch_menu(app, &resp, &doc, &i.fill, |app, n| {
-        let _ = app.run("object.fill", json!({"swatch": n}));
-    });
+    swatch_menu(app, &resp, &doc, &i.fill, false, i.is_text && i.count == 1, false);
     crate::rtl::paint(
         ui.painter(),
         b.min + vec2(34.0, FIELD_H / 2.0),
@@ -677,9 +675,7 @@ fn appearance_section(app: &mut DesignApp, ui: &mut Ui, i: &SelInfo) {
     ui.painter().rect_stroke(chip, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     let resp = ui.interact(chip, ui.id().with("strokechip"), Sense::click()).on_hover_text(format!("Stroke: {}", i.stroke));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Stroke swatch"));
-    swatch_menu(app, &resp, &doc, &i.stroke, |app, n| {
-        let _ = app.run("object.stroke", json!({"swatch": n}));
-    });
+    swatch_menu(app, &resp, &doc, &i.stroke, true, i.is_text && i.count == 1, false);
     if place(ui, sub(b, 34.0, 0.0, 56.0, FIELD_H), |ui| link_label(ui, crate::i18n::tr(&app.ui.language, "Stroke"), 56.0)).clicked() {
         show_panel(app, "stroke");
     }
@@ -748,14 +744,81 @@ fn appearance_section(app: &mut DesignApp, ui: &mut Ui, i: &SelInfo) {
     });
 }
 
-/// Swatch list popup attached to `resp`.
-fn swatch_menu(app: &mut DesignApp, resp: &egui::Response, doc: &designcraft_doc::Document, cur: &str, on_pick: impl FnOnce(&mut DesignApp, String)) {
+/// The Fill (or Stroke) popup of Properties › Appearance, as InDesign's: Apply To (a text frame's
+/// frame or its text), the tint, then the swatches. `cur` is the frame's swatch. With `text_only`
+/// (text selected) it colours the selected text.
+fn swatch_menu(
+    app: &mut DesignApp,
+    resp: &egui::Response,
+    doc: &designcraft_doc::Document,
+    cur: &str,
+    stroke: bool,
+    text_frame: bool,
+    text_only: bool,
+) {
+    let lang = app.ui.language.clone();
+    let tr = |s: &'static str| crate::i18n::tr(&lang, s);
+    let to_text_id = egui::Id::new(("swatch_apply_to_text", stroke));
+    let to_text = text_only || text_frame && resp.ctx.data(|d| d.get_temp::<bool>(to_text_id)).unwrap_or(false);
+    // What the popup shows and changes: the frame's fill or stroke, or its text's.
+    let (key, tint_key) = if stroke { ("stroke", "strokeTint") } else { ("fill", "fillTint") };
+    let (cur, tint) = if to_text {
+        let chars = super::text_attrs(app).map(|a| a["chars"].clone()).unwrap_or_default();
+        (chars[key].as_str().unwrap_or("").to_string(), chars[tint_key].as_f64().unwrap_or(1.0))
+    } else {
+        (cur.to_string(), f64::from(super::sel_tint(app, stroke)))
+    };
     let mut picked = None;
-    egui::Popup::menu(resp).show(|ui| {
-        picked = super::swatch_list(ui, doc, cur);
+    let mut new_tint = None;
+    let mut switch = None;
+    egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_min_width(220.0);
+        ui.set_max_width(280.0);
+        if text_frame {
+            ui.horizontal(|ui| {
+                crate::rtl::label(ui, tr("Apply To:"));
+                for (label, text) in [("Frame", false), ("Text", true)] {
+                    if ui.selectable_label(to_text == text, crate::rtl::widget(ui, tr(label))).clicked() {
+                        switch = Some(text);
+                    }
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            crate::rtl::label(ui, tr("Tint:"));
+            if let Some(v) = NumField::number(if stroke { "stroke_tint" } else { "fill_tint" }, Some((tint * 100.0).round()), "%", 0)
+                .width(60.0)
+                .range(0.0, 100.0)
+                .show(ui)
+            {
+                new_tint = Some(v / 100.0);
+            }
+        });
+        ui.separator();
+        picked = super::swatch_list(ui, doc, &cur);
     });
-    if let Some(p) = picked {
-        on_pick(app, p);
+    if let Some(t) = switch {
+        resp.ctx.data_mut(|d| d.insert_temp(to_text_id, t));
+    }
+    let cmd = |app: &mut DesignApp, attrs: Value| {
+        if to_text {
+            let _ = app.run("type.char", json!({ "attrs": attrs }));
+        } else {
+            let mut p = attrs.as_object().cloned().unwrap_or_default();
+            // object.fill / object.stroke name the swatch `swatch` and the tint `tint`.
+            if let Some(v) = p.remove(key) {
+                p.insert("swatch".into(), v);
+            }
+            if let Some(v) = p.remove(tint_key) {
+                p.insert("tint".into(), v);
+            }
+            let _ = app.run(if stroke { "object.stroke" } else { "object.fill" }, Value::Object(p));
+        }
+    };
+    if let Some(n) = picked {
+        cmd(app, json!({ key: n }));
+    } else if let Some(t) = new_tint {
+        cmd(app, json!({ tint_key: t }));
     }
 }
 
@@ -1022,9 +1085,7 @@ fn text_appearance_section(app: &mut DesignApp, ui: &mut Ui) {
             ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, "T", crate::theme::semibold(12.0), tc);
         }
         let resp = ui.interact(chip, ui.id().with(("tchip", k)), Sense::click()).on_hover_text(format!("{label}: {sw}"));
-        swatch_menu(app, &resp, &doc, &sw, |app, n| {
-            let _ = app.run("type.char", json!({"attrs": {key: n}}));
-        });
+        swatch_menu(app, &resp, &doc, &sw, k != 0, false, true);
         if k == 0 {
             crate::rtl::paint(
                 ui.painter(),
@@ -2788,6 +2849,82 @@ mod tests {
         assert_eq!(items.len(), 1, "one shape left");
         let r = items[0].bounds();
         assert!((r.x0 - 200.0).abs() < 0.5 && (r.y1 - 200.0).abs() < 0.5 && (r.x1 - 300.0).abs() < 0.5, "{r:?}");
+    }
+
+    const CYAN: &str = "C=100 M=0 Y=0 K=0";
+
+    #[test]
+    fn the_fill_menu_sets_a_tint() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [72, 72, 300, 200]})).unwrap()["id"].as_u64().unwrap();
+        app.run("object.fill", json!({"swatch": CYAN, "ids": [id]})).unwrap();
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        let mut h = panel(app);
+        h.get_by_label("Fill swatch").click();
+        h.run_steps(3);
+        // A frame that isn't a text frame: no Apply To.
+        assert!(h.query_by_label("Apply To:").is_none());
+        // The field on the Tint row (Opacity also reads 100%).
+        let row = h.get_by_label("Tint:").rect();
+        h.query_all_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("100%"))
+            .find(|n| (n.rect().center().y - row.center().y).abs() < 8.0)
+            .expect("the Tint field")
+            .click();
+        h.run_steps(2);
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::Text("25".into()));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let fill = h.state().session.active().unwrap().doc.item(designcraft_doc::ids::ItemId(id)).unwrap().fill.clone();
+        assert_eq!((fill.swatch.as_str(), fill.tint), (CYAN, 0.25), "the tint, on the same swatch");
+    }
+
+    #[test]
+    fn a_tint_on_several_objects_keeps_each_ones_swatch() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let a = app.run("frame.create", json!({"rect": [72, 72, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        let b = app.run("frame.create", json!({"rect": [220, 72, 300, 200]})).unwrap()["id"].as_u64().unwrap();
+        app.run("object.fill", json!({"swatch": CYAN, "ids": [a]})).unwrap();
+        app.run("object.fill", json!({"swatch": "[Black]", "ids": [b]})).unwrap();
+        app.run("selection.set", json!({"ids": [a, b]})).unwrap();
+        let mut h = panel(app);
+        h.get_by_label("Fill swatch").click();
+        h.run_steps(3);
+        let row = h.get_by_label("Tint:").rect();
+        h.query_all_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("100%"))
+            .find(|n| (n.rect().center().y - row.center().y).abs() < 8.0)
+            .expect("the Tint field")
+            .click();
+        h.run_steps(2);
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::Text("25".into()));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let doc = &h.state().session.active().unwrap().doc;
+        let fill = |id: u64| doc.item(designcraft_doc::ids::ItemId(id)).unwrap().fill.clone();
+        assert_eq!((fill(a).swatch.as_str(), fill(a).tint), (CYAN, 0.25));
+        assert_eq!((fill(b).swatch.as_str(), fill(b).tint), ("[Black]", 0.25), "the second keeps its own swatch");
+    }
+
+    #[test]
+    fn apply_to_text_colours_a_text_frames_text_not_the_frame() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let r = app.run("frame.create", json!({"rect": [72, 72, 300, 200], "content": "text", "text": "Heading"})).unwrap();
+        let (id, story) = (r["id"].as_u64().unwrap(), designcraft_doc::StoryId(r["story"].as_u64().unwrap()));
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        let mut h = panel(app);
+        h.get_by_label("Fill swatch").click();
+        h.run_steps(3);
+        h.get_by_label("Text").click();
+        h.run_steps(3);
+        h.get_by_label(CYAN).click();
+        h.run_steps(3);
+        let doc = &h.state().session.active().unwrap().doc;
+        assert_eq!(doc.story(story).unwrap().char_format_at(0).over.fill.as_deref(), Some(CYAN), "the text is cyan");
+        assert_eq!(doc.item(designcraft_doc::ids::ItemId(id)).unwrap().fill.swatch, "[None]", "the frame isn't");
     }
 }
 
