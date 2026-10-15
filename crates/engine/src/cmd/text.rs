@@ -614,7 +614,7 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         if tracking && t.cell.is_none() {
             // Track Changes: the replaced text is marked deleted, the typing inserted after it.
             let at = super::changes::mark_deleted(st, r.clone());
-            let mut fmt = st.char_format_at(at).clone();
+            let mut fmt = st.insert_format_at(at).clone();
             if let Some(f) = &typing {
                 apply_typing_format(&mut fmt, f);
             }
@@ -1100,19 +1100,26 @@ pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
     validate_char_fill(&s.doc()?.doc, &a, "type.char")?;
     let cleared: Vec<String> = attrs.as_object().map(|o| o.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k.clone()).collect()).unwrap_or_default();
     let targets = format_targets(s);
-    // A caret in text: the format is for the next typing — unless it sits on an empty paragraph's
-    // hidden mark, which takes the format immediately (there is nothing else on that line to type
-    // into first).
+    // A caret in text: the format is for the next typing. On an empty paragraph's hidden mark it
+    // also formats the mark right away, since the mark alone sets that line's height; typing there
+    // still needs the typing format, as new text takes the format of the run before the caret
+    // (the previous paragraph's mark).
     if let [t] = targets.as_slice()
         && t.range.is_empty()
         && let Some(at) = s.doc()?.selection.text
-        && s.doc()?.doc.text_story(t.story, t.cell).is_some_and(|st| !st.is_empty() && !empty_para_mark(st, t.range.start))
+        && let Some(on_mark) = s.doc()?.doc.text_story(t.story, t.cell).filter(|st| !st.is_empty()).map(|st| empty_para_mark(st, t.range.start))
     {
         let doc = s.doc()?.uid;
         let mut f = typing_format(s).cloned().unwrap_or(TypingFormat { doc, at, attrs: CharAttrs::default(), cleared: vec![] });
         f.attrs.merge(&a);
         f.cleared.retain(|k| attrs.get(k).is_none_or(|v| v.is_null()) && !cleared.contains(k));
-        f.cleared.extend(cleared);
+        f.cleared.extend(cleared.iter().cloned());
+        if on_mark {
+            s.edit(|d, _| {
+                apply_char_attrs(d, &targets, &a, &cleared);
+                ok()
+            })?;
+        }
         s.typing_format = Some(f);
         return ok();
     }
@@ -1288,7 +1295,8 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
 /// inheritance separate from paragraph defaults for style creation from the selection.
 pub(crate) fn effective_char_format(s: &Session, target: &Target) -> Result<designcraft_doc::CharFormat> {
     let story = s.doc()?.doc.text_story(target.story, target.cell).ok_or(designcraft_doc::DocError::NoStory(target.story))?;
-    let mut format = if target.range.is_empty() { story.char_format_at(target.range.start) } else { story.format_after(target.range.start) }.clone();
+    let mut format =
+        if target.range.is_empty() { story.insert_format_at(target.range.start) } else { story.format_after(target.range.start) }.clone();
     if let Some(pending) = typing_format(s)
         && target.story == pending.at.story
         && target.cell == pending.at.cell
@@ -1859,12 +1867,54 @@ What's new in typography this season, and why it matters to every designer"}),
         // `char_format_at` resolves a boundary to the *preceding* run (new typing's format), so
         // check just past the mark's own one-byte run, which the mark alone occupies.
         assert_eq!(st.char_format_at(blank + 1).over.leading, Some(designcraft_doc::Leading::Points(40.0)));
-        // No pending typing format was left behind: it applied immediately.
-        assert!(s.typing_format.is_none());
         let d = s.doc().unwrap().doc.clone();
         let cs = designcraft_compose::compose_story(&d, sid, &Default::default());
         let blank_line = cs.frames[0].lines.iter().find(|l| l.range == (blank..blank)).unwrap();
         assert_eq!(blank_line.leading, 40.0, "the blank line's own height changed");
+    }
+
+    /// Formatting chosen on a blank line is also what gets typed there, not the format of the
+    /// previous paragraph's mark that new text would otherwise take.
+    #[test]
+    fn text_typed_on_a_blank_line_takes_the_format_set_there() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let text = "Para one\n\nPara two";
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 300, 200], "content": "text", "text": text})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        let blank = text.find("\n\n").unwrap() + 1;
+        s.execute("text.select", &json!({"story": sid.0, "anchor": blank})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": 30}})).unwrap();
+        s.execute("text.insert", &json!({"text": "Middle"})).unwrap();
+        let st = s.doc().unwrap().doc.story(sid).unwrap();
+        assert_eq!(st.text, "Para one\nMiddle\nPara two");
+        for b in blank..blank + "Middle\n".len() {
+            assert_eq!(st.format_after(b).over.size, Some(30.0), "byte {b}");
+        }
+        assert_eq!(st.format_after(blank - 1).over.size, None, "the first paragraph's mark keeps its size");
+    }
+
+    /// A blank line keeps its format for typing after the caret has left it: text typed on it
+    /// takes its paragraph mark's format, with no pending typing format.
+    #[test]
+    fn a_blank_lines_mark_format_is_typed_after_the_caret_returns() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let text = "Para one\n\nPara two";
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 300, 200], "content": "text", "text": text})).unwrap();
+        let sid = designcraft_doc::StoryId(r["story"].as_u64().unwrap());
+        let blank = text.find("\n\n").unwrap() + 1;
+        s.execute("text.select", &json!({"story": sid.0, "anchor": blank})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": 30}})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 2})).unwrap();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": blank})).unwrap();
+        assert!(s.typing_format.is_none());
+        s.execute("text.insert", &json!({"text": "Middle"})).unwrap();
+        let st = s.doc().unwrap().doc.story(sid).unwrap();
+        assert_eq!(st.text, "Para one\nMiddle\nPara two");
+        assert_eq!(st.format_after(blank).over.size, Some(30.0));
+        assert_eq!(st.format_after(blank - 1).over.size, None, "the first paragraph's mark keeps its size");
+        assert_eq!(st.format_after(2).over.size, None);
     }
 }
 

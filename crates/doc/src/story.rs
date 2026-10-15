@@ -272,9 +272,18 @@ impl Story {
         })
     }
 
-    /// Insert `text` at byte `pos` using the format at that position.
+    /// The format text inserted at byte `pos` takes: the run before `pos`
+    /// ([`Story::char_format_at`]), except on an empty paragraph, where it is that paragraph's own
+    /// mark (the line's only character, so its format is the one chosen for that line).
+    pub fn insert_format_at(&self, pos: usize) -> &CharFormat {
+        let b = self.text.as_bytes();
+        let empty_para = b.get(pos) == Some(&b'\n') && pos.checked_sub(1).and_then(|p| b.get(p)) == Some(&b'\n');
+        if empty_para { self.format_after(pos) } else { self.char_format_at(pos) }
+    }
+
+    /// Insert `text` at byte `pos` using the format at that position ([`Story::insert_format_at`]).
     pub fn insert(&mut self, pos: usize, text: &str) {
-        let fmt = self.char_format_at(pos).clone();
+        let fmt = self.insert_format_at(pos).clone();
         self.insert_with(pos, text, fmt);
     }
 
@@ -392,7 +401,7 @@ impl Story {
 
     /// Replace a range with text (delete + insert using the format at the start of the range).
     pub fn replace(&mut self, range: std::ops::Range<usize>, text: &str) {
-        let fmt = if range.start < range.end { self.format_after(range.start).clone() } else { self.char_format_at(range.start).clone() };
+        let fmt = if range.start < range.end { self.format_after(range.start).clone() } else { self.insert_format_at(range.start).clone() };
         self.delete(range.clone());
         self.insert_with(range.start, text, fmt);
     }
