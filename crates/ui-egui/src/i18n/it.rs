@@ -28,6 +28,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "Taglia"),
     ("Copy", "Copia"),
     ("Paste", "Incolla"),
+    ("Inches Decimal", "Pollici decimali"),
     ("Bulleted & Numbered Lists", "Elenchi puntati e numerati"),
     ("Current Page Number", "Numero di pagina corrente"),
     ("Apply Color (,)", "Applica colore (,)"),
