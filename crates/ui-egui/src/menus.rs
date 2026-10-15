@@ -2565,6 +2565,15 @@ mod tests {
         out
     }
 
+    /// A command's menu path names the menu entries that really hold it.
+    #[test]
+    fn define_lists_command_path_matches_the_type_menu() {
+        let spec = designcraft_engine::command_specs().iter().find(|c| c.id == "list.define").expect("list.define is a command");
+        assert_eq!(spec.menu[0], "Type");
+        assert!(submenu_paths("Type").contains(&spec.menu.join("/")), "{:?} is not a Type submenu", spec.menu);
+        assert!(menu_ids("Type").contains(&"list.define"));
+    }
+
     #[test]
     fn screen_mode_shows_the_current_mode_and_view_submenus_are_translated() {
         let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());

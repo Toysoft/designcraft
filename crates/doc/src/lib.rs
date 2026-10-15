@@ -324,7 +324,7 @@ pub struct DocSettings {
     pub bleed_color: [u8; 3],
     pub slug_color: [u8; 3],
     pub keyboard_increment: f64,
-    /// Named lists (Type › Bulleted and Numbered Lists › Define Lists).
+    /// Named lists (Type › Bulleted & Numbered Lists › Define Lists).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lists: Vec<NumberedList>,
     /// The story in the primary text frames (Smart Text Reflow adds and removes pages for it).
