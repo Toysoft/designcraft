@@ -3704,6 +3704,22 @@ fn advanced_character_formats(lang: &str, ui: &mut egui::Ui, d: &mut Dialog, cf:
         let opts: Vec<(Value, &str)> = crate::panels::properties::LANGUAGES.iter().map(|l| (json!(l), *l)).collect();
         char_choice(lang, ui, d, cf, "language", &opts);
         ui.end_row();
+        // Digits (World-Ready): Farsi draws 0-9 as Persian ۰-۹.
+        crate::rtl::label(ui, crate::i18n::tr(lang, "Digits:"));
+        let labels: Vec<String> = crate::panels::properties::DIGIT_OPTIONS.iter().map(|o| crate::panels::properties::digit_label(lang, *o)).collect();
+        let cur = cf.get(d, "digits");
+        let shown = crate::panels::properties::DIGIT_OPTIONS.iter().position(|o| json!(o.0) == cur).map_or(String::new(), |i| labels[i].clone());
+        egui::ComboBox::from_id_salt(("cs", "digits")).selected_text(crate::rtl::widget(ui, &shown)).width(200.0).show_ui(ui, |ui| {
+            if cf.sparse && ui.selectable_label(cur.is_null(), " ").clicked() {
+                cf.set(d, "digits", Value::Null);
+            }
+            for (o, label) in crate::panels::properties::DIGIT_OPTIONS.iter().zip(&labels) {
+                if ui.selectable_label(json!(o.0) == cur, crate::rtl::widget(ui, label)).clicked() {
+                    cf.set(d, "digits", json!(o.0));
+                }
+            }
+        });
+        ui.end_row();
     });
 }
 
@@ -6838,5 +6854,13 @@ mod tests {
         app.run("document.preferences", json!({"horizontalUnits": "millimeters"})).unwrap();
         app.ui.dialog = Some(Dialog::new("newDocument", json!({"width": "15"})));
         assert_eq!(app.ui.dialog.as_ref().unwrap().m("width"), Some(180.0));
+    }
+    #[test]
+    fn character_style_options_set_the_digits() {
+        let mut app = styled_app();
+        ctl(&mut app, "ui.dialog.open", json!({"id": "characterStyleOptions", "fields": {"name": "Emphasis"}}));
+        ctl(&mut app, "ui.dialog.set", json!({"field": "c.digits", "value": "farsi"}));
+        assert_eq!(ctl(&mut app, "ui.dialog.confirm", json!({}))["ok"], true);
+        assert_eq!(char_style(&app, "Emphasis").unwrap().chars.digits, Some(designcraft_doc::Digits::Farsi));
     }
 }

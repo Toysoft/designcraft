@@ -1335,25 +1335,22 @@ pub fn character_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             .width(170.0)
             .show_ui(ui, |ui| language_menu(app, ui, &lang));
     });
-    // Digits (World-Ready): shown for right-to-left paragraphs or once set.
+    // Digits (World-Ready): how the figures 0-9 are drawn (English 0123, Arabic ٠١٢٣, Persian ۰۱۲۳).
     let digits = c["digits"].as_str().unwrap_or("default").to_string();
-    if digits != "default" || a["para"]["direction"].as_str() == Some("rightToLeft") {
-        ui.horizontal(|ui| {
-            caption(ui, crate::i18n::tr(&app.ui.language, "Digits"));
-            let opts = [("default", "Default"), ("arabic", "Arabic"), ("hindi", "Hindi"), ("farsi", "Farsi"), ("native", "Native")];
-            let cur = opts.iter().find(|o| o.0 == digits).map_or("Default", |o| o.1);
-            egui::ComboBox::from_id_salt("char_digits")
-                .selected_text(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, cur)))
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for (k, l) in opts {
-                        if ui.selectable_label(k == digits, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, l))).clicked() {
-                            let _ = app.run("type.char", json!({"attrs": {"digits": k}}));
-                        }
-                    }
-                });
+    ui.horizontal(|ui| {
+        caption(ui, crate::i18n::tr(&app.ui.language, "Digits"));
+        let cur = DIGIT_OPTIONS
+            .iter()
+            .find(|o| o.0 == digits)
+            .map_or_else(|| digit_label(&app.ui.language, DIGIT_OPTIONS[0]), |o| digit_label(&app.ui.language, *o));
+        egui::ComboBox::from_id_salt("char_digits").selected_text(crate::rtl::widget(ui, cur)).width(150.0).show_ui(ui, |ui| {
+            for o in DIGIT_OPTIONS {
+                if ui.selectable_label(o.0 == digits, crate::rtl::widget(ui, digit_label(&app.ui.language, o))).clicked() {
+                    let _ = app.run("type.char", json!({"attrs": {"digits": o.0}}));
+                }
+            }
         });
-    }
+    });
     egui::Grid::new("chargrid").num_columns(4).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
         caption(ui, crate::i18n::tr(&app.ui.language, "Size"));
         if let Some(v) = number(ui, "pcs", c["size"].as_f64(), " pt", 60.0, 2) {
@@ -2470,6 +2467,18 @@ fn variable_font_axes(app: &mut DesignApp, ui: &mut egui::Ui, family: &str, styl
         let spec = values.iter().map(|(t, v)| format!("{t}:{}", v.round())).collect::<Vec<_>>().join(",");
         let _ = app.run("type.char", json!({"attrs": {"fontStyle": format!("{base} {{{spec}}}")}}));
     }
+}
+
+/// The Digits choices: (value, caption, sample of 0–3). The values are the file format's:
+/// `arabic` is 0123, `hindi` the Arabic-Indic ٠١٢٣ and `farsi` the Persian/Urdu ۰۱۲۳; the captions
+/// name them by the script's users.
+pub const DIGIT_OPTIONS: [(&str, &str, &str); 5] =
+    [("default", "Default", ""), ("arabic", "English", "0123"), ("hindi", "Arabic", "٠١٢٣"), ("farsi", "Persian", "۰۱۲۳"), ("native", "Native", "")];
+
+/// A Digits choice as shown: its translated caption and a sample of the figures.
+pub fn digit_label(lang: &str, o: (&str, &str, &str)) -> String {
+    let name = crate::i18n::tr(lang, o.1);
+    if o.2.is_empty() { name.to_string() } else { format!("{name}  {}", o.2) }
 }
 
 #[cfg(test)]

@@ -603,17 +603,7 @@ fn shape_run_raw(
         }
         // Digits drawn in another script (World-Ready Digits): each is set as its substitute.
         {
-            use designcraft_doc::Digits;
-            let mode = if p.digits != Digits::Default {
-                p.digits
-            } else {
-                match arabic_context {
-                    Some(false) => Digits::Arabic,
-                    Some(true) if Digits::Native.map('0', &p.language) == '0' => Digits::Hindi,
-                    _ => Digits::Native,
-                }
-            };
-            let d = mode.map(c, &p.language);
+            let d = digit_mode(p, arabic_context).map(c, &p.language);
             if d != c {
                 flush(seg_start, i, &seg_face, out);
                 seg_start = i + c.len_utf8();
@@ -666,6 +656,9 @@ fn shape_run_raw(
                     } else {
                         sub.page_name.clone().unwrap_or_else(|| "#".into())
                     };
+                    // Page numbers follow the text's Digits setting like typed figures do.
+                    let mode = digit_mode(p, arabic_context);
+                    let s: String = s.chars().map(|ch| mode.map(ch, &p.language)).collect();
                     if s.is_empty() {
                         // A section without marker text: the character takes no space.
                         let mut g = control_glyph(&primary, p, auto_leading, style, i, c);
@@ -1048,4 +1041,18 @@ pub(crate) fn hyphen_after(g: &Glyph) -> Glyph {
     h.len = 0;
     h.ch = '-';
     h
+}
+
+/// How figures 0–9 are drawn for text with these properties: the Digits setting, or, when it is
+/// Default, by the preceding strong script (`Some(true)` Arabic-script, `Some(false)` other).
+fn digit_mode(p: &designcraft_doc::CharProps, arabic_context: Option<bool>) -> designcraft_doc::Digits {
+    use designcraft_doc::Digits;
+    if p.digits != Digits::Default {
+        return p.digits;
+    }
+    match arabic_context {
+        Some(false) => Digits::Arabic,
+        Some(true) if Digits::Native.map('0', &p.language) == '0' => Digits::Hindi,
+        _ => Digits::Native,
+    }
 }

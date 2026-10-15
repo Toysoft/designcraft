@@ -1669,6 +1669,24 @@ fn digits_option_draws_figures_in_another_script() {
 }
 
 #[test]
+fn digits_option_draws_page_numbers_and_list_numbers_in_that_script() {
+    use designcraft_doc::{Digits, ListType};
+    let gids = |text: &str, list: Option<ListType>, digits: Option<Digits>| {
+        let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs { list_type: list, ..Default::default() });
+        if let Some(dg) = digits {
+            let n = text.len();
+            d.story_mut(sid).unwrap().format_chars(0..n, |f| f.over.digits = Some(dg));
+        }
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        all_lines(&cs)[0].glyphs.iter().map(|g| g.gid).collect::<Vec<_>>()
+    };
+    let pn = story::PAGE_NUMBER.to_string();
+    assert_ne!(gids(&pn, None, None), gids(&pn, None, Some(Digits::Farsi)), "page number marker");
+    // Digits set on the text (not on the paragraph style) reach the list number too.
+    assert_ne!(gids("Item", Some(ListType::Numbers), None), gids("Item", Some(ListType::Numbers), Some(Digits::Farsi)), "list number");
+}
+
+#[test]
 fn ruby_and_kenten_sit_over_their_text() {
     let mut d = Document::new(&designcraft_doc::build::NewDocument::default());
     let lid = d.default_layer();

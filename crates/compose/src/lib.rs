@@ -833,7 +833,13 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             }
         };
         if let Some(label) = list_label {
-            let n = prepend_label(db, &mut sp.glyphs, &label, prange.start, &base_chars, label_env, &mut table);
+            // The number is drawn in the Digits of the paragraph's first run, so Persian text
+            // gets Persian numbers whether Digits is set on the paragraph style or on the text.
+            let mut label_chars = base_chars.clone();
+            if let Some((_, fmt)) = story.runs().find(|(rr, _)| rr.end > prange.start && rr.start < prange.end) {
+                label_chars.digits = doc.styles.resolve_char(&base_chars, fmt).digits;
+            }
+            let n = prepend_label(db, &mut sp.glyphs, &label, prange.start, &label_chars, label_env, &mut table);
             for g in sp.glyphs.iter_mut().take(n) {
                 g.list_label = true;
             }
