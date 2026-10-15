@@ -1,6 +1,6 @@
 # UI and interaction parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (document views row: scrollbars, Alt pans while editing text) · **Target:** Adobe InDesign 2026 (21.6, Medium Dark, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (paragraph style override feedback and clearing) · **Target:** Adobe InDesign 2026 (21.6, Medium Dark, macOS)
 
 Tools, handles, snapping, nudging, modifiers, shortcuts, panels, menus, context menus and feel,
 against InDesign 2026. The look was measured from the running app
@@ -60,6 +60,14 @@ for real work is lower, ~45%, because threading is missing and three of the ~ ro
 context menus, typing at a caret) are things a layout artist does every minute, and their failures stop work.
 
 ## Remaining effort
+
+The Paragraph Styles panel now includes character formatting in its `+` indicator, on both
+the current-style summary and the selected row. The row menu offers Apply "name", Clear
+Overrides through the existing command, retaining named character styles. Selection attribute
+counts compare effective values with their style definitions, so equal local values and named
+character styles alone do not report overrides. This covers the color-override/clear workflow
+at 4:25–5:20 in [Jessica Garrity's styles tutorial](https://www.youtube.com/watch?v=pG9JkAPLgs8).
+Redefine Style and style-dialog Preview remain separate gaps.
 
 | Work | Opus 5.5 h |
 |---|---|

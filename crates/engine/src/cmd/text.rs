@@ -1279,9 +1279,18 @@ fn selection_attrs(s: &mut Session, _p: &Value) -> Result<Value> {
     let (pp, base) = st.doc.styles.resolve_para(pf);
     let cf = effective_char_format(s, &Target { story: sid, cell, range: r.clone() })?;
     let cp = st.doc.styles.resolve_char(&base, &cf);
+    let (style_para, style_chars) = st.doc.styles.resolve_para_style(&pf.style);
+    let mut character_base = base.clone();
+    let character_style = st.doc.styles.char_style_attrs(&cf.style);
+    character_base.apply(&character_style);
+    let char_delta = character_base.delta(&cp);
+    let style_keys = character_style.keys();
+    let character_style_overrides = char_delta.keys().iter().filter(|key| style_keys.contains(key)).count();
     let selected = selected_text_preview(story.text.get(r.start..r.end).unwrap_or_default().chars());
     Ok(json!({"story": sid.0, "paragraphStyle": pf.style, "characterStyle": cf.style, "para": pp, "chars": cp,
-        "paraOverrides": pf.para.count(), "charOverrides": cf.over.count(), "selectedText": selected.trim()}))
+        "paraOverrides": style_para.delta(&pp).count() + style_chars.delta(&base).count(),
+        "charOverrides": char_delta.count(), "characterStyleOverrides": character_style_overrides,
+        "selectedText": selected.trim()}))
 }
 
 /// The first target character, with any pending caret overrides. Keep character-style
