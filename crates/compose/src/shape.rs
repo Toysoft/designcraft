@@ -836,7 +836,7 @@ fn shape_cached(
     caps: bool,
     vertical: bool,
     (before, after): (&str, &str),
-    cluster_chars: bool,
+    (cluster_chars, unjoined): (bool, bool),
 ) -> Vec<ShapedGlyph> {
     use designcraft_fonts::ShapeContext;
     let map = |c: char| if caps { c.to_uppercase().next().unwrap_or(c) } else { c };
@@ -847,8 +847,8 @@ fn shape_cached(
             designcraft_fonts::shape_with_context(face, s, feats, map, context)
         }
     };
-    if cluster_chars || src.len() < 2 || !src.contains(' ') || src.chars().any(designcraft_fonts::is_rtl) {
-        return shape(src, ShapeContext { before, after, language: lang, cluster_chars });
+    if cluster_chars || unjoined || src.len() < 2 || !src.contains(' ') || src.chars().any(designcraft_fonts::is_rtl) {
+        return shape(src, ShapeContext { before, after, language: lang, cluster_chars, unjoined });
     }
     let words = word_map((face.id(), vertical, caps, format!("{feats:?}"), lang));
     let pieces: Vec<&str> = src.split_inclusive(' ').collect();
@@ -908,6 +908,9 @@ pub struct TypeEnv<'a> {
     /// The story text as the shaper sees it around a run, when it differs from the text: custom
     /// glyphs replaced by characters that join as they do ([`joining_context`]).
     pub context: Option<&'a str>,
+    /// The paragraph isn't World-Ready: Arabic letters stand unjoined
+    /// ([`designcraft_fonts::ShapeContext::unjoined`]).
+    pub unjoined: bool,
 }
 
 /// Synthesised super/subscript: size and shift from Advanced Type (percent of the font size).
@@ -1018,7 +1021,7 @@ fn shape_segment(
             Some(_) => ("", ""),
         };
         let piece = designcraft_fonts::features_in(if up { &upright_feats } else { &feats }, r.clone());
-        let g = shape_cached(face, &src[r.clone()], &piece, lang, caps, up, around, auto_leading.cluster_chars);
+        let g = shape_cached(face, &src[r.clone()], &piece, lang, caps, up, around, (auto_leading.cluster_chars, auto_leading.unjoined));
         upright.extend(std::iter::repeat_n(up, g.len()));
         shaped.extend(g.into_iter().map(|g| ShapedGlyph { cluster: g.cluster + r.start, ..g }));
     }

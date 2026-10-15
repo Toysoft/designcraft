@@ -756,6 +756,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             cluster_chars: false,
             switches: &[],
             context: None,
+            unjoined: !pp.world_ready,
         };
         let mut sp = shape::shape_para(
             db,
@@ -899,11 +900,13 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             prepend_label(db, &mut sp.glyphs, label, prange.start, &base_chars, label_env, &mut table);
         }
         let mut glyphs = sp.glyphs;
+        // Not World-Ready: the line runs left to right in text order, whatever the script.
+        if !pp.world_ready {
+            glyphs.iter_mut().for_each(|g| g.character_direction = designcraft_doc::arabic::CharacterDirection::LeftToRight);
+        }
+        let rtl = pp.world_ready && pp.direction == designcraft_doc::TextDirection::RightToLeft;
         let bidi_text = bidi::paragraph_text(&mut glyphs, &story.text);
-        let bidi_info = unicode_bidi::BidiInfo::new(
-            &bidi_text,
-            Some(if pp.direction == designcraft_doc::TextDirection::RightToLeft { unicode_bidi::Level::rtl() } else { unicode_bidi::Level::ltr() }),
-        );
+        let bidi_info = unicode_bidi::BidiInfo::new(&bidi_text, Some(if rtl { unicode_bidi::Level::rtl() } else { unicode_bidi::Level::ltr() }));
         bidi::resolve_mirroring(&mut glyphs, &bidi_info);
         // Right to left, tracking sits on the other side of the glyph (not modelled): keep it.
         if bidi_info.has_rtl() {
