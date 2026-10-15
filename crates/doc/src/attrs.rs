@@ -62,7 +62,7 @@ macro_rules! attr_set {
                         return Ok(());
                     }
                 )*
-                Err(format!("unknown attribute `{key}`"))
+                Err(unknown_attribute(key, &[ $( stringify!($field), )* ]))
             }
             /// Fields where `self` differs from `base`'s resolved value (used for "clear overrides").
             pub fn diff_from(&self, base: &$props) -> $attrs {
@@ -102,6 +102,57 @@ macro_rules! attr_set {
 
 fn attr_key(snake: &'static str) -> &'static str {
     snake
+}
+
+/// `snake_case` → `camelCase`, as commands name attributes.
+fn camel(snake: &str) -> String {
+    let mut out = String::with_capacity(snake.len());
+    let mut up = false;
+    for c in snake.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.push(c.to_ascii_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Edits (insert, delete, replace) that turn `a` into `b`, ignoring case and underscores.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let norm = |s: &str| s.chars().filter(|c| *c != '_').map(|c| c.to_ascii_lowercase()).collect::<Vec<_>>();
+    let (a, b) = (norm(a), norm(b));
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut row = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let d = (prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(row[j] + 1);
+            row.push(d);
+        }
+        prev = row;
+    }
+    prev.last().copied().unwrap_or(0)
+}
+
+/// The error for an attribute `key` that isn't one of `fields` (snake_case): the nearest one
+/// (a typo, or a name it starts or ends: `font` → `fontFamily`), or else all of them.
+fn unknown_attribute(key: &str, fields: &[&str]) -> String {
+    let k = key.to_ascii_lowercase().replace('_', "");
+    let flat = |f: &str| f.replace('_', "");
+    let near = fields
+        .iter()
+        .map(|f| (edit_distance(key, f), *f))
+        .filter(|(d, _)| *d <= (k.len() / 3).max(1))
+        .min()
+        .map(|(_, f)| f)
+        .or_else(|| fields.iter().copied().find(|f| k.len() >= 3 && (flat(f).starts_with(&k) || flat(f).ends_with(&k))));
+    match near {
+        Some(f) => format!("unknown attribute `{key}`; did you mean `{}`?", camel(f)),
+        None => format!("unknown attribute `{key}`; the attributes are: {}", fields.iter().map(|f| camel(f)).collect::<Vec<_>>().join(", ")),
+    }
 }
 
 // ---------- value types ----------
@@ -190,6 +241,13 @@ impl Digits {
     }
 }
 
+/// Does `c` belong to a script that capitalizes the first letter of sentences, words and headings?
+/// Georgian doesn't: Unicode maps Mkhedruli to Mtavruli capitals, but those are only for all-caps
+/// text, never for a sentence's, a title's or an index heading's first letter.
+pub fn capitalizes(c: char) -> bool {
+    !matches!(c, '\u{10A0}'..='\u{10FF}' | '\u{1C90}'..='\u{1CBF}' | '\u{2D00}'..='\u{2D2F}')
+}
+
 /// The BCP 47 tag of a language name as InDesign and IDML write it ("English: USA", "Chinese:
 /// Simplified", or a locale code such as "de_DE_2006"), for the shaper's localized forms (`locl`)
 /// and everything that depends on the language (quotes, hyphenation and spelling, line breaking,
@@ -272,6 +330,7 @@ pub fn language_tag(language: &str) -> Option<&'static str> {
         "persian" | "farsi" => "fa",
         "urdu" => "ur",
         "hebrew" => "he",
+        "georgian" => "ka",
         _ => return None,
     })
 }
@@ -431,6 +490,8 @@ pub enum NestedUntil {
     ForcedLineBreak,
     EmSpace,
     EnSpace,
+    /// The paragraph's drop cap characters.
+    Dropcap,
     /// Any of these characters.
     Chars(String),
 }
@@ -464,6 +525,18 @@ pub struct NestedStyle {
 impl Default for NestedStyle {
     fn default() -> Self {
         NestedStyle { style: String::new(), through: true, count: 1, until: NestedUntil::Words }
+    }
+}
+
+impl NestedStyle {
+    /// The drop cap's character style as a nested style: `style` through 1 drop cap.
+    pub fn drop_cap(style: &str) -> Self {
+        NestedStyle { style: style.into(), through: true, count: 1, until: NestedUntil::Dropcap }
+    }
+
+    /// Is this the form a drop cap's character style takes at the start of a nested style list?
+    pub fn is_drop_cap(&self) -> bool {
+        self.until == NestedUntil::Dropcap && self.through && self.count == 1
     }
 }
 
@@ -530,12 +603,16 @@ pub struct TabStop {
     pub align_on: String,
 }
 
+/// The colour of a paragraph rule that follows the paragraph's text colour.
+pub const TEXT_COLOR: &str = "Text Color";
+
 /// A paragraph rule (Rule Above / Rule Below).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Rule {
     pub on: bool,
     pub weight: f64,
+    /// A swatch, or [`TEXT_COLOR`].
     pub color: String,
     pub tint: f32,
     /// Width: column (true) or text (false).
@@ -547,7 +624,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Rule { on: false, weight: 1.0, color: "[Black]".into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
+        Rule { on: false, weight: 1.0, color: TEXT_COLOR.into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
     }
 }
 
@@ -735,6 +812,9 @@ attr_set! {
         stroke: String = "[None]".into(),
         stroke_tint: f32 = 1.0,
         stroke_weight: f64 = 1.0,
+        /// Stroke behind fill: the stroke is painted under the fill and lies wholly outside the
+        /// letters at its full weight, so the letters keep their shape. Off, it straddles the outline.
+        stroke_behind_fill: bool = false,
         capitalization: Capitalization = Capitalization::Normal,
         position: Position = Position::Normal,
         underline: bool = false,
@@ -809,8 +889,17 @@ attr_set! {
         last_line_indent: f64 = 0.0,
         space_before: f64 = 0.0,
         space_after: f64 = 0.0,
+        /// Drop cap: the paragraph's first `drop_cap_chars` characters (code points, never
+        /// splitting a base from its combining marks) set `drop_cap_lines` lines tall, in the
+        /// character style `drop_cap_style` ("" or `[None]`: the text's own formatting).
         drop_cap_lines: u32 = 0,
         drop_cap_chars: u32 = 0,
+        drop_cap_style: String = String::new(),
+        /// Align Left Edge: the drop cap's ink starts at the indent (its first letter's left side
+        /// bearing is taken off), and the lines beside it start where its advance ends.
+        drop_cap_align_left: bool = true,
+        /// Scale for Descenders (kept and round-tripped; doesn't change the layout).
+        drop_cap_scale_descenders: bool = false,
         /// Nested styles, in order from the paragraph start.
         nested_styles: Vec<NestedStyle> = Vec::new(),
         /// GREP styles: a character style for every match of a pattern (applied after nested).
@@ -855,7 +944,8 @@ attr_set! {
         // Keeps
         keep_with_next: u32 = 0,
         keep_lines_together: bool = false,
-        keep_all_lines: bool = true,
+        /// All lines in paragraph (true) or at start/end of paragraph (false).
+        keep_all_lines: bool = false,
         keep_first: u32 = 2,
         keep_last: u32 = 2,
         start_paragraph: StartParagraph = StartParagraph::Anywhere,
@@ -946,6 +1036,23 @@ impl ParaProps {
 mod tests {
     use super::*;
 
+    /// #777: an unknown attribute names the nearest one, or lists them all.
+    #[test]
+    fn unknown_attributes_suggest_the_right_name() {
+        let mut c = CharAttrs::default();
+        assert_eq!(c.set_json("font", &serde_json::json!("X")).unwrap_err(), "unknown attribute `font`; did you mean `fontFamily`?");
+        assert_eq!(c.set_json("fontFamly", &serde_json::json!("X")).unwrap_err(), "unknown attribute `fontFamly`; did you mean `fontFamily`?");
+        let all = c.set_json("zzzzzz", &serde_json::json!(1)).unwrap_err();
+        assert!(
+            all.starts_with("unknown attribute `zzzzzz`; the attributes are: ") && all.contains("fontFamily") && all.contains("fontStyle"),
+            "{all}"
+        );
+        assert!(c.set_json("font_family", &serde_json::json!("X")).is_ok() && c.set_json("fontFamily", &serde_json::json!("X")).is_ok());
+        let mut p = ParaAttrs::default();
+        assert_eq!(p.set_json("spaceBefor", &serde_json::json!(3)).unwrap_err(), "unknown attribute `spaceBefor`; did you mean `spaceBefore`?");
+        assert_eq!(camel("first_line_indent"), "firstLineIndent");
+    }
+
     #[test]
     fn a_partial_rule_keeps_the_other_fields() {
         let current = ParaProps {
@@ -959,6 +1066,20 @@ mod tests {
         assert!(a.set_json_over("ruleAbove", &serde_json::json!({"colour": "Blue"}), &current).is_err(), "unknown field");
         a.set_json_over("ruleBelow", &serde_json::Value::Null, &current).unwrap();
         assert_eq!(a.rule_below, None, "null clears the override");
+    }
+
+    #[test]
+    fn stroke_behind_fill_is_saved_only_when_set() {
+        assert!(!CharProps::default().stroke_behind_fill);
+        assert_eq!(serde_json::to_value(CharAttrs::default()).unwrap(), serde_json::json!({}));
+        let mut a = CharAttrs::default();
+        a.set_json("strokeBehindFill", &serde_json::json!(true)).unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v, serde_json::json!({"strokeBehindFill": true}));
+        assert_eq!(serde_json::from_value::<CharAttrs>(v).unwrap(), a);
+        let mut p = CharProps::default();
+        p.apply(&a);
+        assert!(p.stroke_behind_fill);
     }
 
     #[test]
@@ -976,6 +1097,7 @@ mod tests {
         assert_eq!(language_tag("English: USA"), Some("en-US"));
         assert_eq!(language_tag("English: Australian"), Some("en"));
         assert_eq!(language_tag("Turkish"), Some("tr"));
+        assert_eq!(language_tag("Georgian"), Some("ka"));
         assert_eq!(language_tag("Japanese"), Some("ja"));
         assert_eq!(language_tag("Korean"), Some("ko"));
         assert_eq!(language_tag("Chinese"), Some("zh"));

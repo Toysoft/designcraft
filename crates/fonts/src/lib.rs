@@ -7,6 +7,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod features;
 mod fontdb;
 mod group;
 mod kind;
@@ -14,9 +15,10 @@ mod kind;
 pub mod testing;
 mod vertical;
 
+pub use features::{FontFeatures, font_features};
 pub use fontdb::{
     DOCUMENT_FONTS_FOLDER, DocumentFonts, FALLBACK_FAMILY, FaceRef, FontDb, FontFace, FontSource, MAX_DOCUMENT_FONT_BYTES, MAX_DOCUMENT_FONT_FILES,
-    MAX_DOCUMENT_FONTS_TOTAL, ScopedFonts, base_style, bundled, system_font_dirs,
+    MAX_DOCUMENT_FONTS_TOTAL, ScopedFonts, base_style, bundled, same_style, system_font_dirs,
 };
 pub use group::{FamilyInfo, FontGroup, sort_for_menu};
 pub use harfrust::Feature;
@@ -80,6 +82,16 @@ pub struct ShapedGlyph {
     pub safe_tatweel_before: bool,
     /// Direction used for shaping, including Unicode mirroring.
     pub rtl: bool,
+}
+
+/// Line metrics of the font at `index` of `data`, in font units: (units per em, ascent, descent
+/// (negative below the baseline), line gap) — what text layouts such as egui's build lines from.
+/// `None` if the font can't be read.
+pub fn line_metrics(data: &[u8], index: u32) -> Option<(f32, f32, f32, f32)> {
+    use skrifa::MetadataProvider;
+    let f = skrifa::FontRef::from_index(data, index).ok()?;
+    let m = f.metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    Some((f32::from(m.units_per_em.max(1)), m.ascent, m.descent, m.leading))
 }
 
 /// An OpenType feature setting: `"liga"`, `"-kern"`, `"ss01"`.
@@ -347,6 +359,22 @@ mod tests {
         for s in ["Regular", "Italic", "Bold", "Semibold"] {
             assert!(styles.iter().any(|x| x == s), "{s} in {styles:?}");
         }
+    }
+
+    #[test]
+    fn style_linking_finds_bold_and_italic_in_the_family() {
+        let db = FontDb::with_font_dirs(vec![]);
+        let link = |cur: &str, bold: Option<bool>, italic: Option<bool>| db.linked_style("Source Serif 4", cur, bold, italic);
+        assert_eq!(link("Regular", Some(true), None).as_deref(), Some("Bold"));
+        assert_eq!(link("Italic", Some(true), None).as_deref(), Some("Bold Italic"), "keeps the italic");
+        assert_eq!(link("Bold", None, Some(true)).as_deref(), Some("Bold Italic"), "keeps the weight");
+        assert_eq!(link("Bold Italic", Some(false), None).as_deref(), Some("Italic"));
+        assert_eq!(link("Bold Italic", None, Some(false)).as_deref(), Some("Bold"));
+        assert_eq!(link("Semibold", Some(false), None).as_deref(), Some("Regular"));
+        assert_eq!(db.traits_of("Source Serif 4", "Bold Italic"), (700.0, true));
+        // Source Sans 3 is bundled without a bold italic.
+        assert_eq!(db.linked_style("Source Sans 3", "Italic", Some(true), None), None);
+        assert_eq!(db.linked_style("No Such Family", "Regular", Some(true), None), None);
     }
 
     #[test]

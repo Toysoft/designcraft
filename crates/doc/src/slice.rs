@@ -57,18 +57,25 @@ impl Story {
         if src.text.is_empty() {
             return pos;
         }
-        // Text first (creates empty marker entries), then formats and marker payloads.
+        // The table anchored in the paragraph at `pos` keeps its anchor wherever the paste moves it.
+        let p0 = self.para_at(pos);
+        let own = self.paras.get(p0).and_then(|p| p.table).and_then(|id| {
+            let r = self.para_ranges().get(p0)?.clone();
+            Some((r.start + self.text.get(r)?.find(TABLE_ANCHOR)?, id))
+        });
+        // Text first (creates empty marker entries), then formats and marker payloads; tables are
+        // fixed up once at the end.
         let mut at = pos;
         for (r, f) in src.runs() {
             if r.is_empty() {
                 continue;
             }
-            self.insert_with(at, &src.text[r.clone()], f.clone());
+            self.insert_with_raw(at, &src.text[r.clone()], f.clone());
             at += r.len();
         }
         let end = at;
+        let mut claims: Vec<(usize, u64)> = own.map(|(a, id)| (if a >= pos { a + (end - pos) } else { a }, id)).into_iter().collect();
         // Paragraph formats of the pasted paragraphs after the first.
-        let p0 = self.para_at(pos);
         for (k, pf) in src.paras.iter().enumerate().skip(1) {
             if let Some(p) = self.paras.get_mut(p0 + k) {
                 *p = crate::story::ParaFormat { table: None, ..pf.clone() };
@@ -106,25 +113,85 @@ impl Story {
                 *slot = Arc::new(crate::xref::TextAnchor { id, name: a.name.clone() });
             }
         }
-        // Tables: re-attach by paragraph (fresh ids so a pasted copy never shares an id).
+        // Tables: re-attach at their anchors (fresh ids so a pasted copy never shares an id).
         if !src.tables.is_empty() {
             let mut next = self.tables.keys().max().copied().unwrap_or(0) + 1;
-            for (k, pf) in src.paras.iter().enumerate() {
+            let ranges = src.para_ranges();
+            for (pf, r) in src.paras.iter().zip(ranges) {
                 let Some(tid) = pf.table else { continue };
                 let Some(t) = src.tables.get(&tid) else { continue };
-                let pi = p0 + k;
+                let Some(k) = src.text.get(r.clone()).and_then(|t| t.find(TABLE_ANCHOR)) else { continue };
                 let mut t = (**t).clone();
                 t.id = next;
                 next += 1;
+                claims.push((pos + r.start + k, t.id));
                 self.tables.insert(t.id, Arc::new(t));
-                if let Some(p) = self.paras.get_mut(pi) {
-                    p.table = Some(next - 1);
+            }
+        }
+        let splits = self.fix_tables_with(&claims);
+        self.rev += 1;
+        // Past any return the fix-up put inside the pasted text.
+        end + splits.iter().filter(|&&s| s < end).count()
+    }
+
+    /// Append the whole of `other` as new paragraphs after this story's text (threading two
+    /// stories merges them this way). Its formatting, notes, endnotes, editorial notes, markers,
+    /// anchored objects and tables come along; footnotes, endnotes, editorial notes and tables get
+    /// ids that are free in this story. An empty story simply takes `other`'s content. Frames stay.
+    pub fn append_story(&mut self, mut other: Story) {
+        if other.text.is_empty() {
+            return;
+        }
+        if self.text.is_empty() {
+            let (id, frames, rev, link) = (self.id, std::mem::take(&mut self.frames), self.rev, self.link.take());
+            *self = Story { id, frames, rev: rev.saturating_add(1), link, ..other };
+            return;
+        }
+        if !other.tables.is_empty() {
+            let mut ids = std::collections::HashMap::new();
+            let mut next = crate::ids::next_local_id(self.tables.keys().copied());
+            for (old, t) in std::mem::take(&mut other.tables) {
+                let new = next;
+                let mut t = Arc::unwrap_or_clone(t);
+                t.id = new;
+                ids.insert(old, new);
+                self.tables.insert(new, Arc::new(t));
+                // Continue through free ids without rescanning the table map for its maximum.
+                // On exhaustion wrap to gaps; an allocated map cannot occupy every u64 id.
+                next = next.checked_add(1).unwrap_or(1);
+                while self.tables.contains_key(&next) {
+                    next = next.checked_add(1).unwrap_or(1);
                 }
             }
-            self.fix_tables();
+            for p in &mut other.paras {
+                p.table = p.table.and_then(|id| ids.get(&id).copied());
+            }
         }
-        self.rev += 1;
-        end
+        self.text.push('\n');
+        self.text.push_str(&other.text);
+        // The paragraph end takes the last run's format.
+        if let Some(last) = self.chars.last_mut() {
+            last.len += 1;
+        }
+        self.chars.extend(other.chars.into_iter().filter(|r| r.len > 0));
+        self.paras.extend(other.paras);
+        for n in other.notes {
+            let id = self.next_note_id();
+            self.notes.push(Arc::new(crate::notes::Footnote { id, text: n.text.clone() }));
+        }
+        for n in other.endnotes {
+            let id = crate::ids::next_local_id(self.endnotes.iter().map(|x| x.id));
+            self.endnotes.push(Arc::new(crate::notes::Footnote { id, text: n.text.clone() }));
+        }
+        for n in other.editorial {
+            let id = crate::ids::next_local_id(self.editorial.iter().map(|x| x.id));
+            self.editorial.push(Arc::new(crate::endnotes::EditorialNote { id, ..(*n).clone() }));
+        }
+        self.anchors.extend(other.anchors);
+        self.xrefs.extend(other.xrefs);
+        self.index_refs.extend(other.index_refs);
+        self.objects.extend(other.objects);
+        self.rev = self.rev.saturating_add(1);
     }
 }
 
@@ -132,6 +199,32 @@ impl Story {
 mod tests {
     use super::*;
     use crate::story::ParaFormat;
+
+    #[test]
+    fn pasting_a_table_next_to_another_gives_each_its_own_paragraph() {
+        let mut s = Story::with_text(StoryId(1), "x", ParaFormat::default());
+        let a = s.insert_table(1, crate::Table::new(5, 1, 1, 0, 0, 10.0));
+        let n = TABLE_ANCHOR.len_utf8();
+        let copy = s.extract(a..a + n);
+        // After the anchor: the copy follows the original.
+        let mut after = s.clone();
+        let end = after.insert_story(a + n, &copy);
+        after.check().unwrap();
+        assert_eq!(after.text, format!("x\n{TABLE_ANCHOR}\n{TABLE_ANCHOR}\n"));
+        assert_eq!((after.table_anchor(5), after.table_anchor(6)), (Some(a), Some(a + n + 1)));
+        assert_eq!(end, a + 2 * n + 1);
+        // Before the anchor: the copy comes first and the original keeps its table.
+        let mut before = s.clone();
+        let end = before.insert_story(a, &copy);
+        before.check().unwrap();
+        assert_eq!((before.table_anchor(6), before.table_anchor(5)), (Some(a), Some(a + n + 1)));
+        assert_eq!(end, a + n);
+        // Paragraphs pasted before the anchor keep the table too.
+        let mut text = s.clone();
+        text.insert_story(a, &Story::with_text(StoryId(2), "Hello\nWorld", ParaFormat::default()));
+        text.check().unwrap();
+        assert_eq!(text.table_anchor(5), Some(a + "Hello\nWorld".len()));
+    }
 
     #[test]
     fn copy_paste_keeps_formatting_and_notes() {
@@ -158,5 +251,53 @@ mod tests {
         assert_eq!(part.text, a.text[2..e]);
         assert_eq!(part.notes.len(), 1);
         assert!(a.extract(2..8).notes.is_empty());
+    }
+
+    #[test]
+    fn append_tables_preserves_sparse_and_wrapping_ids() {
+        for existing in [vec![1, 3, u64::MAX], vec![1, 3, u64::MAX - 1], vec![1, 3, 8]] {
+            let story = |id, ids: &[u64]| {
+                let mut s = Story::with_text(StoryId(id), &vec![crate::TABLE_ANCHOR.to_string(); ids.len()].join("\n"), ParaFormat::default());
+                for (p, &tid) in s.paras.iter_mut().zip(ids) {
+                    p.table = Some(tid);
+                    let mut t = crate::table::Table::new(tid, 1, 1, 0, 0, 100.0);
+                    t.cells[0].text = Story::with_text(StoryId(0), &format!("{id}:{tid}"), ParaFormat::default());
+                    s.tables.insert(tid, Arc::new(t));
+                }
+                s
+            };
+            let mut a = story(1, &existing);
+            let b = story(2, &[1, 2, 3]);
+            a.check().unwrap();
+            b.check().unwrap();
+            a.append_story(b);
+            a.check().unwrap();
+            assert_eq!(a.tables.len(), 6);
+            for (p, tid) in a.paras.iter().take(3).zip(&existing) {
+                assert_eq!(p.table, Some(*tid));
+                assert_eq!(a.tables[tid].cells[0].text.text, format!("1:{tid}"));
+            }
+            for (p, tid) in a.paras.iter().skip(3).zip(1..=3) {
+                assert_eq!(a.tables[&p.table.unwrap()].cells[0].text.text, format!("2:{tid}"));
+            }
+        }
+    }
+
+    #[test]
+    fn append_story_with_maximal_ids_does_not_overflow() {
+        let mut a = Story::with_text(StoryId(1), "Alpha", ParaFormat::default());
+        a.tables.insert(u64::MAX, Arc::new(crate::table::Table::new(u64::MAX, 1, 1, 0, 0, 100.0)));
+        let note = |id| Arc::new(crate::notes::Footnote { id, text: Story::with_text(StoryId(0), "n", ParaFormat::default()) });
+        a.endnotes.push(note(u64::MAX));
+        a.notes.push(note(u64::MAX));
+        a.rev = u64::MAX;
+        let mut b = Story::with_text(StoryId(2), "Beta", ParaFormat::default());
+        b.tables.insert(1, Arc::new(crate::table::Table::new(1, 1, 1, 0, 0, 100.0)));
+        b.endnotes.push(note(1));
+        b.notes.push(note(1));
+        a.append_story(b);
+        assert_eq!(a.text, "Alpha\nBeta");
+        assert_eq!(a.endnotes.len(), 2);
+        assert_eq!(a.notes.len(), 2);
     }
 }

@@ -12,6 +12,10 @@ pub mod properties;
 pub mod styles;
 pub mod swatches;
 pub mod table;
+pub mod typography;
+
+#[cfg(test)]
+mod color_panel_tests;
 
 use designcraft_doc::{Content, StrokeAlign, WrapMode};
 use designcraft_geom::Rect;
@@ -43,7 +47,61 @@ pub struct SelInfo {
     /// Uniform corner (shape, size) — the first corner.
     pub corner: (designcraft_geom::corners::CornerShape, f64),
     pub wrap_invert: bool,
+    /// Text wrap offsets: top, left, bottom, right.
+    pub wrap_offsets: [f64; 4],
     pub locked: bool,
+}
+
+/// Colour edits go to text: text is selected, or text frames are selected with Formatting
+/// Affects Text on.
+pub fn colors_affect_text(app: &DesignApp) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    st.selection.text.is_some()
+        || (app.ui.formatting_affects_text && st.selection.items.iter().any(|id| st.doc.item(*id).is_some_and(|i| i.is_text_frame())))
+}
+
+/// Fill and stroke swatches and tints of what colour edits apply to: the text (see
+/// [`colors_affect_text`]) or the first selected object.
+pub fn color_target(app: &mut DesignApp) -> Option<(String, f32, String, f32)> {
+    if colors_affect_text(app) {
+        let a = text_attrs(app)?;
+        let c = &a["chars"];
+        let tint = |k: &str| c[k].as_f64().unwrap_or(1.0) as f32;
+        return Some((c["fill"].as_str()?.to_string(), tint("fillTint"), c["stroke"].as_str()?.to_string(), tint("strokeTint")));
+    }
+    let i = sel_info(app)?;
+    Some((i.fill, sel_tint(app, false), i.stroke, sel_tint(app, true)))
+}
+
+/// Apply a swatch (and tint) to the fill or stroke of what colour edits apply to.
+pub fn apply_swatch(app: &mut DesignApp, stroke: bool, swatch: &str, tint: Option<f32>) -> Result<Value, String> {
+    remember_swatch(app, swatch);
+    if colors_affect_text(app) {
+        let (k, kt) = if stroke { ("stroke", "strokeTint") } else { ("fill", "fillTint") };
+        let mut attrs = json!({k: swatch});
+        if let Some(t) = tint {
+            attrs[kt] = json!(t);
+        }
+        return app.run("type.char", json!({ "attrs": attrs }));
+    }
+    let mut p = json!({"swatch": swatch});
+    if let Some(t) = tint {
+        p["tint"] = json!(t);
+    }
+    app.run(if stroke { "object.stroke" } else { "object.fill" }, p)
+}
+
+/// Keep `swatch` as the colour or gradient Apply Color / Apply Gradient use next.
+pub fn remember_swatch(app: &mut DesignApp, swatch: &str) {
+    let Some(st) = app.session.active() else { return };
+    if swatch == designcraft_color::swatch::NONE {
+        return;
+    }
+    if designcraft_color::swatch::resolve_gradient(&st.doc.swatches, swatch).is_some() {
+        app.ui.last_gradient = Some(swatch.to_string());
+    } else if st.doc.resolve_color(swatch, 1.0).is_some() {
+        app.ui.last_color = Some(swatch.to_string());
+    }
 }
 
 /// Fill (or stroke) tint of the first selected item (1 = 100%).
@@ -98,6 +156,7 @@ pub fn sel_info(app: &DesignApp) -> Option<SelInfo> {
             .unwrap_or_else(|| "solid".into()),
         corner: (first.corners.corners[0].shape, first.corners.corners[0].size),
         wrap_invert: first.wrap.invert,
+        wrap_offsets: first.wrap.offsets,
         locked: first.locked,
     })
 }

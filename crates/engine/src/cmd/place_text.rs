@@ -2,7 +2,7 @@
 //! selected frame, or a new frame on the page; with autoflow, pages and threaded frames are added
 //! until the whole story fits (InDesign's Shift-click with a loaded text cursor).
 
-use designcraft_doc::{CharacterStyle, Content, Document, ParaFormat, ParagraphStyle, SpreadRef, Story, StoryId, TextSel};
+use designcraft_doc::{CharacterStyle, Content, Document, ParaFormat, ParagraphStyle, SpreadRef, Story, StoryId, TextFileLink, TextSel};
 use designcraft_geom::Rect;
 use serde_json::{Value, json};
 
@@ -22,8 +22,33 @@ enum Conflict {
     AutoRename,
 }
 
+impl Conflict {
+    fn parse(c: &str) -> Result<Self> {
+        match c {
+            "useExisting" | "" => Ok(Conflict::UseExisting),
+            "redefine" => Ok(Conflict::Redefine),
+            "autoRename" => Ok(Conflict::AutoRename),
+            c => Err(bad("file.place", format!("unknown styleConflicts `{c}` (useExisting, redefine, autoRename)"))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Conflict::UseExisting => "useExisting",
+            Conflict::Redefine => "redefine",
+            Conflict::AutoRename => "autoRename",
+        }
+    }
+}
+
 /// Map imported style names (`styleMap`) and resolve name clashes in the import before it lands.
-fn map_styles(d: &Document, imp: &mut designcraft_textimport::Imported, map: &std::collections::HashMap<String, String>, conflict: Conflict) {
+/// Returns `map` with the names Auto Rename chose.
+fn map_styles(
+    d: &Document,
+    imp: &mut designcraft_textimport::Imported,
+    map: &std::collections::HashMap<String, String>,
+    conflict: Conflict,
+) -> std::collections::HashMap<String, String> {
     let mut rename: std::collections::HashMap<String, String> = map.clone();
     if conflict == Conflict::AutoRename {
         let st = &d.styles;
@@ -39,7 +64,7 @@ fn map_styles(d: &Document, imp: &mut designcraft_textimport::Imported, map: &st
         }
     }
     if rename.is_empty() {
-        return;
+        return rename;
     }
     // Mapped styles aren't imported; renamed ones come in under their new name.
     imp.para_styles.retain(|s| !map.contains_key(&s.name));
@@ -63,6 +88,7 @@ fn map_styles(d: &Document, imp: &mut designcraft_textimport::Imported, map: &st
             f.style = m.clone();
         }
     });
+    rename
 }
 
 fn add_styles(d: &mut Document, imp: &designcraft_textimport::Imported, conflict: Conflict) {
@@ -105,6 +131,70 @@ fn strip(story: &mut Story) {
     story.format_chars(0..n, |f| *f = Default::default());
 }
 
+/// The story's whole text replaced by the import's (its frames stay).
+fn fill(story: &mut Story, from: &Story) {
+    let n = story.len();
+    story.delete(0..n);
+    story.insert_story(0, from);
+    if let (Some(first), Some(p0)) = (from.paras.first(), story.paras.first_mut()) {
+        *p0 = ParaFormat { table: p0.table, ..first.clone() };
+    }
+}
+
+/// The link a story placed from `path` keeps (Create Links When Placing Text Files).
+/// `before`: the file's size and time before `bytes` were read (its time is kept only when the
+/// size matches what was read and it can be trusted, see [`super::links::settled`]).
+fn text_link(
+    path: &str,
+    bytes: &[u8],
+    before: Option<designcraft_doc::Fingerprint>,
+    map: std::collections::HashMap<String, String>,
+    conflict: Conflict,
+    remove: bool,
+    story: &Story,
+) -> TextFileLink {
+    TextFileLink {
+        path: path.to_string(),
+        size: bytes.len() as u64,
+        hash: super::links::fnv_hex(bytes),
+        mtime: before.filter(|f| f.size == bytes.len() as u64 && super::links::settled(f)).map_or(0, |f| f.mtime),
+        style_map: map.into_iter().collect(),
+        style_conflicts: conflict.name().into(),
+        remove_styles: remove,
+        story_hash: super::links::story_hash(story),
+    }
+}
+
+/// Update Link of a linked text file: `bytes` (read from `path`) imported again into the story
+/// with the import options it was placed with, keeping its frames. Returns the import's warnings.
+pub(crate) fn reimport(
+    d: &mut Document,
+    sid: StoryId,
+    path: &str,
+    bytes: &[u8],
+    before: Option<designcraft_doc::Fingerprint>,
+) -> Result<Vec<String>> {
+    let link =
+        d.story(sid).and_then(|s| s.file_link.clone()).ok_or_else(|| bad("links.update", format!("story {} isn't linked to a file", sid.0)))?;
+    let name = std::path::Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().to_string());
+    let mut imp = designcraft_textimport::import(&name, bytes).map_err(|e| bad("links.update", format!("{name}: {e}")))?;
+    if link.remove_styles {
+        strip(&mut imp.story);
+        imp.para_styles.clear();
+        imp.char_styles.clear();
+    }
+    let conflict = Conflict::parse(&link.style_conflicts)?;
+    // A mapping to a style the document no longer has is dropped: that style is imported again.
+    let map: std::collections::HashMap<String, String> =
+        link.style_map.into_iter().filter(|(_, to)| d.styles.para(to).is_some() || d.styles.char_style(to).is_some()).collect();
+    let map = map_styles(d, &mut imp, &map, conflict);
+    add_styles(d, &imp, conflict);
+    let story = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
+    fill(story, &imp.story);
+    story.file_link = Some(text_link(path, bytes, before, map, conflict, link.remove_styles, story));
+    Ok(imp.warnings)
+}
+
 /// Is the story overset in its frames, and how much text do its full frames hold (bytes, frames)?
 /// A frame a column, frame or page break ends early is left out: it says nothing about how much
 /// a frame holds.
@@ -124,19 +214,25 @@ fn fit(d: &Document, sid: StoryId) -> (Option<usize>, usize, usize) {
 }
 
 /// Thread new frames on new pages (margin rectangles) until the story fits. Returns pages added.
-pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize) -> Result<usize> {
+/// A story on a parent spread doesn't autoflow: its frames thread only on that parent. Errors
+/// name `cmd`, the command that autoflows.
+pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize, cmd: &str) -> Result<usize> {
+    let last = d.story(sid).and_then(|s| s.frames.last().copied()).ok_or_else(|| bad(cmd, "the story has no frame"))?;
+    if !matches!(d.find(last).map(|l| l.spread), Some(SpreadRef::Doc(_))) {
+        return Err(bad(cmd, "autoflow works only from a frame on a document page"));
+    }
     let mut added = 0;
     loop {
         let (overset, held, full) = fit(d, sid);
         let Some(at) = overset else { return Ok(added) };
         if added >= max_pages {
-            return Err(bad("file.place", format!("autoflow stopped after {max_pages} pages")));
+            return Err(bad(cmd, format!("autoflow stopped after {max_pages} pages")));
         }
         let len = d.story(sid).map_or(0, |s| s.len());
         // Frames still needed at the rate the full ones are filled (at least one); with no full
         // frame to go by yet, one more page.
         let want = held.checked_div(full).map_or(1, |per_frame| len.saturating_sub(at).div_ceil(per_frame.max(1))).clamp(1, max_pages - added);
-        let last = *d.story(sid).and_then(|s| s.frames.last()).ok_or_else(|| bad("file.place", "the story has no frame"))?;
+        let last = *d.story(sid).and_then(|s| s.frames.last()).ok_or_else(|| bad(cmd, "the story has no frame"))?;
         let mut page = d.page_of_item(last).unwrap_or(d.page_count().saturating_sub(1));
         let parent = d.page_loc(page).and_then(|(si, pi)| d.spreads[si].pages[pi].parent);
         d.insert_pages(Some(page), want, parent)?;
@@ -144,7 +240,7 @@ pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize) -> Resu
         let mut prev = last;
         for _ in 0..want {
             page += 1;
-            let (si, pi) = d.page_loc(page).ok_or_else(|| bad("file.place", "page insert failed"))?;
+            let (si, pi) = d.page_loc(page).ok_or_else(|| bad(cmd, "page insert failed"))?;
             let r = d.spreads[si].pages[pi].margin_rect();
             let (fid, _) = d.add_text_frame(SpreadRef::Doc(si), r, layer, "", ParaFormat::default())?;
             d.thread(prev, fid)?;
@@ -154,7 +250,14 @@ pub(crate) fn autoflow(d: &mut Document, sid: StoryId, max_pages: usize) -> Resu
     }
 }
 
-pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -> Result<Value> {
+pub(super) fn place_text(
+    s: &mut Session,
+    p: &Value,
+    name: &str,
+    bytes: &[u8],
+    path: Option<String>,
+    before: Option<designcraft_doc::Fingerprint>,
+) -> Result<Value> {
     let mut imp = designcraft_textimport::import(name, bytes).map_err(|e| bad("file.place", e.to_string()))?;
     let remove = p.get("removeStyles").and_then(Value::as_bool).unwrap_or(false);
     if remove {
@@ -162,18 +265,20 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
         imp.para_styles.clear();
         imp.char_styles.clear();
     }
-    let conflict = match p.get("styleConflicts").and_then(Value::as_str).unwrap_or("useExisting") {
-        "useExisting" => Conflict::UseExisting,
-        "redefine" => Conflict::Redefine,
-        "autoRename" => Conflict::AutoRename,
-        c => return Err(bad("file.place", format!("unknown styleConflicts `{c}` (useExisting, redefine, autoRename)"))),
-    };
+    let conflict = Conflict::parse(p.get("styleConflicts").and_then(Value::as_str).unwrap_or("useExisting"))?;
     let map: std::collections::HashMap<String, String> = p
         .get("styleMap")
         .and_then(Value::as_object)
         .map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
-    map_styles(&s.doc()?.doc, &mut imp, &map, conflict);
+    let map = map_styles(&s.doc()?.doc, &mut imp, &map, conflict);
+    // Create Links When Placing Text Files (only a file on disk can be linked).
+    let link = path.filter(|_| p.get("link").and_then(Value::as_bool).unwrap_or(s.prefs.link_text_files));
+    // A file too large for the Links panel to check isn't linked.
+    let (link, too_large) = match link {
+        Some(_) if !super::links::checkable_size(bytes.len()) => (None, true),
+        l => (l, false),
+    };
     let autoflow_on = p.get("autoflow").and_then(Value::as_bool).unwrap_or(false);
     let st = s.doc()?;
     let caret = st.selection.text.filter(|t| t.cell.is_none());
@@ -182,7 +287,10 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
     });
     let page = p.get("page").and_then(Value::as_u64).map(|v| (v as usize).saturating_sub(1));
     let rect = super::rect_param(p, "rect");
-    let warnings = imp.warnings.clone();
+    let mut warnings = imp.warnings.clone();
+    if too_large {
+        warnings.push("not linked: the file is too large to keep linked".into());
+    }
     s.edit(|d, sel| {
         add_styles(d, &imp, conflict);
         let sid = if let Some(t) = caret {
@@ -192,6 +300,9 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
             story.delete(r.clone());
             let end = story.insert_story(r.start, &imp.story);
             sel.text = Some(TextSel { anchor: end, focus: end, ..t });
+            if link.is_some() {
+                warnings.push("not linked: a linked text file fills a whole story, not an insertion point".into());
+            }
             t.story
         } else {
             let fid = match frame {
@@ -221,16 +332,12 @@ pub(super) fn place_text(s: &mut Session, p: &Value, name: &str, bytes: &[u8]) -
                 None => return Err(bad("file.place", "no such frame")),
             };
             let story = d.story_mut(sid).ok_or(designcraft_doc::DocError::NoStory(sid))?;
-            let n = story.len();
-            story.delete(0..n);
-            story.insert_story(0, &imp.story);
-            if let Some(first) = imp.story.paras.first() {
-                story.paras[0] = ParaFormat { table: story.paras[0].table, ..first.clone() };
-            }
+            fill(story, &imp.story);
+            story.file_link = link.as_deref().map(|path| text_link(path, bytes, before, map.clone(), conflict, remove, story));
             *sel = designcraft_doc::Selection::items(vec![fid]);
             sid
         };
-        let pages = if autoflow_on { autoflow(d, sid, 2000)? } else { 0 };
+        let pages = if autoflow_on { autoflow(d, sid, 2000, "file.place")? } else { 0 };
         let overset = fit(d, sid).0.is_some();
         Ok(json!({"story": sid.0, "pagesAdded": pages, "overset": overset, "warnings": warnings}))
     })
@@ -480,5 +587,57 @@ mod pdf_page_tests {
         // Redefine: the imported definition replaces the document's.
         s.execute("file.place", &json!({"base64": b64, "name": "a.docx", "styleConflicts": "redefine", "rect": [72, 400, 300, 500]})).unwrap();
         assert_eq!(s.doc().unwrap().doc.styles.para("Body").unwrap().chars.size, Some(10.0));
+    }
+
+    #[test]
+    fn word_normal_comes_in_as_its_own_style() {
+        // Regression (#722): Normal's formatting (over Word's document defaults) was dropped.
+        use std::io::Write;
+        const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+        let styles = format!(
+            r#"<w:styles {W}><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
+            <w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia"/><w:sz w:val="26"/></w:rPr></w:style></w:styles>"#
+        );
+        let doc = format!(r#"<w:document {W}><w:body><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:body></w:document>"#);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (n, c) in [("word/document.xml", doc), ("word/styles.xml", styles)] {
+            w.start_file(n, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(c.as_bytes()).unwrap();
+        }
+        let b64 = crate::cmd::base64_encode(&w.finish().unwrap().into_inner());
+        let basic = designcraft_doc::story::BASIC_PARAGRAPH;
+        let placed = |s: &Session, story: &serde_json::Value| {
+            let d = &s.doc().unwrap().doc;
+            let st = d.story(designcraft_doc::StoryId(story["story"].as_u64().unwrap())).unwrap();
+            let (_, para_chars) = d.styles.resolve_para(&st.paras[0]);
+            let c = d.styles.resolve_char(&para_chars, st.format_after(0));
+            (st.paras[0].style.clone(), c.size, c.font_family)
+        };
+        let georgia = |style: &str| (style.to_string(), 13.0, "Georgia".to_string());
+        // Default options: the document gains Normal and the text looks as it did in Word.
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let info = s.execute("place.styles", &json!({"base64": b64, "name": "a.docx"})).unwrap();
+        assert_eq!(info["paragraph"], json!(["Normal"]));
+        assert_eq!(info["conflicts"], json!([]));
+        let r = s.execute("file.place", &json!({"base64": b64, "name": "a.docx"})).unwrap();
+        assert_eq!(placed(&s, &r), georgia("Normal"));
+        assert!(s.doc().unwrap().doc.styles.para(basic).unwrap().chars.is_empty(), "[Basic Paragraph] untouched");
+        // Normal mapped to [Basic Paragraph]: no new style, and the document's definition is used
+        // (mapped styles aren't imported, whatever the conflict option).
+        s.execute("file.new", &json!({})).unwrap();
+        let r =
+            s.execute("file.place", &json!({"base64": b64, "name": "a.docx", "styleMap": {"Normal": basic}, "styleConflicts": "redefine"})).unwrap();
+        assert!(s.doc().unwrap().doc.styles.para("Normal").is_none());
+        assert!(s.doc().unwrap().doc.styles.para(basic).unwrap().chars.is_empty());
+        let (style, size, _) = placed(&s, &r);
+        assert_eq!((style.as_str(), size), (basic, 12.0));
+        // A document with its own Normal: the usual conflict rules.
+        s.execute("style.paragraph.create", &json!({"name": "Normal", "chars": {"size": 9}})).unwrap();
+        let r = s.execute("file.place", &json!({"base64": b64, "name": "a.docx", "rect": [72, 400, 300, 500]})).unwrap();
+        assert_eq!(placed(&s, &r).1, 9.0, "use existing");
+        let r =
+            s.execute("file.place", &json!({"base64": b64, "name": "a.docx", "styleConflicts": "autoRename", "rect": [72, 520, 300, 600]})).unwrap();
+        assert_eq!(placed(&s, &r), georgia("Normal_wrd_1"));
     }
 }

@@ -11,8 +11,12 @@ pub enum AseError {
     Signature,
     #[error("the file ends early")]
     Truncated,
+    #[error("the file holds more than {MAX_COLORS} colors")]
+    TooManyColors,
 }
 
+/// The most colors [`read`] accepts in one file.
+pub const MAX_COLORS: usize = 100_000;
 const COLOR: u16 = 0x0001;
 #[cfg(test)]
 const GROUP_START: u16 = 0xC001;
@@ -56,6 +60,7 @@ impl R<'_> {
 }
 
 /// The colour swatches in an `.ase` file (groups are flattened).
+/// A file with more than [`MAX_COLORS`] colors is an error.
 pub fn read(bytes: &[u8]) -> Result<Vec<Swatch>, AseError> {
     let mut r = R { b: bytes, i: 0 };
     if r.take(4)? != b"ASEF" {
@@ -63,7 +68,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Swatch>, AseError> {
     }
     r.take(4)?; // version
     let blocks = r.u32()?;
-    let mut out = Vec::new();
+    let (mut out, mut colors) = (Vec::new(), 0usize);
     for _ in 0..blocks {
         let kind = r.u16()?;
         let len = r.u32()? as usize;
@@ -71,6 +76,10 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Swatch>, AseError> {
         // Group start/end blocks are skipped: groups are flattened.
         if kind != COLOR {
             continue;
+        }
+        colors += 1;
+        if colors > MAX_COLORS {
+            return Err(AseError::TooManyColors);
         }
         let mut b = R { b: body, i: 0 };
         let name = b.name()?;
@@ -190,5 +199,19 @@ mod tests {
         assert_eq!(w[0].name, "W");
         let SwatchValue::Color { color, .. } = &w[0].value else { panic!() };
         assert!(color.to_rgb().iter().all(|v| *v > 0.98), "Lab white: {color:?}");
+    }
+
+    #[test]
+    fn more_than_max_colors_is_an_error() {
+        let gray = Swatch {
+            name: "G".into(),
+            value: SwatchValue::Color { color: Color::Gray { k: 0.5 }, color_type: ColorType::Process },
+            locked: false,
+            named: true,
+            hidden: false,
+        };
+        let sw = vec![gray; MAX_COLORS + 1];
+        assert_eq!(read(&write(&sw)).err(), Some(AseError::TooManyColors));
+        assert_eq!(read(&write(&sw[1..])).map(|w| w.len()), Ok(MAX_COLORS), "up to the limit");
     }
 }
