@@ -240,7 +240,7 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
                     false
                 }
                 Some(None) => false,
-                None => ui.data(|d| d.get_temp::<(RenameKey, String)>(egui::Id::new(RENAME))).is_some_and(|(k, _)| k == it.id.0),
+                None => ui.data(|d| d.get_temp::<RenameState>(egui::Id::new(RENAME))).is_some_and(|(k, ..)| k == it.id.0),
             };
             if !renaming {
                 let clip = Rect::from_min_max(row.min, pos2(row.max.x - 26.0, row.max.y));
@@ -293,14 +293,16 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
 
 /// The object whose row is being renamed.
 type RenameKey = u64;
+/// The row, the field's text, and the text it started with.
+type RenameState = (RenameKey, String, String);
 const RENAME: &str = "layers_rename";
 
 /// The name field of the row being renamed (double-click), in `r`: `Some(Some(name))` when Enter
-/// or a click elsewhere confirms it, `Some(None)` when Esc cancels, `None` while typing or when
-/// this row isn't being renamed.
+/// or a click elsewhere confirms it with a changed text, `Some(None)` when Esc cancels or the text
+/// is the one it started with, `None` while typing or when this row isn't being renamed.
 fn rename_field(ui: &mut Ui, r: Rect, key: RenameKey) -> Option<Option<String>> {
     let id = egui::Id::new(RENAME);
-    let (k, mut text): (RenameKey, String) = ui.data(|d| d.get_temp(id))?;
+    let (k, mut text, start): RenameState = ui.data(|d| d.get_temp(id))?;
     if k != key {
         return None;
     }
@@ -311,15 +313,18 @@ fn rename_field(ui: &mut Ui, r: Rect, key: RenameKey) -> Option<Option<String>> 
     let done = if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         Some(None)
     } else if edit.lost_focus() {
-        Some(Some(text.trim().to_string()))
+        // An unnamed object's field starts with its automatic label; confirming that text
+        // unchanged must not turn the label into a name.
+        let new = text.trim();
+        if new == start.trim() { Some(None) } else { Some(Some(new.to_string())) }
     } else {
         None
     };
     ui.data_mut(|d| {
         if done.is_some() {
-            d.remove::<(RenameKey, String)>(id);
+            d.remove::<RenameState>(id);
         } else {
-            d.insert_temp(id, (key, text));
+            d.insert_temp(id, (key, text, start));
         }
     });
     done
@@ -327,7 +332,7 @@ fn rename_field(ui: &mut Ui, r: Rect, key: RenameKey) -> Option<Option<String>> 
 
 /// Start renaming row `key`, its field showing `name`.
 fn start_rename(ui: &Ui, key: RenameKey, name: &str) {
-    ui.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (key, name.to_string())));
+    ui.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (key, name.to_string(), name.to_string())));
 }
 
 #[cfg(test)]
@@ -381,7 +386,7 @@ mod tests {
         h.run_steps(2);
         let rename = |h: &mut Harness<'_, DesignApp>, key: RenameKey, typed: &str| {
             // As a double-click starts it (with an emptied field here, so the typing is the name).
-            h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (key, String::new())));
+            h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (key, String::new(), String::new())));
             h.run_steps(2);
             h.get_by_role(egui::accesskit::Role::TextInput).type_text(typed);
             h.run_steps(1);
@@ -391,11 +396,37 @@ mod tests {
         rename(&mut h, id, "Hero bottle");
         assert_eq!(h.state().session.active().unwrap().doc.item(ItemId(id)).unwrap().name, "Hero bottle");
         // Esc leaves the name as it was.
-        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (id, String::new())));
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (id, String::new(), String::new())));
         h.run_steps(2);
         h.get_by_role(egui::accesskit::Role::TextInput).type_text("Oops");
         h.key_press(egui::Key::Escape);
         h.run_steps(2);
         assert_eq!(h.state().session.active().unwrap().doc.item(ItemId(id)).unwrap().name, "Hero bottle");
+    }
+
+    #[test]
+    fn confirming_an_unedited_automatic_label_keeps_the_object_unnamed() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [72, 72, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(260.0, 400.0)).build_ui_state(|ui, app: &mut DesignApp| show(app, ui), app);
+        h.run_steps(2);
+        let name = |h: &Harness<'_, DesignApp>| h.state().session.active().unwrap().doc.item(ItemId(id)).unwrap().name.clone();
+        // As a double-click on the unnamed row starts it: the field shows the automatic label.
+        let start = |h: &mut Harness<'_, DesignApp>| {
+            h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(RENAME), (id, "Rectangle".to_string(), "Rectangle".to_string())));
+            h.run_steps(2);
+        };
+        start(&mut h);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(name(&h), "", "Enter without editing keeps following the automatic label");
+        start(&mut h);
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text("X");
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert!(name(&h).contains('X'), "an edited text becomes the name");
     }
 }
