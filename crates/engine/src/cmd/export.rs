@@ -375,8 +375,8 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
             let destination = match o.get("destination") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(d)) if d.trim().is_empty() => None,
-                Some(Value::String(d)) => Some(d.clone()),
-                Some(v) => return Err(bad(ID, format!("bad `output.destination`: {v} (a CMYK profile name)"))),
+                Some(Value::String(d)) => Some(destination_profile(d)?),
+                Some(v) => return Err(bad(ID, format!("bad `output.destination`: {v} (a CMYK profile name or an .icc/.icm file)"))),
             };
             Output { conversion, destination }
         }
@@ -417,6 +417,25 @@ pub(crate) fn options(p: &Value, page_count: usize) -> Result<PdfOptions> {
         media: p.get("media").and_then(Value::as_bool).unwrap_or(false),
         ..PdfOptions::default()
     })
+}
+
+/// `output.destination`: a profile name as it is, or an `.icc`/`.icm` file, which is loaded
+/// (registered under its own name) so the export can use it.
+fn destination_profile(d: &str) -> Result<String> {
+    let lower = d.trim().to_ascii_lowercase();
+    if !(lower.ends_with(".icc") || lower.ends_with(".icm")) {
+        return Ok(d.trim().to_string());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes = crate::io::read_file(d.trim()).map_err(|e| bad("file.exportPdf", format!("`output.destination`: {e}")))?;
+        let info = designcraft_color::cms::register_icc(&bytes, None).map_err(|e| bad("file.exportPdf", format!("`output.destination`: {e}")))?;
+        Ok(info.name)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Err(bad("file.exportPdf", "`output.destination`: profile files can't be loaded on the web; load the profile first"))
+    }
 }
 
 /// Does this object (or anything in it) need the transparency flattener?
@@ -1325,5 +1344,11 @@ mod pdf_option_tests {
         assert_eq!(opts(json!({"output": {}})).unwrap().output, Output::default());
         assert!(opts(json!({"output": {"colorConversion": "rgb"}})).is_err());
         assert!(opts(json!({"output": "destination"})).is_err());
+        // A profile file is loaded and named; the bundled sRGB loads but is not CMYK, which the
+        // export then reports; a missing file is an error here.
+        let srgb = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/icc/sRGB-v2-magic.icc");
+        let o = opts(json!({"output": {"colorConversion": "destination", "destination": srgb}})).unwrap();
+        assert!(o.output.destination.as_deref().is_some_and(|n| n.to_lowercase().contains("srgb")), "{:?}", o.output.destination);
+        assert!(opts(json!({"output": {"colorConversion": "destination", "destination": "/no/such/profile.icc"}})).is_err());
     }
 }

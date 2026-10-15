@@ -263,6 +263,21 @@ pub fn open_pdf_export(app: &mut DesignApp) {
         if app.ui.pdf_export.flatten.is_empty() {
             m.insert("flatten".into(), json!(app.ui.flattener));
         }
+        // The CMYK profiles installed on this machine, for the Destination menu. A remembered
+        // destination that is one of them (and not registered yet) is loaded now.
+        {
+            let installed =
+                app.session.execute("color.installedProfiles", &json!({})).ok().and_then(|v| v["profiles"].as_array().cloned()).unwrap_or_default();
+            let installed: Vec<Value> = installed.into_iter().filter(|p| p["kind"] == "cmyk").collect();
+            let wanted = app.ui.pdf_export.destination.clone();
+            if !wanted.is_empty()
+                && !designcraft_color::cms::profiles().iter().any(|p| p.name == wanted)
+                && let Some(path) = installed.iter().find(|p| p["name"] == wanted).and_then(|p| p["path"].as_str())
+            {
+                let _ = app.session.execute("color.loadProfile", &json!({"path": path}));
+            }
+            m.insert("installedProfiles".into(), Value::Array(installed));
+        }
     }
     app.ui.dialog = Some(Dialog::new("pdfExport", fields));
 }
@@ -394,8 +409,9 @@ fn pdf_bleed_param(d: &Dialog) -> Value {
 /// File › Export PDF: the "Export PDF" options (General / Compression / Marks and Bleeds /
 /// Advanced). Selecting a preset fills the dependent fields; editing any other control flips the
 /// preset back to "Custom".
-fn pdf_export(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
-    let lang = app.ui.language.as_str();
+fn pdf_export(app: &mut crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    let lang = app.ui.language.clone();
+    let lang = lang.as_str();
     let head = |ui: &mut egui::Ui, t: &str| {
         ui.add_space(6.0);
         crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(lang, t)).font(semibold(12.0)));
@@ -485,29 +501,61 @@ fn pdf_export(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
             ],
         );
     });
-    if d.s("colorConversion") != "none" {
+    // Destination: the working CMYK, the registered CMYK profiles, and the CMYK profiles
+    // installed on this machine (loaded when picked); greyed out without a conversion, as in
+    // InDesign. Load Profile… takes any .icc/.icm file.
+    let converting = d.s("colorConversion") != "none";
+    ui.add_enabled_ui(converting, |ui| {
         ui.horizontal(|ui| {
             crate::rtl::label(ui, crate::i18n::tr(lang, "Destination:"));
             let working = designcraft_color::cms::active_settings().cmyk;
             let document = format!("{} - {working}", crate::i18n::tr(lang, "Document CMYK"));
-            let mut options: Vec<(String, String)> = vec![(String::new(), document)];
-            options.extend(
-                designcraft_color::cms::profiles()
-                    .into_iter()
-                    .filter(|p| p.kind == designcraft_color::cms::ProfileKind::Cmyk)
-                    .map(|p| (p.name.clone(), p.name)),
-            );
+            // (id, label, path to load first)
+            let mut options: Vec<(String, String, Option<String>)> = vec![(String::new(), document, None)];
+            let registered: Vec<String> = designcraft_color::cms::profiles()
+                .into_iter()
+                .filter(|p| p.kind == designcraft_color::cms::ProfileKind::Cmyk)
+                .map(|p| p.name)
+                .collect();
+            options.extend(registered.iter().map(|n| (n.clone(), n.clone(), None)));
+            if let Some(installed) = d.fields.get("installedProfiles").and_then(Value::as_array) {
+                for p in installed {
+                    let (Some(name), Some(path)) = (p["name"].as_str(), p["path"].as_str()) else { continue };
+                    if !registered.iter().any(|r| r == name) {
+                        options.push((name.to_string(), name.to_string(), Some(path.to_string())));
+                    }
+                }
+            }
             let cur = d.s("destination");
-            let shown = options.iter().find(|(id, _)| *id == cur).map(|(_, l)| l.clone()).unwrap_or_else(|| cur.clone());
+            let shown = options.iter().find(|(id, _, _)| *id == cur).map(|(_, l, _)| l.clone()).unwrap_or_else(|| cur.clone());
+            let mut load: Option<String> = None;
             egui::ComboBox::from_id_salt("pdf_destination").selected_text(crate::rtl::widget(ui, shown)).width(260.0).show_ui(ui, |ui| {
-                for (id, label) in &options {
+                for (id, label, path) in &options {
                     if ui.selectable_label(cur == *id, crate::rtl::widget(ui, label.as_str())).clicked() {
                         d.fields.insert("destination".into(), json!(id));
+                        load = path.clone();
                     }
                 }
             });
+            if ui.button(crate::rtl::widget(ui, crate::i18n::tr(lang, "Load Profile…"))).clicked()
+                && let Some(path) = app.services.pick_open.as_mut().and_then(|f| f("icc"))
+            {
+                load = Some(path);
+            }
+            if let Some(path) = load {
+                match app.session.execute("color.loadProfile", &json!({"path": path})) {
+                    Ok(info) => {
+                        if info["kind"] == "cmyk" {
+                            d.fields.insert("destination".into(), info["name"].clone());
+                        } else {
+                            app.status(format!("{}: not a CMYK profile", info["name"].as_str().unwrap_or("profile")));
+                        }
+                    }
+                    Err(e) => app.status(format!("Load Profile: {e}")),
+                }
+            }
         });
-    }
+    });
 
     head(ui, "Advanced");
     ui.horizontal(|ui| {
