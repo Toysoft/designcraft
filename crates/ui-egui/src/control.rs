@@ -213,6 +213,14 @@ fn handle_request(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest
             ctx.request_repaint();
             ok(Value::Null)
         }
+        // What Ctrl/Cmd+V delivers from the system clipboard: text, or SVG markup copied in an
+        // illustration app (pasted as editable paths when no text is being edited).
+        "ui.paste" => {
+            let Some(text) = s("text") else { return err("missing `text`") };
+            app.synthetic.push(egui::Event::Paste(text.to_string()));
+            ctx.request_repaint();
+            ok(Value::Null)
+        }
         "ui.move" => {
             let pos = egui::pos2(p.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32, p.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32);
             app.control_synthetic.push(egui::Event::PointerMoved(pos));

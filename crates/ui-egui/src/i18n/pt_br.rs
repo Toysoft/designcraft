@@ -85,6 +85,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("The stroke isn't a gradient.", "O traçado não é um gradiente."),
     ("Reverse Path", "Inverter demarcador"),
     ("Set Anchor", "Definir ponto de ancoragem"),
+    ("Paste Vector Art", "Colar arte vetorial"),
     ("Clear", "Limpar"),
     ("Delete", "Excluir"),
     ("Duplicate", "Duplicar"),

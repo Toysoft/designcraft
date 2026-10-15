@@ -173,6 +173,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ),
     ("Reverse Path", ["Pfadrichtung umkehren", "Inverser le tracé", "Invertir trazado", "パスの方向反転", "反转路径"]),
     ("Set Anchor", ["Ankerpunkt festlegen", "Définir le point d’ancrage", "Definir punto de ancla", "アンカーポイントを設定", "设置锚点"]),
+    (
+        "Paste Vector Art",
+        ["Vektorgrafik einfügen", "Coller l’illustration vectorielle", "Pegar ilustración vectorial", "ベクトルアートをペースト", "粘贴矢量图稿"],
+    ),
     ("Clear", ["Löschen", "Effacer", "Borrar", "消去", "清除"]),
     ("Duplicate", ["Duplizieren", "Dupliquer", "Duplicar", "複製", "重复"]),
     ("Select All", ["Alles auswählen", "Tout sélectionner", "Seleccionar todo", "すべてを選択", "全选"]),

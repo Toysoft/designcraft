@@ -73,6 +73,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("The stroke isn't a gradient.", "線はグラデーションではありません。"),
     ("Reverse Path", "パスの方向反転"),
     ("Set Anchor", "アンカーポイントを設定"),
+    ("Paste Vector Art", "ベクトルアートをペースト"),
     ("Clear", "消去"),
     ("Duplicate", "複製"),
     ("Select All", "すべてを選択"),

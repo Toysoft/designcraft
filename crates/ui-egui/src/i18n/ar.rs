@@ -79,6 +79,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("The stroke isn't a gradient.", "الحد ليس تدرجًا."),
     ("Reverse Path", "عكس المسار"),
     ("Set Anchor", "تعيين نقطة الارتساء"),
+    ("Paste Vector Art", "لصق رسم متجه"),
     ("Clear", "مسح"),
     ("Delete", "حذف"),
     ("Duplicate", "تكرار"),

@@ -673,6 +673,21 @@ impl DesignApp {
         // Only user-initiated runs touch the system clipboard, never the control channel's.
         let system_clipboard = !self.in_control && !self.control_input_frame.load(std::sync::atomic::Ordering::Relaxed);
         let params = if system_clipboard { self.with_system_clipboard(id, params) } else { params };
+        // Vector art copied in another app (Illustrator, VectorCraft, Figma) is SVG markup on the
+        // system clipboard: with no insertion point it pastes as editable paths, not as text.
+        let typing = self.session.active().is_some_and(|d| d.selection.text.is_some());
+        let (id, params) = match params.get("text").and_then(Value::as_str) {
+            Some(t) if id == "edit.paste" && !typing && designcraft_engine::cmd::is_svg_markup(t) => {
+                let mut p = json!({"svg": t});
+                for k in ["spread", "at"] {
+                    if let Some(v) = params.get(k) {
+                        p[k] = v.clone();
+                    }
+                }
+                ("edit.pasteSvg", p)
+            }
+            _ => (id, params),
+        };
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.after_engine();
         match &r {
