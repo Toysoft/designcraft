@@ -3404,6 +3404,8 @@ mod path_edit_tests {
             ("path.erase", json!({"id": id, "points": [[120, 100], [180, 100]]})),
             ("path.smooth", json!({"id": id, "points": [[120, 100], [180, 100]]})),
             ("path.split", json!({"id": id, "at": [150, 100]})),
+            ("path.join", json!({"ids": [id]})),
+            ("path.convertPoints", json!({"ids": [id], "kind": "corner"})),
         ]
     }
 
@@ -3422,6 +3424,24 @@ mod path_edit_tests {
         let layer = s.doc().unwrap().doc.item(ItemId(id)).unwrap().layer;
         s.execute("layer.set", &json!({"id": layer.0, "locked": true})).unwrap();
         assert_no_path_edit(&mut s, id, "on a locked layer");
+    }
+
+    #[test]
+    fn joining_two_paths_with_one_on_a_locked_layer_changes_neither() {
+        let (mut s, a) = session_with_path();
+        let b = s.execute("path.create", &json!({"anchors": [{"p": [300, 200]}, {"p": [400, 300]}]})).unwrap()["id"].as_u64().unwrap();
+        let layer = s.execute("layer.new", &json!({"name": "Art"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.setLayer", &json!({"ids": [b], "layer": layer})).unwrap();
+        let a_layer = s.doc().unwrap().doc.item(ItemId(a)).unwrap().layer;
+        s.execute("layer.set", &json!({"id": a_layer.0, "locked": true})).unwrap();
+        let (before_a, before_b) = (anchors(&s, a), anchors(&s, b));
+        for ids in [[a, b], [b, a]] {
+            assert!(s.execute("path.join", &json!({"ids": ids})).is_err(), "{ids:?}");
+        }
+        assert_eq!((anchors(&s, a), anchors(&s, b)), (before_a, before_b));
+        for id in [a, b] {
+            assert!(!s.doc().unwrap().doc.item(ItemId(id)).unwrap().path.subpaths[0].closed, "{id} stays open");
+        }
     }
 
     #[test]
