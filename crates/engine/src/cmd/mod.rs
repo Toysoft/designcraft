@@ -1,5 +1,6 @@
 //! The command registry. Ids follow InDesign's menu structure.
 
+mod alpha_wrap;
 mod anchored;
 pub mod anchors;
 mod articles;
@@ -154,6 +155,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(|| {
         let mut v = Vec::new();
         v.extend(file::specs());
+        v.extend(alpha_wrap::specs());
         v.extend(interchange::specs());
         v.extend(export::specs());
         v.extend(edit::specs());

@@ -50,6 +50,21 @@ same references, and MCP's `batch` tool takes `commands` or `script` text with t
 `--all-pages` that follow them, so one run can write several sizes
 (`run --sample --scale 0.5 --export small.png --scale 2 --export large.png`); one with no export after it is an error.
 
+## Tracing image transparency for text wrap
+
+`object.traceTransparencyWrap {id?, offset?: 6, threshold?: 16}` creates a fixed custom boundary around a
+placed raster's visible pixels. It leaves the image and frame untouched. The Text Wrap panel exposes the
+same action as **Trace Transparency…**, with an offset in points and an alpha threshold from 0 to 254.
+The source must contain transparency and at most 16 million pixels; an opaque image is refused because
+this command does not detect subjects. A conservative 128 × 128 occupancy grid preserves transparent gaps
+and separate parts of the silhouette. Contour layout keeps those intervals separate across the whole line band,
+so a caption can fit between two legs. Complex clipping frames or resulting outlines are refused before editing.
+
+The boundary is a snapshot: trace again after relinking or changing the image's content transform, or to
+change its offset. Ordinary whole-frame transformations move the boundary with the frame. The standard
+Text Wrap offset/contour controls replace a custom boundary with the frame's wrap, as for imported custom
+boundaries. Prerequisites: contour layout #384 and custom wrap boundaries #500.
+
 ## Data merge
 
 `data.source.select {path, sheet?}` links a CSV/TSV/`.xlsx` file to the document (`data.source.update` re-reads it,

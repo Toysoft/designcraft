@@ -133,6 +133,54 @@ fn text_field(ui: &mut egui::Ui, d: &mut Dialog, key: &str, w: f32) {
     }
 }
 
+pub(crate) fn open_transparency_wrap(app: &mut DesignApp) {
+    let id = app.session.active().and_then(|s| (s.selection.items.len() == 1).then(|| s.selection.items.first().copied()).flatten());
+    match id {
+        Some(id) => app.ui.dialog = Some(Dialog::new("transparencyWrap", json!({"id":id.0,"offset":"6 pt","threshold":"16"}))),
+        None => app.ui.dialog = Some(Dialog::new("alert", json!({"message":"Select one placed raster image."}))),
+    }
+}
+
+fn transparency_wrap(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    egui::Grid::new("transparency_wrap_fields").num_columns(2).show(ui, |ui| {
+        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Offset:"));
+        text_field(ui, d, "offset", 90.0);
+        ui.end_row();
+        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Alpha Threshold (0–254):"));
+        text_field(ui, d, "threshold", 90.0);
+        ui.end_row();
+    });
+    ui.add_space(8.0);
+    crate::rtl::label(
+        ui,
+        crate::i18n::tr(&app.ui.language, "Creates a fixed wrap boundary. Trace again after changing the image content or its offset."),
+    );
+    if let Some(error) = d.fields.get("status").and_then(Value::as_str) {
+        crate::rtl::label(ui, error);
+    }
+}
+
+#[cfg(test)]
+mod transparency_wrap_tests {
+    use super::*;
+    #[test]
+    fn transparency_wrap_cancel_and_bad_input_do_not_edit() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.run("frame.create", json!({"rect":[0,0,100,100],"content":"graphic"})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        open_transparency_wrap(&mut app);
+        assert_eq!(app.ui.dialog.as_ref().unwrap().id, "transparencyWrap");
+        cancel(&mut app);
+        assert_eq!(app.session.active().unwrap().doc, before);
+        open_transparency_wrap(&mut app);
+        app.ui.dialog.as_mut().unwrap().fields.insert("offset".into(), json!("not a number"));
+        assert!(confirm(&mut app).is_err());
+        assert_eq!(app.ui.dialog.as_ref().unwrap().id, "transparencyWrap");
+        assert_eq!(app.session.active().unwrap().doc, before);
+    }
+}
+
 /// Edit › Keyboard Shortcuts: every command and its shortcut; click a shortcut, then press the
 /// new keys (Esc cancels, Backspace clears).
 /// Edit › Spelling › User Dictionary: added words and hyphenation exceptions (applied at once).
@@ -1498,6 +1546,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "createGuides" => crate::i18n::tr(&app.ui.language, "Create Guides"),
         "marginsAndColumns" => crate::i18n::tr(&app.ui.language, "Margins and Columns"),
         "textFrameOptions" => crate::i18n::tr(&app.ui.language, "Text Frame Options"),
+        "transparencyWrap" => crate::i18n::tr(&app.ui.language, "Trace Transparency for Text Wrap"),
         "documentSetup" => crate::i18n::tr(&app.ui.language, "Document Setup"),
         "findChange" => crate::i18n::tr(&app.ui.language, "Find/Change"),
         "paragraphStyleOptions" => crate::i18n::tr(&app.ui.language, "Paragraph Style Options"),
@@ -2189,6 +2238,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                     seed_text_frame_options(app, &mut d);
                     text_frame_options_dialog(app, ui, &mut d);
                 }
+                "transparencyWrap" => transparency_wrap(app, ui, &mut d),
                 "documentSetup" => document_setup(app, ui, &mut d),
                 "pdfExport" => pdf_export(app, ui, &mut d),
                 "alert" => {
@@ -2274,6 +2324,15 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
         app.cancel_pdf_import();
     }
     match d.id.as_str() {
+        "transparencyWrap" => {
+            let result=(|| {
+                let offset=d.pt("offset").ok_or_else(|| "Enter an offset in points.".to_string())?;
+                let threshold=d.s("threshold").parse::<u64>().map_err(|_| "Enter an integer alpha threshold.".to_string())?;
+                app.run("object.traceTransparencyWrap",json!({"id":d.fields.get("id"),"offset":offset,"threshold":threshold}))
+            })();
+            if let Err(error)=&result { let mut d=d;d.fields.insert("status".into(),json!(error));app.ui.dialog=Some(d); }
+            result
+        }
         "createGuides" | "marginsAndColumns" => {
             // The preview goes; the change is made once, as one undo step.
             if d.fields.contains_key(PREVIEWED) {
