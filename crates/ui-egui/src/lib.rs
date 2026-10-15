@@ -18,6 +18,7 @@ pub mod i18n;
 pub mod icons;
 pub mod menus;
 mod modal_drag;
+mod object_control;
 mod panel_docking;
 pub mod panels;
 mod prefs;

@@ -278,33 +278,44 @@ pub fn swatch_list(ui: &mut egui::Ui, doc: &designcraft_doc::Document, current: 
     picked
 }
 
-/// A swatch dropdown showing a chip and name; `on_pick` gets the chosen swatch name.
-pub fn swatch_picker(app: &mut DesignApp, ui: &mut egui::Ui, id: &str, current: Option<String>, on_pick: impl FnOnce(&mut DesignApp, String)) {
-    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
+/// A swatch dropdown showing a chip and name; `on_pick` gets the chosen swatch name. Returns the
+/// chip's response (`None` without a document), for a caller to label or annotate.
+pub fn swatch_picker(
+    app: &mut DesignApp,
+    ui: &mut egui::Ui,
+    id: &str,
+    current: Option<String>,
+    on_pick: impl FnOnce(&mut DesignApp, String),
+) -> Option<egui::Response> {
+    let doc = app.session.active().map(|d| d.doc.clone())?;
     let cur = current.unwrap_or_default();
     let (c, g) = crate::widgets::swatch_colors(&doc, &cur, 1.0);
     let mut picked = None;
-    ui.push_id(id, |ui| {
-        let (r, resp) = ui.allocate_exact_size(vec2(30.0, 18.0), egui::Sense::click());
-        crate::widgets::paint_chip(
-            ui.painter(),
-            egui::Rect::from_min_size(r.min, vec2(18.0, 18.0)),
-            if cur.is_empty() { Some(egui::Color32::GRAY) } else { c },
-            g,
-        );
-        crate::icons::paint(
-            ui.painter(),
-            egui::Rect::from_min_size(r.min + vec2(18.0, 3.0), vec2(12.0, 12.0)),
-            "chevron-down",
-            Tokens::get(ui.ctx()).icon,
-        );
-        egui::Popup::menu(&resp).show(|ui| {
-            picked = swatch_list(ui, &doc, &cur);
-        });
-    });
+    let resp = ui
+        .push_id(id, |ui| {
+            let (r, resp) = ui.allocate_exact_size(vec2(30.0, 18.0), egui::Sense::click());
+            crate::widgets::paint_chip(
+                ui.painter(),
+                egui::Rect::from_min_size(r.min, vec2(18.0, 18.0)),
+                if cur.is_empty() { Some(egui::Color32::GRAY) } else { c },
+                g,
+            );
+            crate::icons::paint(
+                ui.painter(),
+                egui::Rect::from_min_size(r.min + vec2(18.0, 3.0), vec2(12.0, 12.0)),
+                "chevron-down",
+                Tokens::get(ui.ctx()).icon,
+            );
+            egui::Popup::menu(&resp).show(|ui| {
+                picked = swatch_list(ui, &doc, &cur);
+            });
+            resp
+        })
+        .inner;
     if let Some(p) = picked {
         on_pick(app, p);
     }
+    Some(resp)
 }
 
 /// A five-pointed star (filled, or outlined).
@@ -838,7 +849,9 @@ mod swatch_list_tests {
                 events,
                 ..Default::default()
             };
-            let mut out = ctx.run_ui(raw, |ui| swatch_picker(app, ui, "list", Some("[Black]".into()), |_, _| {}));
+            let mut out = ctx.run_ui(raw, |ui| {
+                swatch_picker(app, ui, "list", Some("[Black]".into()), |_, _| {});
+            });
             out.textures_delta.clear();
             out.shapes
         };
