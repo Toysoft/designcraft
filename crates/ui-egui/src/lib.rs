@@ -1366,8 +1366,11 @@ impl DesignApp {
             );
             self.switch_pane(self.focus_pane);
         }
-        dock::flyout(self, &ctx);
-        dock::floating(self, &ctx);
+        // Tab, Shift+Tab and Presentation hide the floating panels with the docked ones.
+        if !presenting && self.ui.hidden_panels == 0 {
+            dock::flyout(self, &ctx);
+            dock::floating(self, &ctx);
+        }
         story_editor::show(self, &ctx);
         dialogs::show(self, &ctx);
         about::show(self, &ctx);

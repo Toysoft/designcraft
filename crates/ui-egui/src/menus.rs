@@ -3165,6 +3165,57 @@ mod tests {
     }
 
     #[test]
+    fn tab_and_presentation_hide_floating_panels_too() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut crate::DesignApp| {
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    app.logic(&ui.ctx().clone());
+                    app.ui(ui);
+                });
+                out.textures_delta.clear();
+            }
+        };
+        // The icon column's flyout (the classic dock) and a floating panel group (the docking layout).
+        let flyout = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("panel_flyout"));
+        let group = egui::LayerId::new(egui::Order::Middle, egui::Id::new("designcraft-panel-docking").with(("floating", "preflight")));
+        let shown = |layer: egui::LayerId| ctx.memory(|m| m.areas().is_visible(&layer));
+        let toggles = [
+            ("window.hidePanels", json!({}), json!({})),
+            ("window.hidePanelsExceptTools", json!({}), json!({})),
+            ("view.screenMode", json!({"mode": "presentation"}), json!({"mode": "normal"})),
+        ];
+        app.run("window.panel", json!({"panel": "preflight"})).unwrap();
+        frame(&mut app);
+        assert!(app.ui.docking.is_none() && shown(flyout));
+        for (id, hide, show) in &toggles {
+            app.run(id, hide.clone()).unwrap();
+            frame(&mut app);
+            assert!(!shown(flyout), "{id} hides the flyout");
+            app.run(id, show.clone()).unwrap();
+            frame(&mut app);
+            assert!(shown(flyout), "{id} again brings it back");
+        }
+        app.run("window.floatPanel", json!({"panel": "preflight", "x": 400, "y": 200})).unwrap();
+        frame(&mut app);
+        assert!(app.ui.docking.is_some() && shown(group));
+        for (id, hide, show) in &toggles {
+            app.run(id, hide.clone()).unwrap();
+            frame(&mut app);
+            assert!(!shown(group), "{id} hides the floating panel");
+            app.run(id, show.clone()).unwrap();
+            frame(&mut app);
+            assert!(shown(group), "{id} again brings it back");
+        }
+    }
+
+    #[test]
     fn tab_hides_panels_and_documents_cycle() {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         assert_eq!(shortcut_of(&app, "window.hidePanels").as_deref(), Some("Tab"));
