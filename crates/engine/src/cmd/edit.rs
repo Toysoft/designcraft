@@ -342,7 +342,45 @@ pub fn specs() -> Vec<CommandSpec> {
             .execute("edit.paste", &json!({"inPlace": true}))),
         cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+Alt+Shift+D"), "{}", has_selection, |s, _| s
             .execute("transform.move", &json!({"dx": 12.0, "dy": 12.0, "copy": true}))),
+        // Live previews (a panel slider being dragged): the change shows on the page, and only
+        // `edit.commitPreview` makes it one undo step.
+        cmd!(
+            query "edit.preview",
+            "Preview Change",
+            [],
+            None,
+            "{label, command, params?} — run `command` on the document as it was before the preview began, replacing the last preview; the first call opens a preview named `label` (the undo step's name)",
+            has_doc,
+            preview
+        ),
+        cmd!(query "edit.commitPreview", "Commit Preview", [], None, "{} — the open preview becomes one undo step", has_doc, |s, _| {
+            s.commit_interaction()?;
+            ok()
+        }),
+        cmd!(query "edit.cancelPreview", "Cancel Preview", [], None, "{} — the document goes back to how it was before the preview", has_doc, |s, _| {
+            s.cancel_interaction();
+            ok()
+        }),
     ]
+}
+
+/// `edit.preview`: open the preview (unless one of the same name is open) and show `command` on it.
+fn preview(s: &mut Session, p: &Value) -> Result<Value> {
+    let label = super::str_param(p, "label").filter(|l| !l.is_empty()).ok_or_else(|| super::bad("edit.preview", "missing label"))?;
+    let command = super::str_param(p, "command").ok_or_else(|| super::bad("edit.preview", "missing command"))?;
+    // Only an edit can be previewed: a query, undo or another preview command would not be one undo step.
+    if !super::find_command(command).is_some_and(|c| c.undoable) {
+        return Err(super::bad("edit.preview", format!("{command} is not an edit that can be previewed")));
+    }
+    let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
+    match s.doc()?.interaction.as_ref().map(|i| i.label.as_str()) {
+        None => s.begin_interaction(label)?,
+        Some(open) if open == label => {}
+        // A tool's drag (or another preview) is in progress: leave it alone.
+        Some(open) => return Err(super::bad("edit.preview", format!("{open} is in progress"))),
+    }
+    s.preview(command, params)?;
+    ok()
 }
 
 /// A document holding copies of the selected items (and their stories) on spread 0.
@@ -811,5 +849,68 @@ mod paste_into_tests {
         assert_eq!(s.doc().unwrap().selection, Selection::items(vec![ItemId(frame)]));
         d.check().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    fn text_session() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 300], "content": "text", "text": "Hello"})).unwrap();
+        let sid = s.doc().unwrap().doc.item(ItemId(r["id"].as_u64().unwrap())).unwrap().text_frame().unwrap().story;
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 0, "focus": 5})).unwrap();
+        s
+    }
+
+    fn size(s: &mut Session) -> f64 {
+        s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["size"].as_f64().unwrap()
+    }
+
+    fn preview_size(s: &mut Session, v: f64) {
+        s.execute("edit.preview", &json!({"label": "Size", "command": "type.char", "params": {"attrs": {"size": v}}})).unwrap();
+    }
+
+    #[test]
+    fn previews_show_on_the_page_and_commit_as_one_undo_step() {
+        let mut s = text_session();
+        let (before, undo) = (size(&mut s), s.doc().unwrap().history.undo.len());
+        for v in [20.0, 30.0, 40.0] {
+            preview_size(&mut s, v);
+            assert_eq!(size(&mut s), v, "each preview replaces the last");
+        }
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo, "no undo step while previewing");
+        s.execute("edit.commitPreview", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+        assert!(s.doc().unwrap().interaction.is_none());
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(size(&mut s), before);
+    }
+
+    #[test]
+    fn a_cancelled_preview_leaves_the_document_as_it_was() {
+        let mut s = text_session();
+        let (before, undo) = (size(&mut s), s.doc().unwrap().history.undo.len());
+        preview_size(&mut s, 50.0);
+        s.execute("edit.cancelPreview", &json!({})).unwrap();
+        assert_eq!(size(&mut s), before);
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+        // Committing with nothing open does nothing.
+        s.execute("edit.commitPreview", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+    }
+
+    #[test]
+    fn only_edits_are_previewed_and_another_interaction_is_left_alone() {
+        let mut s = text_session();
+        for command in ["edit.preview", "edit.undo", "type.selectionAttrs", "no.such.command"] {
+            assert!(s.execute("edit.preview", &json!({"label": "X", "command": command})).is_err(), "{command}");
+        }
+        assert!(s.execute("edit.preview", &json!({"command": "type.char"})).is_err(), "needs a label");
+        s.begin_interaction("Move").unwrap();
+        assert!(s.execute("edit.preview", &json!({"label": "Size", "command": "type.char", "params": {"attrs": {"size": 20}}})).is_err());
+        assert_eq!(s.doc().unwrap().interaction.as_ref().unwrap().label, "Move");
     }
 }

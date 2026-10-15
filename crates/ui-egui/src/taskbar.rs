@@ -150,7 +150,7 @@ fn text_controls(app: &mut DesignApp, ui: &mut Ui, in_text: bool) {
     }
     let styles = fonts.styles(&fam);
     let cur = styles.iter().position(|s| *s == sty);
-    if let Some(k) = widgets::dropdown_list(ui, if sty.is_empty() { "—" } else { &sty }, 90.0, &styles, cur) {
+    if let Some(k) = widgets::dropdown_list(ui, &panels::style_shown(&sty), 90.0, &styles, cur) {
         let _ = app.run("type.char", json!({"attrs": {"fontStyle": styles[k]}}));
     }
     let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());

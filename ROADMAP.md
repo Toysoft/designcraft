@@ -347,6 +347,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-15** · Character panel: dragging a variable font axis slider previews on the page and is one undo step when let go (with several axes it piled up an undo step per frame); each axis takes a typed value, and narrow axes (Skia's 0.48–3.2) step by hundredths instead of jumping to whole numbers. The fields line up in two columns, auto leading shows in parentheses, and an axis-set style shows its axes. New `edit.preview` / `edit.commitPreview` / `edit.cancelPreview` commands give panels, the control channel and MCP live previews. No readiness percentage change.
 - **2026-10-14** · The Type tool draws a new text frame over a locked empty frame, as InDesign does, instead of turning the locked frame into a text frame. No readiness percentage change.
 - **2026-10-14** · 100% black shows as pure black on screen by default, as InDesign's Appearance of Black does out of the box (Display All Blacks as Rich Black); Preferences › Appearance of Black › Display All Blacks Accurately still shows it as the dark grey it prints, and a saved choice is kept. No readiness percentage change.
 - **2026-10-14** · Pathfinder keeps the frontmost object, as InDesign does: a photo placed over shapes and intersected with them shows through the shapes (it was dropped, and the shapes kept their black fill); Add, Exclude Overlap and Minus Back take the front object's fill too, Subtract still keeps the back one. No readiness percentage change.

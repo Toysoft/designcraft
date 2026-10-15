@@ -568,6 +568,15 @@ pub struct DesignApp {
     quitting: Option<QuitState>,
     /// The tool cursor bitmaps handed to the OS.
     pub cursors: cursors::Images,
+    /// A panel's live preview (a slider being dragged), committed when it is let go.
+    live_preview: LivePreview,
+}
+
+/// The preview a panel opened with `edit.preview`: it stays open while a panel holds it each frame.
+#[derive(Default)]
+struct LivePreview {
+    open: bool,
+    held: bool,
 }
 
 struct QuitState {
@@ -622,6 +631,7 @@ impl DesignApp {
             quit_without_asking: false,
             quitting: None,
             cursors: cursors::Images::default(),
+            live_preview: LivePreview::default(),
         }
     }
 
@@ -701,6 +711,36 @@ impl DesignApp {
             Ok(_) => {}
         }
         r
+    }
+
+    /// Show `command` on the page as a live preview named `label` (the undo step's name): each call
+    /// replaces the last, and nothing reaches the undo history until [`Self::end_live_preview`]. A
+    /// panel calls this, or [`Self::hold_live_preview`], every frame its control is held; a frame
+    /// without either commits the preview.
+    pub fn live_preview(&mut self, label: &str, command: &str, params: Value) {
+        if self.run("edit.preview", json!({"label": label, "command": command, "params": params})).is_ok() {
+            self.live_preview = LivePreview { open: true, held: true };
+        }
+    }
+
+    /// The control showing the live preview is still held (pressed, though not moved this frame).
+    pub fn hold_live_preview(&mut self) {
+        self.live_preview.held = self.live_preview.open;
+    }
+
+    /// Commit the live preview, if one is open, as one undo step.
+    pub fn end_live_preview(&mut self) {
+        if std::mem::take(&mut self.live_preview).open {
+            let _ = self.run("edit.commitPreview", json!({}));
+        }
+    }
+
+    /// Start of a frame: a live preview no panel held last frame (its control was let go, or the
+    /// panel closed) is committed, so it never swallows later edits' undo steps.
+    pub(crate) fn settle_live_preview(&mut self) {
+        if !std::mem::take(&mut self.live_preview.held) {
+            self.end_live_preview();
+        }
     }
 
     /// Paste without the clipboard's text (a menu, not the paste keys): read it here. With no
@@ -1248,6 +1288,7 @@ impl DesignApp {
             ctx.request_repaint();
             return;
         }
+        self.settle_live_preview();
         let t0 = now_ms();
         let t = theme::Tokens::get(&ctx);
         let presenting = self.ui.screen_mode == ScreenMode::Presentation;
