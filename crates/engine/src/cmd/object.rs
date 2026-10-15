@@ -69,9 +69,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let c = union_bounds(d, &ids).center();
                 let m = Affine::translate(c.to_vec2()) * Affine::scale_non_uniform(sx, sy) * Affine::translate(-c.to_vec2());
                 for id in &ids {
-                    if let Some(it) = d.item_mut(*id) {
-                        scale_item(it, m, (sx * sy).abs().sqrt(), strokes);
-                    }
+                    scale_object(d, *id, m, (sx * sy).abs().sqrt(), strokes);
                 }
                 ok()
             })
@@ -1122,7 +1120,7 @@ fn transform_resize(s: &mut Session, p: &Value) -> Result<Value> {
                 let c = it.bounds().center();
                 it.xf = Affine::translate(m * c - c) * it.xf;
             } else if scale_content {
-                scale_item(it, m, (sx * sy).abs().sqrt(), strokes);
+                scale_object(d, *id, m, (sx * sy).abs().sqrt(), strokes);
             } else if it.flex.is_some() {
                 resize_container(it, m);
             } else if matches!(it.content, Content::Group { .. }) {
@@ -1215,6 +1213,108 @@ pub(crate) fn scale_item(it: &mut Item, m: Affine, k: f64, strokes: bool) {
             }
         }
     }
+}
+
+/// Scale the object `id` and its content by `m` (see [`scale_item`]); a text frame's text takes the
+/// scale as [`scale_text_frame`] sets it.
+fn scale_object(d: &mut Document, id: ItemId, m: Affine, k: f64, strokes: bool) {
+    if scale_text_frame(d, id, m, k, strokes) {
+        return;
+    }
+    if let Some(it) = d.item_mut(id) {
+        scale_item(it, m, k, strokes);
+    }
+}
+
+/// Scale a text frame as InDesign's default "When Scaling: Apply to Content" does: the frame's
+/// path takes the scale, so it shows 100%, and the text is set larger or smaller. The point size,
+/// leading, baseline shift, text stroke and underline weights follow the vertical scale, the
+/// horizontal scale takes the difference between the two axes, and the indents and paragraph
+/// spacing follow their own axes. False (the frame is then transformed as a whole) for a story that
+/// runs through other frames, vertical text, and a scale that flips or isn't along the frame's own
+/// axes.
+fn scale_text_frame(d: &mut Document, id: ItemId, m: Affine, k: f64, strokes: bool) -> bool {
+    let Some(it) = d.item(id) else { return false };
+    let Content::Text(tf) = &it.content else { return false };
+    let story = tf.story;
+    let inner = it.xf.inverse() * m * it.xf;
+    let [sx, b, c, sy, _, _] = inner.as_coeffs();
+    if b.abs() > 1e-9 || c.abs() > 1e-9 || !(sx > 1e-6 && sy > 1e-6) || !sx.is_finite() || !sy.is_finite() {
+        return false;
+    }
+    let Some(st) = d.story(story) else { return false };
+    if st.frames.len() != 1 || st.vertical {
+        return false;
+    }
+    // The resolved attributes of every run, split at paragraph ends (a run's size can come from its
+    // paragraph's style). Each paragraph keeps its mark.
+    let mut runs = Vec::new();
+    let mut paras = Vec::new();
+    for (i, pr) in st.para_ranges().into_iter().enumerate() {
+        let Some(pf) = st.paras.get(i) else { break };
+        let (pp, base) = d.styles.resolve_para(pf);
+        let end = pr.end.saturating_add(1).min(st.text.len());
+        for (r, f) in st.runs() {
+            let (a, z) = (r.start.max(pr.start), r.end.min(end));
+            if a < z {
+                runs.push((a..z, d.styles.resolve_char(&base, f)));
+            }
+        }
+        paras.push((pr.start, pp));
+    }
+    let h = sx / sy;
+    let Some(st) = d.story_mut(story) else { return false };
+    for (r, cp) in runs {
+        st.format_chars(r, |f| {
+            let o = &mut f.over;
+            o.size = Some(cp.size * sy);
+            if let designcraft_doc::Leading::Points(v) = cp.leading {
+                o.leading = Some(designcraft_doc::Leading::Points(v * sy));
+            }
+            if cp.baseline_shift != 0.0 {
+                o.baseline_shift = Some(cp.baseline_shift * sy);
+            }
+            if (h - 1.0).abs() > 1e-9 {
+                o.h_scale = Some(cp.h_scale * h);
+            }
+            if cp.stroke != "[None]" {
+                o.stroke_weight = Some(cp.stroke_weight * sy);
+            }
+            for (v, w) in [
+                (&mut o.underline_weight, cp.underline_weight),
+                (&mut o.underline_offset, cp.underline_offset),
+                (&mut o.strikethrough_weight, cp.strikethrough_weight),
+                (&mut o.strikethrough_offset, cp.strikethrough_offset),
+            ] {
+                if let Some(w) = w {
+                    *v = Some(Some(w * sy));
+                }
+            }
+        });
+    }
+    for (at, pp) in paras {
+        st.format_paras(at..at, |p| {
+            let a = &mut p.para;
+            for (v, w, s) in [
+                (&mut a.left_indent, pp.left_indent, sx),
+                (&mut a.right_indent, pp.right_indent, sx),
+                (&mut a.first_line_indent, pp.first_line_indent, sx),
+                (&mut a.last_line_indent, pp.last_line_indent, sx),
+                (&mut a.space_before, pp.space_before, sy),
+                (&mut a.space_after, pp.space_after, sy),
+            ] {
+                if w != 0.0 {
+                    *v = Some(w * s);
+                }
+            }
+        });
+    }
+    let Some(it) = d.item_mut(id) else { return false };
+    bake(it, inner);
+    if strokes {
+        it.stroke.weight *= k;
+    }
+    true
 }
 
 fn transform_again(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1350,7 +1450,7 @@ fn transform_values(s: &mut Session, p: &Value, ids: &[ItemId], rf: usize) -> Re
                 let (fx, fy) = (sx.map_or(1.0, |x| x / 100.0 / v.scale_x), sy.map_or(1.0, |y| y / 100.0 / v.scale_y));
                 let m = Affine::translate(a.to_vec2()) * Affine::scale_non_uniform(fx, fy) * Affine::translate(-a.to_vec2());
                 let m = parent.inverse() * m * parent;
-                scale_item(it, m, (fx * fy).abs().sqrt(), strokes);
+                scale_object(d, *id, m, (fx * fy).abs().sqrt(), strokes);
             }
         }
         ok()
@@ -2712,6 +2812,73 @@ mod scale_tests {
         s.execute("prefs.set", &json!({"dimensionsIncludeStroke": false})).unwrap();
         s.execute("transform.set", &json!({"width": 120})).unwrap();
         assert!((bounds(&s).width() - 120.0).abs() < 1e-9);
+    }
+
+    fn text_frame(s: &mut Session, rect: [f64; 4], text: &str) -> (ItemId, StoryId) {
+        let r = s.execute("frame.create", &json!({"rect": rect, "content": "text", "text": text})).unwrap();
+        (ItemId(r["id"].as_u64().unwrap()), StoryId(r["story"].as_u64().unwrap()))
+    }
+
+    fn props_at(s: &Session, story: StoryId, pos: usize) -> (designcraft_doc::ParaProps, designcraft_doc::CharProps) {
+        let d = &s.doc().unwrap().doc;
+        let st = d.story(story).unwrap();
+        let (pp, base) = d.styles.resolve_para(&st.paras[st.para_at(pos)]);
+        (pp, d.styles.resolve_char(&base, st.char_format_at(pos)))
+    }
+
+    /// InDesign's default When Scaling: Apply to Content: Cmd+Shift-dragging a text frame's handle
+    /// sets the text larger and leaves the frame at 100% (Dansky's Exclude Overlap tutorial, 2:16).
+    #[test]
+    fn scaling_a_text_frame_scales_its_text() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let (f, story) = text_frame(&mut s, [100.0, 100.0, 300.0, 200.0], "Learn\nmore");
+        s.execute("text.select", &json!({"story": story.0, "anchor": 0, "focus": 5})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": 20, "leading": {"kind": "points", "value": 24}, "baselineShift": 2, "tracking": -50}}))
+            .unwrap();
+        s.execute("type.para", &json!({"attrs": {"leftIndent": 4, "spaceAfter": 6}})).unwrap();
+        s.execute("edit.deselectAll", &json!({})).unwrap();
+        // The handle drag: from the top-left, twice as wide and high.
+        s.execute("transform.resize", &json!({"ids": [f.0], "from": [100, 100, 300, 200], "to": [100, 100, 500, 300], "content": true})).unwrap();
+        let (pp, cp) = props_at(&s, story, 0);
+        assert_eq!(
+            (cp.size, cp.leading, cp.baseline_shift, cp.tracking, cp.h_scale),
+            (40.0, designcraft_doc::Leading::Points(48.0), 4.0, -50.0, 1.0)
+        );
+        assert_eq!((pp.left_indent, pp.space_after), (8.0, 12.0));
+        // The second paragraph's size came from the paragraph style: it is set too.
+        assert_eq!(props_at(&s, story, 7).1.size, 24.0);
+        let it = s.doc().unwrap().doc.item(f).unwrap().clone();
+        assert_eq!(it.bounds(), Rect::new(100.0, 100.0, 500.0, 300.0));
+        let scale = s.execute("transform.info", &json!({"ids": [f.0]})).unwrap();
+        assert_eq!((scale["scaleX"].as_f64(), scale["scaleY"].as_f64()), (Some(100.0), Some(100.0)), "{scale}");
+        // Wider than high: the horizontal scale takes the difference.
+        s.execute("transform.scale", &json!({"ids": [f.0], "sx": 1.0, "sy": 0.5})).unwrap();
+        let (_, cp) = props_at(&s, story, 0);
+        assert_eq!((cp.size, cp.h_scale), (20.0, 2.0));
+        // The Transform panel's scale fields do the same, and show 100% afterwards.
+        s.execute("transform.set", &json!({"ids": [f.0], "scaleX": 50, "scaleY": 50})).unwrap();
+        assert_eq!(props_at(&s, story, 0).1.size, 10.0);
+        // One undo step.
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(props_at(&s, story, 0).1.size, 20.0);
+    }
+
+    /// A threaded story, a rotated scale and a flip keep the old behaviour: the frame is
+    /// transformed as a whole and the text keeps its size.
+    #[test]
+    fn threaded_and_flipped_text_frames_scale_as_a_whole() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let (a, story) = text_frame(&mut s, [100.0, 100.0, 200.0, 140.0], "Some threaded text");
+        let (b, _) = text_frame(&mut s, [100.0, 200.0, 200.0, 240.0], "");
+        s.execute("text.thread", &json!({"from": a.0, "to": b.0})).unwrap();
+        s.execute("transform.scale", &json!({"ids": [a.0], "sx": 2.0})).unwrap();
+        assert_eq!(props_at(&s, story, 0).1.size, 12.0);
+        let (c, story) = text_frame(&mut s, [300.0, 100.0, 400.0, 140.0], "Flip");
+        s.execute("transform.scale", &json!({"ids": [c.0], "sx": -1.0, "sy": 1.0})).unwrap();
+        assert_eq!(props_at(&s, story, 0).1.size, 12.0);
+        assert!(s.doc().unwrap().doc.item(c).unwrap().xf.as_coeffs()[0] < 0.0);
     }
 }
 
