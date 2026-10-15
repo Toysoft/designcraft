@@ -51,6 +51,7 @@ pub struct SelInfo {
     pub wrap_offsets: [f64; 4],
     pub wrap_side: String,
     pub wrap_contour: String,
+    pub wrap_custom: bool,
     pub locked: bool,
 }
 
@@ -161,6 +162,7 @@ pub fn sel_info(app: &DesignApp) -> Option<SelInfo> {
         wrap_offsets: first.wrap.offsets,
         wrap_side: serde_json::to_value(first.wrap.side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
         wrap_contour: serde_json::to_value(first.wrap.contour).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+        wrap_custom: first.wrap.path.is_some(),
         locked: first.locked,
     })
 }

@@ -2047,6 +2047,10 @@ pub fn activate(app: &mut DesignApp, id: &str, params: &Value) {
 }
 
 fn activate_inner(app: &mut DesignApp, id: &str, params: &Value) {
+    if params.is_null() && id == "object.traceTransparencyWrap" {
+        crate::dialogs::open_transparency_wrap(app);
+        return;
+    }
     if params.is_null() && id == "file.close" {
         close_document(app, None);
         return;

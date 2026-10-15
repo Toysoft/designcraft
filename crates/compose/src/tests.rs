@@ -4,6 +4,33 @@ use designcraft_geom::Rect;
 
 use super::*;
 
+#[test]
+fn contour_intervals_preserve_the_gap_between_legs() {
+    let mut path = designcraft_geom::BezPath::new();
+    path.move_to((0.0, 0.0));
+    for p in [(40.0, 0.0), (40.0, 100.0), (30.0, 100.0), (30.0, 20.0), (10.0, 20.0), (10.0, 100.0), (0.0, 100.0)] {
+        path.line_to(p);
+    }
+    path.close_path();
+    let c = Contour::of(&path, designcraft_geom::Affine::IDENTITY, 3.0).unwrap();
+    assert_eq!(c.band_spans(50.0, 60.0), vec![(-3.0, 13.0), (27.0, 43.0)]);
+    assert_eq!(c.band_spans(5.0, 15.0), vec![(-3.0, 43.0)]);
+    let frame = designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 35.0, 100.0)).to_bezpath();
+    assert_eq!(c.within(&frame, designcraft_geom::Affine::IDENTITY).band_spans(50.0, 60.0), vec![(-3.0, 13.0), (27.0, 38.0)]);
+}
+
+#[test]
+fn contour_intervals_cover_the_whole_slanted_line_band() {
+    let mut path = designcraft_geom::BezPath::new();
+    path.move_to((0.0, 0.0));
+    for p in [(2.0, 0.0), (12.0, 10.0), (10.0, 10.0)] {
+        path.line_to(p);
+    }
+    path.close_path();
+    let c = Contour::of(&path, designcraft_geom::Affine::IDENTITY, 0.0).unwrap();
+    assert_eq!(c.band_spans(0.0, 10.0), vec![(0.0, 12.0)]);
+}
+
 const LOREM: &str = "Typography is the art and technique of arranging type to make written language legible, readable and appealing when displayed. \
 The arrangement of type involves selecting typefaces, point sizes, line lengths, line spacing, and letter spacing, and adjusting the space between pairs of letters.";
 

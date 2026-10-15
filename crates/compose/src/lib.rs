@@ -369,6 +369,96 @@ impl Contour {
         }
         (lo <= hi).then_some((lo - self.offset, hi + self.offset))
     }
+
+    /// Occupied intervals across the whole line band, preserving gaps between parts of a
+    /// concave or compound outline. Project boundary edges and the filled middle slice: any
+    /// area that starts or ends inside the band is bounded by those projected edges.
+    fn band_spans(&self, y0: f64, y1: f64) -> Vec<(f64, f64)> {
+        let (low, high) = (y0 - self.offset, y1 + self.offset);
+        if !low.is_finite() || !high.is_finite() || high < low {
+            return self.band_extent(y0, y1).into_iter().collect();
+        }
+        let mut spans = rings_band_spans(&self.rings, low, high);
+        // Extremely fragmented imported paths use the conservative outer extent, bounding the
+        // work of subtracting intervals from every line. A traced 128-column mask stays below it.
+        if spans.len() > 128 {
+            return self.band_extent(y0, y1).into_iter().collect();
+        }
+        if !self.clip.is_empty() {
+            let clip = rings_band_spans(&self.clip, low, high);
+            let mut cut = Vec::new();
+            let (mut i, mut j) = (0, 0);
+            while let (Some(&(a, b)), Some(&(c, d))) = (spans.get(i), clip.get(j)) {
+                if a.max(c) < b.min(d) {
+                    cut.push((a.max(c), b.min(d)));
+                }
+                if b < d {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            }
+            spans = cut;
+        }
+        merge_spans(spans.into_iter().map(|(a, b)| (a - self.offset, b + self.offset)).collect())
+    }
+}
+
+fn merge_spans(mut spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    spans.retain(|(a, b)| a.is_finite() && b.is_finite() && b - a > 1e-9);
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for (a, b) in spans {
+        if let Some(last) = out.last_mut().filter(|last| a <= last.1 + 1e-9) {
+            last.1 = last.1.max(b);
+        } else {
+            out.push((a, b));
+        }
+    }
+    out
+}
+
+fn rings_band_spans(rings: &[Vec<Point>], y0: f64, y1: f64) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    let mut crossings = Vec::new();
+    let middle = y0 * 0.5 + y1 * 0.5;
+    for ring in rings {
+        let Some(&last) = ring.last() else { continue };
+        let mut a = last;
+        for &b in ring {
+            let dy = b.y - a.y;
+            if a.y.max(b.y) >= y0 && a.y.min(b.y) <= y1 {
+                let (t0, t1) = if dy.abs() < 1e-12 {
+                    (0.0, 1.0)
+                } else {
+                    let (u, v) = ((y0 - a.y) / dy, (y1 - a.y) / dy);
+                    (u.min(v).clamp(0.0, 1.0), u.max(v).clamp(0.0, 1.0))
+                };
+                let (x0, x1) = (a.x + t0 * (b.x - a.x), a.x + t1 * (b.x - a.x));
+                spans.push((x0.min(x1), x0.max(x1)));
+            }
+            if (a.y <= middle && middle < b.y) || (b.y <= middle && middle < a.y) {
+                let x = a.x + (middle - a.y) / dy * (b.x - a.x);
+                if x.is_finite() {
+                    crossings.push((x, if dy > 0.0 { 1i32 } else { -1 }));
+                }
+            }
+            a = b;
+        }
+    }
+    crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut winding = 0i32;
+    let mut previous = None;
+    for (x, delta) in crossings {
+        if winding != 0
+            && let Some(start) = previous
+        {
+            spans.push((start, x));
+        }
+        winding += delta;
+        previous = Some(x);
+    }
+    merge_spans(spans)
 }
 
 /// The closed polylines of `path` (after `to_inner`), flattened; None if it is empty or too detailed.
@@ -2590,39 +2680,40 @@ fn free_slots(f: &FrameSpec, col: Rect, y0: f64, y1: f64, size: f64, rtl: bool) 
         let blocked = match ex.mode {
             WrapMode::JumpToNextColumn if y1 > r.y0 && r.x0 < col.x1 && r.x1 > col.x0 => return vec![],
             WrapMode::BoundingBox | WrapMode::Contour if overlaps_band => match &ex.contour {
-                Some(c) => c.band_extent(y0, y1),
-                None => Some((r.x0, r.x1)),
+                Some(c) => c.band_spans(y0, y1),
+                None => vec![(r.x0, r.x1)],
             },
-            _ => None,
+            _ => Vec::new(),
         };
-        let Some((a, b)) = blocked.filter(|&(a, b)| a < col.x1 && b > col.x0) else { continue };
-        cut = true;
-        // One-sided wraps also block the column on the other side of the object.
-        let text_left = match ex.side {
-            WrapSide::LeftSide => Some(true),
-            WrapSide::RightSide => Some(false),
-            WrapSide::LargestArea => Some(r.x0 - col.x0 >= col.x1 - r.x1),
-            WrapSide::BothSides | WrapSide::TowardsSpine | WrapSide::AwayFromSpine => None,
-        };
-        let (a, b) = match text_left {
-            Some(true) => (a, b.max(col.x1)),
-            Some(false) => (a.min(col.x0), b),
-            None => (a, b),
-        };
-        let mut next = Vec::with_capacity(free.len() + 1);
-        for (fa, fb) in free {
-            if b <= fa || a >= fb {
-                next.push((fa, fb));
-                continue;
+        for (a, b) in blocked.into_iter().filter(|&(a, b)| a < col.x1 && b > col.x0) {
+            cut = true;
+            // One-sided wraps also block the column on the other side of the object.
+            let text_left = match ex.side {
+                WrapSide::LeftSide => Some(true),
+                WrapSide::RightSide => Some(false),
+                WrapSide::LargestArea => Some(r.x0 - col.x0 >= col.x1 - r.x1),
+                WrapSide::BothSides | WrapSide::TowardsSpine | WrapSide::AwayFromSpine => None,
+            };
+            let (a, b) = match text_left {
+                Some(true) => (a, b.max(col.x1)),
+                Some(false) => (a.min(col.x0), b),
+                None => (a, b),
+            };
+            let mut next = Vec::with_capacity(free.len() + 1);
+            for (fa, fb) in free {
+                if b <= fa || a >= fb {
+                    next.push((fa, fb));
+                    continue;
+                }
+                if a > fa {
+                    next.push((fa, a));
+                }
+                if b < fb {
+                    next.push((b, fb));
+                }
             }
-            if a > fa {
-                next.push((fa, a));
-            }
-            if b < fb {
-                next.push((b, fb));
-            }
+            free = next;
         }
-        free = next;
     }
     if !cut {
         return vec![(col.x0, col.x1)];

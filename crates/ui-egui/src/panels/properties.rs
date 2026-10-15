@@ -1892,6 +1892,11 @@ pub fn wrap_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     if let Some(o) = set {
         let _ = app.run("object.textWrap", json!({"mode": mode, "offset": o}));
     }
+    if info.as_ref().is_some_and(|i| i.is_graphic)
+        && ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Trace Transparency…"))).clicked()
+    {
+        crate::menus::activate(app, "object.traceTransparencyWrap", &serde_json::Value::Null);
+    }
     let Some(i) = info.as_ref().filter(|i| i.wrap == "boundingBox" || i.wrap == "contour") else { return };
     let sides = [
         ("bothSides", "Both Right & Left Sides"),
@@ -1906,8 +1911,9 @@ pub fn wrap_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         // Detected edges, alpha channels and image paths aren't offered: composition doesn't read
         // the image. An imported one shows by name and wraps around the frame.
         let types = [("boundingBox", "Bounding Box"), ("graphicFrame", "Graphic Frame"), ("sameAsClipping", "Same as Clipping")];
-        let shown_only = [("detectEdges", "Detect Edges"), ("alphaChannel", "Alpha Channel"), ("photoshopPath", "Photoshop Path")];
-        wrap_combo(app, ui, "wrap_contour", "Contour Type", &types, &shown_only, &i.wrap_contour, "contour");
+        let shown_only =
+            [("detectEdges", "Detect Edges"), ("alphaChannel", "Alpha Channel"), ("photoshopPath", "Photoshop Path"), ("custom", "Custom Boundary")];
+        wrap_combo(app, ui, "wrap_contour", "Contour Type", &types, &shown_only, if i.wrap_custom { "custom" } else { &i.wrap_contour }, "contour");
     }
 }
 
