@@ -317,7 +317,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Document Setup…",
             ["File"],
             Some("Cmd+Alt+P"),
-            "{width?, height?, pages?: count, startPage?: n, facingPages?, binding?: leftToRight|rightToLeft, intent?: print|web|mobile, bleed?, slug?: n | [top, bottom, inside, outside], adjustLayout?: bool (objects follow the new page size)} → the document setup",
+            "{width?, height?, pages?: count, startPage?: n, facingPages?, binding?: leftToRight|rightToLeft, intent?: print|web|mobile, margins?: n | {top, bottom, inside, outside} (every page and parent page), bleed?, slug?: n | [top, bottom, inside, outside], adjustLayout?: bool (objects follow the new page size and margins)} → the document setup (margins: the first page's)",
             has_doc,
             |s, p| {
                 let p = p.clone();
@@ -334,6 +334,24 @@ pub fn specs() -> Vec<CommandSpec> {
                     }
                 };
                 let (bleed, slug) = (edges("bleed"), edges("slug"));
+                for k in ["width", "height"] {
+                    if let Some(v) = p.get(k)
+                        && !v.as_f64().is_some_and(|x| x > 0.0 && x <= 15552.0)
+                    {
+                        return Err(bad("layout.documentSetup", format!("{k}: page size out of range (0 < size ≤ 216 in)")));
+                    }
+                }
+                let margins: Option<Margins> = match p.get("margins") {
+                    None => None,
+                    Some(Value::Number(n)) => n.as_f64().map(Margins::uniform),
+                    Some(v) => serde_json::from_value(v.clone()).ok(),
+                };
+                if margins.is_some_and(|m| ![m.top, m.bottom, m.inside, m.outside].iter().all(|v| v.is_finite() && (0.0..=15552.0).contains(v))) {
+                    return Err(bad("layout.documentSetup", "margins: 0 to 216 in"));
+                }
+                if p.get("margins").is_some() && margins.is_none() {
+                    return Err(bad("layout.documentSetup", "margins: a number or {top, bottom, inside, outside}"));
+                }
                 let intent: Option<designcraft_doc::Intent> = p.get("intent").and_then(|v| serde_json::from_value(v.clone()).ok());
                 let pages = p.get("pages").and_then(Value::as_u64).map(|n| n.clamp(1, 9999) as usize);
                 let adjust = p.get("adjustLayout").and_then(Value::as_bool).unwrap_or(false);
@@ -406,6 +424,13 @@ pub fn specs() -> Vec<CommandSpec> {
                                 pg.height = d.settings.page_height;
                             }
                             sp.relayout();
+                        }
+                    }
+                    if let Some(m) = margins {
+                        for sp in d.spreads.iter_mut().chain(d.parents.iter_mut()) {
+                            for pg in &mut std::sync::Arc::make_mut(sp).pages {
+                                pg.margins = m;
+                            }
                         }
                     }
                     d.repaginate();
@@ -894,12 +919,47 @@ fn document_setup(d: &designcraft_doc::Document) -> Value {
     let st = &d.settings;
     let start = d.sections.iter().find(|x| x.start == 0).and_then(|x| x.start_number).unwrap_or(1);
     json!({"width": st.page_width, "height": st.page_height, "pages": d.page_count(), "startPage": start, "facingPages": st.facing_pages,
-        "binding": if st.right_to_left_binding { "rightToLeft" } else { "leftToRight" }, "intent": st.intent, "bleed": st.bleed, "slug": st.slug})
+        "binding": if st.right_to_left_binding { "rightToLeft" } else { "leftToRight" }, "intent": st.intent, "bleed": st.bleed, "slug": st.slug,
+        "margins": d.page(0).map(|p| p.margins), "primaryTextFrame": st.primary_text_frame})
 }
 
 #[cfg(test)]
 mod setup_tests {
     use serde_json::json;
+
+    #[test]
+    fn document_setup_sets_every_pages_margins_in_one_step() {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({"pages": 3, "margins": 36})).unwrap();
+        let f = s.execute("frame.create", &json!({"rect": [36, 36, 576, 756], "content": "text"})).unwrap();
+        let r = s.execute("layout.documentSetup", &json!({})).unwrap();
+        assert_eq!(r["margins"], json!({"top": 36.0, "bottom": 36.0, "inside": 36.0, "outside": 36.0}));
+        let m = json!({"top": 72, "bottom": 54, "inside": 72, "outside": 72});
+        let r = s.execute("layout.documentSetup", &json!({"margins": m, "bleed": 9, "adjustLayout": true})).unwrap();
+        assert_eq!(r["margins"]["bottom"], 54.0);
+        let d = &s.doc().unwrap().doc;
+        assert!(
+            d.spreads.iter().chain(&d.parents).flat_map(|sp| &sp.pages).all(|pg| pg.margins.top == 72.0 && pg.margins.bottom == 54.0),
+            "every page and parent page"
+        );
+        let b = d.item(designcraft_doc::ItemId(f["id"].as_u64().unwrap())).unwrap().bounds();
+        assert!((b.y0 - 72.0).abs() < 1e-6, "Adjust Layout: the frame follows the margins ({b:?})");
+        // One step: undo brings back the margins and the bleed.
+        s.execute("edit.undo", &json!({})).unwrap();
+        let r = s.execute("layout.documentSetup", &json!({})).unwrap();
+        assert_eq!((r["margins"]["top"].clone(), r["bleed"][0].clone()), (json!(36.0), json!(0.0)));
+        for bad in [
+            json!({"width": 0}),
+            json!({"height": -5}),
+            json!({"width": 1e9}),
+            json!({"width": "wide"}),
+            json!({"margins": -1}),
+            json!({"margins": {"top": 1}}),
+        ] {
+            assert!(s.execute("layout.documentSetup", &bad).is_err(), "{bad}");
+        }
+        assert_eq!(s.execute("layout.documentSetup", &json!({})).unwrap()["width"], 612.0, "refused values change nothing");
+    }
 
     #[test]
     fn document_setup_pages_start_bleed_slug() {

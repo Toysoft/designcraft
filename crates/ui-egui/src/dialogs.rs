@@ -961,109 +961,343 @@ pub fn open_document_setup(app: &mut DesignApp) {
     let units = app.session.active().map(|s| s.doc.settings.horizontal_units).unwrap_or(Unit::Picas);
     let fm = |v: &Value| json!(format_measure(v.as_f64().unwrap_or(0.0), units));
     let mut f = json!({"intent": cur["intent"], "pages": cur["pages"], "startPage": cur["startPage"], "facingPages": cur["facingPages"],
-        "binding": cur["binding"], "width": fm(&cur["width"]), "height": fm(&cur["height"])});
-    for k in ["bleed", "slug"] {
-        for (i, e) in ["Top", "Bottom", "Inside", "Outside"].iter().enumerate() {
-            f[format!("{k}{e}")] = fm(&cur[k][i]);
+        "binding": cur["binding"], "width": fm(&cur["width"]), "height": fm(&cur["height"]), "units": units,
+        "primaryTextFrame": cur["primaryTextFrame"]});
+    for (k, values) in [
+        ("margin", ["top", "bottom", "inside", "outside"].map(|e| cur["margins"][e].clone())),
+        ("bleed", [0, 1, 2, 3].map(|i| cur["bleed"][i].clone())),
+        ("slug", [0, 1, 2, 3].map(|i| cur["slug"][i].clone())),
+    ] {
+        for (e, v) in SETUP_EDGES.iter().zip(&values) {
+            f[format!("{k}{e}")] = fm(v);
         }
+        let first = values[0].as_f64();
+        f[format!("{k}Linked")] = json!(values.iter().all(|v| v.as_f64() == first));
     }
+    // The margins as shown: OK applies them to every page only when they were edited.
+    f["marginsShown"] = json!(SETUP_EDGES.map(|e| f[format!("margin{e}")].clone()));
     app.ui.dialog = Some(Dialog::new("documentSetup", f));
 }
 
-fn document_setup(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
-    egui::Grid::new("ds").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Intent:"));
+/// The edges of Document Setup's margins, bleed and slug (field suffixes).
+const SETUP_EDGES: [&str; 4] = ["Top", "Bottom", "Inside", "Outside"];
+
+/// The units Document Setup shows its measures in (the document's horizontal units).
+fn setup_units(d: &Dialog) -> Unit {
+    d.fields.get("units").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or(Unit::Picas)
+}
+
+/// A Document Setup measure in points, read as every dialog reads its measures.
+fn setup_measure(d: &Dialog, key: &str) -> Option<f64> {
+    d.m(key).filter(|v| v.is_finite())
+}
+
+/// A measure field with up/down arrows (a point, or a millimetre in metric units, a step); true
+/// when its value changed.
+fn setup_spin(ui: &mut egui::Ui, d: &mut Dialog, key: &str, width: f32, min: f64) -> bool {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let h = 22.0;
+    let (r, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    ui.painter().rect(r, 2.0, t.input, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    let seg = egui::Rect::from_min_size(r.min, egui::vec2(18.0, h));
+    ui.painter().line_segment([seg.right_top(), seg.right_bottom()], egui::Stroke::new(1.0, t.field_border));
+    let units = setup_units(d);
+    let step = if matches!(units, Unit::Millimeters | Unit::Centimeters) { designcraft_geom::units::PT_PER_MM } else { 1.0 };
+    let mut changed = false;
+    for (dir, half) in [
+        (1.0, egui::Rect::from_min_max(seg.min, egui::pos2(seg.max.x, seg.center().y))),
+        (-1.0, egui::Rect::from_min_max(egui::pos2(seg.min.x, seg.center().y), seg.max)),
+    ] {
+        let resp = ui.interact(half, ui.id().with((key, dir < 0.0)), egui::Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(half.shrink(1.0), 1.0, t.hover);
+        }
+        let c = half.center();
+        let y = 2.5 * dir as f32;
+        ui.painter().add(egui::Shape::line(
+            vec![egui::pos2(c.x - 3.5, c.y + y / 2.0), egui::pos2(c.x, c.y - y / 2.0), egui::pos2(c.x + 3.5, c.y + y / 2.0)],
+            egui::Stroke::new(1.2, t.icon),
+        ));
+        if resp.clicked() {
+            let v = (setup_measure(d, key).unwrap_or(min) + dir * step).clamp(min, 15552.0);
+            d.fields.insert(key.into(), json!(format_measure(v, units)));
+            changed = true;
+        }
+    }
+    let text = egui::Rect::from_min_max(egui::pos2(seg.right() + 5.0, r.top() + 1.0), egui::pos2(r.right() - 3.0, r.bottom() - 1.0));
+    let mut s = d.s(key);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let resp = child.add(egui::TextEdit::singleline(&mut s).id(ui.id().with((key, "text"))).frame(egui::Frame::NONE).desired_width(text.width()));
+    if resp.changed() {
+        d.fields.insert(key.into(), Value::String(s));
+        changed = true;
+    }
+    changed
+}
+
+/// A caption ending at the field it names (`Width:` [ ]), `width` wide.
+fn setup_caption(ui: &mut egui::Ui, text: &str, width: f32) {
+    let rtl = ui.layout().prefer_right_to_left();
+    let layout = if rtl { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) };
+    ui.allocate_ui_with_layout(egui::vec2(width, 22.0), layout, |ui| {
+        ui.set_width(width);
+        crate::rtl::label(ui, text);
+    });
+}
+
+/// A row that runs right to left in a right-to-left interface.
+fn setup_row<R>(ui: &mut egui::Ui, rtl: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let layout = if rtl { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 24.0), layout, add).inner
+}
+
+/// An outlined group of options.
+fn setup_group(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    egui::Frame::NONE.stroke(egui::Stroke::new(1.0, t.divider)).corner_radius(3.0).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 6.0;
+        add(ui);
+    });
+}
+
+/// The link beside a group's four edges: keeps them equal (linking makes them the first's).
+fn setup_link(ui: &mut egui::Ui, lang: &str, d: &mut Dialog, group: &str, changed: Option<String>) {
+    let key = format!("{group}Linked");
+    let linked = d.b(&key);
+    let mut source = if linked { changed } else { None };
+    let icon = if linked { "link" } else { "link-broken" };
+    if crate::widgets::icon_toggle_sized(ui, icon, linked, crate::i18n::tr(lang, "Make all settings the same"), egui::vec2(26.0, 26.0)).clicked() {
+        d.fields.insert(key, json!(!linked));
+        if !linked {
+            source = Some(format!("{group}Top"));
+        }
+    }
+    if let Some(v) = source.and_then(|k| d.fields.get(&k).cloned()) {
+        for e in SETUP_EDGES {
+            d.fields.insert(format!("{group}{e}"), v.clone());
+        }
+    }
+}
+
+/// File › Document Setup, laid out like InDesign's: intent, pages, start page #, facing pages,
+/// then Page Size (preset, width, height, orientation), Margins, Bleed and Slug (each edge, linked or
+/// not), and Adjust Layout. Returns true when Adjust Layout was clicked (apply now, objects follow).
+fn document_setup(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+    let lang = app.ui.language.as_str();
+    let tr = |s: &'static str| crate::i18n::tr(lang, s);
+    let rtl = crate::i18n::is_rtl(lang);
+    let t = crate::theme::Tokens::get(ui.ctx());
+    ui.spacing_mut().item_spacing.y = 6.0;
+    let label_w = 130.0;
+    setup_row(ui, rtl, |ui| {
+        setup_caption(ui, tr("Intent:"), label_w);
         let cur = d.s("intent");
         egui::ComboBox::from_id_salt("ds_intent")
-            .selected_text(match cur.as_str() {
-                "web" => crate::i18n::tr(&app.ui.language, "Web"),
-                "mobile" => crate::i18n::tr(&app.ui.language, "Mobile"),
-                _ => crate::i18n::tr(&app.ui.language, "Print"),
-            })
-            .width(110.0)
+            .selected_text(crate::rtl::widget(
+                ui,
+                tr(match cur.as_str() {
+                    "web" => "Web",
+                    "mobile" => "Mobile",
+                    _ => "Print",
+                }),
+            ))
+            .width(150.0)
             .show_ui(ui, |ui| {
                 for (v, l) in [("print", "Print"), ("web", "Web"), ("mobile", "Mobile")] {
-                    if ui.selectable_label(cur == v, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, l))).clicked() {
+                    if ui.selectable_label(cur == v, crate::rtl::widget(ui, tr(l))).clicked() {
                         d.fields.insert("intent".into(), json!(v));
                     }
                 }
             });
-        ui.label("");
-        ui.label("");
-        ui.end_row();
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Number of Pages:"));
-        text_field(ui, d, "pages", 60.0);
-        check(ui, d, "facingPages", crate::i18n::tr(&app.ui.language, "Facing Pages"));
-        ui.label("");
-        ui.end_row();
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Start Page #:"));
-        text_field(ui, d, "startPage", 60.0);
-        ui.end_row();
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Binding:"));
-        let rtl = d.s("binding") == "rightToLeft";
+    });
+    setup_row(ui, rtl, |ui| {
+        setup_caption(ui, tr("Number of Pages:"), label_w);
+        text_field(ui, d, "pages", 90.0);
+        ui.add_space(40.0);
+        check(ui, d, "facingPages", tr("Facing Pages"));
+    });
+    setup_row(ui, rtl, |ui| {
+        setup_caption(ui, tr("Start Page #:"), label_w);
+        text_field(ui, d, "startPage", 90.0);
+        ui.add_space(40.0);
+        // Set when the document is made (New Document); shown here, as InDesign does.
+        ui.add_enabled_ui(false, |ui| check(ui, d, "primaryTextFrame", tr("Primary Text Frame")));
+    });
+    setup_row(ui, rtl, |ui| {
+        setup_caption(ui, tr("Binding:"), label_w);
+        let right_to_left = d.s("binding") == "rightToLeft";
         egui::ComboBox::from_id_salt("ds_binding")
-            .selected_text(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, if rtl { "Right to Left" } else { "Left to Right" })))
-            .width(110.0)
+            .selected_text(crate::rtl::widget(ui, tr(if right_to_left { "Right to Left" } else { "Left to Right" })))
+            .width(150.0)
             .show_ui(ui, |ui| {
                 for (v, l) in [("leftToRight", "Left to Right"), ("rightToLeft", "Right to Left")] {
-                    if ui.selectable_label((v == "rightToLeft") == rtl, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, l))).clicked() {
+                    if ui.selectable_label((v == "rightToLeft") == right_to_left, crate::rtl::widget(ui, tr(l))).clicked() {
                         d.fields.insert("binding".into(), json!(v));
                     }
                 }
             });
-        ui.end_row();
     });
-    ui.add_space(8.0);
-    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Page Size")).font(semibold(12.0)));
-    let (w, h) = (d.m("width").unwrap_or(612.0), d.m("height").unwrap_or(792.0));
-    let preset =
-        designcraft_doc::build::PRESETS.iter().find(|p| (p.width - w).abs() < 0.5 && (p.height - h).abs() < 0.5).map_or("Custom", |p| p.name);
-    egui::Grid::new("ds_size").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Size:"));
-        egui::ComboBox::from_id_salt("ds_preset").selected_text(preset).width(140.0).show_ui(ui, |ui| {
-            for p in designcraft_doc::build::PRESETS {
-                if ui.selectable_label(p.name == preset, p.name).clicked() {
-                    d.fields.insert("width".into(), json!(format_measure(p.width, p.units)));
-                    d.fields.insert("height".into(), json!(format_measure(p.height, p.units)));
+    ui.add_space(4.0);
+    // Page Size.
+    let (w, h) = (setup_measure(d, "width").unwrap_or(612.0), setup_measure(d, "height").unwrap_or(792.0));
+    let preset = designcraft_doc::build::PRESETS
+        .iter()
+        .find(|p| ((p.width - w).abs() < 0.5 && (p.height - h).abs() < 0.5) || ((p.width - h).abs() < 0.5 && (p.height - w).abs() < 0.5))
+        .map_or_else(|| tr("Custom").to_string(), |p| tr(p.name).to_string());
+    setup_group(ui, |ui| {
+        setup_row(ui, rtl, |ui| {
+            crate::rtl::label(ui, egui::RichText::new(tr("Page Size:")).color(t.text_strong));
+            egui::ComboBox::from_id_salt("ds_preset").selected_text(crate::rtl::widget(ui, &preset)).width(260.0).show_ui(ui, |ui| {
+                for p in designcraft_doc::build::PRESETS {
+                    if ui.selectable_label(tr(p.name) == preset, crate::rtl::widget(ui, tr(p.name))).clicked() {
+                        // Keep the orientation; the preset's size in the document's units.
+                        let units = setup_units(d);
+                        let (pw, ph) = if w > h { (p.width.max(p.height), p.width.min(p.height)) } else { (p.width, p.height) };
+                        d.fields.insert("width".into(), json!(format_measure(pw, units)));
+                        d.fields.insert("height".into(), json!(format_measure(ph, units)));
+                    }
                 }
-            }
+            });
         });
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Orientation:"));
-        ui.horizontal(|ui| {
-            for (portrait, l) in [(true, "Portrait"), (false, "Landscape")] {
-                if ui.selectable_label((h >= w) == portrait, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, l))).clicked()
-                    && (h >= w) != portrait
-                {
+        setup_row(ui, rtl, |ui| {
+            setup_caption(ui, tr("Width:"), 70.0);
+            setup_spin(ui, d, "width", 130.0, 1.0);
+            ui.add_space(30.0);
+            crate::rtl::label(ui, tr("Orientation:"));
+            for (icon, tip, portrait) in [("orient-portrait", "Portrait", true), ("orient-landscape", "Landscape", false)] {
+                let on = (h >= w) == portrait;
+                if crate::widgets::icon_toggle_sized(ui, icon, on, tr(tip), egui::vec2(26.0, 26.0)).clicked() && !on {
                     let (fw, fh) = (d.s("width"), d.s("height"));
                     d.fields.insert("width".into(), json!(fh));
                     d.fields.insert("height".into(), json!(fw));
                 }
             }
         });
-        ui.end_row();
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Width:"));
-        text_field(ui, d, "width", 80.0);
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Height:"));
-        text_field(ui, d, "height", 80.0);
-        ui.end_row();
+        setup_row(ui, rtl, |ui| {
+            setup_caption(ui, tr("Height:"), 70.0);
+            setup_spin(ui, d, "height", 130.0, 1.0);
+        });
     });
-    ui.add_space(8.0);
-    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Bleed and Slug")).font(semibold(12.0)));
-    egui::Grid::new("ds_bleed").num_columns(5).spacing([8.0, 6.0]).show(ui, |ui| {
-        ui.label("");
-        for e in ["Top", "Bottom", "Inside", "Outside"] {
-            crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, e));
-        }
-        ui.end_row();
-        for (k, l) in [("bleed", "Bleed:"), ("slug", "Slug:")] {
-            crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, l));
-            for e in ["Top", "Bottom", "Inside", "Outside"] {
-                text_field(ui, d, &format!("{k}{e}"), 60.0);
-            }
-            ui.end_row();
+    ui.add_space(4.0);
+    // Margins: two columns beside a link.
+    setup_group(ui, |ui| {
+        setup_row(ui, rtl, |ui| {
+            crate::rtl::label(ui, egui::RichText::new(tr("Margins")).color(t.text_strong));
+        });
+        let facing = d.b("facingPages");
+        let (inside, outside) = if facing { ("Inside:", "Outside:") } else { ("Left:", "Right:") };
+        let mut changed = None;
+        setup_row(ui, rtl, |ui| {
+            ui.vertical(|ui| {
+                for (a, b) in [("Top:", "Top"), ("Bottom:", "Bottom")] {
+                    setup_row(ui, rtl, |ui| {
+                        setup_caption(ui, tr(a), 70.0);
+                        if setup_spin(ui, d, &format!("margin{b}"), 120.0, 0.0) {
+                            changed = Some(format!("margin{b}"));
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+            setup_link(ui, lang, d, "margin", changed.take());
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                for (a, b) in [(inside, "Inside"), (outside, "Outside")] {
+                    setup_row(ui, rtl, |ui| {
+                        setup_caption(ui, tr(a), 70.0);
+                        if setup_spin(ui, d, &format!("margin{b}"), 120.0, 0.0) {
+                            changed = Some(format!("margin{b}"));
+                        }
+                    });
+                }
+            });
+        });
+        if changed.is_some() {
+            setup_link_follow(d, "margin", changed);
         }
     });
-    check(ui, d, "adjustLayout", crate::i18n::tr(&app.ui.language, "Adjust Layout (objects follow the new page size)"));
+    ui.add_space(4.0);
+    // Bleed and Slug: a column per edge, a row (and a link) each.
+    egui::CollapsingHeader::new(crate::rtl::widget(ui, egui::RichText::new(tr("Bleed and Slug")).color(t.text_strong)))
+        .id_salt("ds_bleed_slug")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("ds_bleed").num_columns(6).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("");
+                for e in SETUP_EDGES {
+                    ui.add_sized([96.0, 18.0], egui::Label::new(crate::rtl::widget(ui, egui::RichText::new(tr(e)).color(t.text_strong))));
+                }
+                ui.end_row();
+                for (k, l) in [("bleed", "Bleed:"), ("slug", "Slug:")] {
+                    crate::rtl::label(ui, tr(l));
+                    let mut changed = None;
+                    for e in SETUP_EDGES {
+                        let key = format!("{k}{e}");
+                        let mut v = d.s(&key);
+                        if ui.add_sized([96.0, 22.0], egui::TextEdit::singleline(&mut v)).changed() {
+                            d.fields.insert(key.clone(), Value::String(v));
+                            changed = Some(key);
+                        }
+                    }
+                    setup_link(ui, lang, d, k, changed);
+                    ui.end_row();
+                }
+            });
+        });
+    ui.add_space(6.0);
+    // Adjust Layout: apply with objects following the new page size and margins.
+    let mut adjust = false;
+    setup_group(ui, |ui| {
+        setup_row(ui, rtl, |ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+            ui.painter().circle_stroke(r.center(), 8.0, egui::Stroke::new(1.2, t.icon));
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "i", egui::FontId::proportional(12.0), t.icon);
+            crate::rtl::label(ui, tr("Adjust page elements to document changes"));
+            let layout = if rtl { egui::Layout::left_to_right(egui::Align::Center) } else { egui::Layout::right_to_left(egui::Align::Center) };
+            ui.with_layout(layout, |ui| {
+                let button = egui::Button::new(crate::rtl::widget(ui, tr("Adjust Layout"))).corner_radius(12.0).min_size(egui::vec2(120.0, 24.0));
+                if ui.add(button).on_hover_text(tr("Apply the changes; objects follow the new page size and margins")).clicked() {
+                    adjust = true;
+                }
+            });
+        });
+    });
+    if adjust {
+        d.fields.insert("adjustLayout".into(), json!(true));
+    }
+    adjust
+}
+
+/// A linked group's edges follow the one that `changed`.
+fn setup_link_follow(d: &mut Dialog, group: &str, changed: Option<String>) {
+    if !d.b(&format!("{group}Linked")) {
+        return;
+    }
+    if let Some(v) = changed.and_then(|k| d.fields.get(&k).cloned()) {
+        for e in SETUP_EDGES {
+            d.fields.insert(format!("{group}{e}"), v.clone());
+        }
+    }
+}
+
+/// Document Setup's OK: `layout.documentSetup` with what was typed; a value that can't be read is
+/// refused before anything changes. The margins (the first page's, shown) go to every page only
+/// when they were edited, so pages keep their own margins otherwise.
+fn confirm_document_setup(app: &mut DesignApp, d: &Dialog) -> Result<Value, String> {
+    let measure = |key: &str| setup_measure(d, key).ok_or_else(|| format!("{key}: not a measure"));
+    let edges = |group: &str| -> Result<Vec<f64>, String> { SETUP_EDGES.iter().map(|e| measure(&format!("{group}{e}"))).collect() };
+    let count = |key: &str| d.n(key).filter(|n| n.is_finite() && *n >= 1.0).map(|n| n as u64).ok_or_else(|| format!("{key}: a whole number from 1"));
+    let margins = edges("margin")?;
+    let shown = d.fields.get("marginsShown").and_then(Value::as_array);
+    let edited = SETUP_EDGES.iter().enumerate().any(|(i, e)| shown.and_then(|s| s.get(i)) != d.fields.get(&format!("margin{e}")));
+    let mut p = json!({"intent": d.s("intent"), "pages": count("pages")?, "startPage": count("startPage")?, "facingPages": d.b("facingPages"),
+        "binding": d.s("binding"), "width": measure("width")?, "height": measure("height")?,
+        "bleed": edges("bleed")?, "slug": edges("slug")?, "adjustLayout": d.b("adjustLayout")});
+    if edited {
+        p["margins"] = json!({"top": margins[0], "bottom": margins[1], "inside": margins[2], "outside": margins[3]});
+    }
+    app.run("layout.documentSetup", p)
 }
 
 /// Preferences: a section list and the section's options. Application options always; units and
@@ -2189,7 +2423,13 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                     seed_text_frame_options(app, &mut d);
                     text_frame_options_dialog(app, ui, &mut d);
                 }
-                "documentSetup" => document_setup(app, ui, &mut d),
+                "documentSetup" => {
+                    // Adjust Layout applies at once.
+                    let adjust = document_setup(app, ui, &mut d);
+                    if adjust {
+                        result = Some(true);
+                    }
+                }
                 "pdfExport" => pdf_export(app, ui, &mut d),
                 "alert" => {
                     let file = d.s("file");
@@ -2341,12 +2581,13 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             r
         }
         "documentSetup" => {
-            let edges = |k: &str| json!(["Top", "Bottom", "Inside", "Outside"].map(|e| d.m(&format!("{k}{e}")).unwrap_or(0.0)));
-            app.run(
-                "layout.documentSetup",
-                json!({"intent": d.s("intent"), "pages": d.n("pages").unwrap_or(1.0).max(1.0) as u64, "startPage": d.n("startPage").unwrap_or(1.0).max(1.0) as u64,
-                    "facingPages": d.b("facingPages"), "binding": d.s("binding"), "width": d.m("width"), "height": d.m("height"), "bleed": edges("bleed"), "slug": edges("slug"), "adjustLayout": d.b("adjustLayout")}),
-            )
+            // On an error the dialog stays open to be corrected.
+            let r = confirm_document_setup(app, &d);
+            if let Err(e) = &r {
+                app.status(e.clone());
+                app.ui.dialog = Some(d);
+            }
+            r
         }
         "paragraphStyleOptions" => {
             let name = d.s("name");
@@ -5099,6 +5340,103 @@ mod tests {
         for _ in 0..30 {
             dialog_frame(app, ctx, screen, vec![]);
         }
+    }
+
+    /// A three-page document in `units` with Document Setup open.
+    fn document_setup_app(units: &str) -> DesignApp {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 3})).unwrap();
+        app.run("document.preferences", json!({"horizontalUnits": units, "verticalUnits": units})).unwrap();
+        crate::menus::activate(&mut app, "layout.documentSetup", &Value::Null);
+        app
+    }
+
+    fn setup_fields(app: &mut DesignApp, fields: Value) {
+        let d = app.ui.dialog.as_mut().unwrap();
+        for (k, v) in fields.as_object().unwrap() {
+            d.fields.insert(k.clone(), v.clone());
+        }
+    }
+
+    #[test]
+    fn document_setup_ok_applies_margins_bleed_and_size_in_one_step() {
+        let mut app = document_setup_app("millimeters");
+        let d = app.ui.dialog.as_ref().unwrap();
+        assert_eq!(d.id, "documentSetup");
+        assert_eq!((d.s("marginTop"), d.b("marginLinked")), ("12.7 mm".to_string(), true), "the document's margins, in its units");
+        setup_fields(
+            &mut app,
+            json!({"marginTop": "20 mm", "marginBottom": "20 mm", "marginInside": "20 mm", "marginOutside": "20 mm", "bleedTop": "3 mm",
+            "bleedBottom": "3 mm", "bleedInside": "3 mm", "bleedOutside": "3 mm", "width": "210 mm", "height": "297 mm"}),
+        );
+        confirm(&mut app).unwrap();
+        assert!(app.ui.dialog.is_none());
+        let mm = designcraft_geom::units::PT_PER_MM;
+        let doc = &app.session.active().unwrap().doc;
+        assert!((doc.settings.page_width - 210.0 * mm).abs() < 1e-6 && (doc.settings.bleed[2] - 3.0 * mm).abs() < 1e-6);
+        assert!(doc.spreads.iter().flat_map(|s| &s.pages).all(|p| (p.margins.top - 20.0 * mm).abs() < 1e-6), "every page");
+        app.run("edit.undo", json!({})).unwrap();
+        let doc = &app.session.active().unwrap().doc;
+        assert!((doc.settings.page_width - 612.0).abs() < 1e-6 && doc.settings.bleed[0] == 0.0, "one undo step");
+    }
+
+    #[test]
+    fn document_setup_keeps_each_pages_margins_unless_they_are_edited() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 3, "margins": 36})).unwrap();
+        app.run("layout.marginsAndColumns", json!({"pages": [1], "margins": 90})).unwrap();
+        let margins =
+            |app: &DesignApp| app.session.active().unwrap().doc.spreads.iter().flat_map(|s| &s.pages).map(|p| p.margins.top).collect::<Vec<_>>();
+        // Only the page count changes: every page keeps its own margins.
+        crate::menus::activate(&mut app, "layout.documentSetup", &Value::Null);
+        setup_fields(&mut app, json!({"pages": "4"}));
+        confirm(&mut app).unwrap();
+        assert_eq!(margins(&app), [36.0, 90.0, 36.0, 36.0]);
+        // Edited margins go to every page.
+        crate::menus::activate(&mut app, "layout.documentSetup", &Value::Null);
+        setup_fields(&mut app, json!({"marginTop": "1p0"}));
+        confirm(&mut app).unwrap();
+        assert_eq!(margins(&app), [12.0; 4]);
+    }
+
+    #[test]
+    fn document_setup_keeps_a_value_it_cannot_read_and_changes_nothing() {
+        for (key, value) in [("width", "wide"), ("marginTop", "-"), ("pages", "0"), ("bleedTop", "x")] {
+            let mut app = document_setup_app("points");
+            setup_fields(&mut app, json!({key: value, "bleedInside": "9"}));
+            assert!(confirm(&mut app).is_err(), "{key}");
+            assert!(app.ui.dialog.is_some(), "{key}: the dialog stays open");
+            assert_eq!(app.session.active().unwrap().doc.settings.bleed, [0.0; 4], "{key}: nothing changed");
+        }
+    }
+
+    #[test]
+    fn document_setup_links_edges_and_adjust_layout_applies() {
+        let mut app = document_setup_app("points");
+        let f = app.run("frame.create", json!({"rect": [36, 36, 576, 756], "content": "text"})).unwrap();
+        crate::menus::activate(&mut app, "layout.documentSetup", &Value::Null);
+        let ctx = dialog_context("en");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1178.0, 900.0));
+        for _ in 0..3 {
+            dialog_frame(&mut app, &ctx, screen, vec![]);
+        }
+        // Typing in a linked margin sets all four.
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        let top = labels.iter().filter(|(t, _, _)| t == "36 pt").map(|(_, r, _)| *r).next().expect("the top margin");
+        click_dialog(&mut app, &ctx, screen, top.center());
+        let select_all =
+            egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        dialog_frame(&mut app, &ctx, screen, vec![select_all, egui::Event::Text("72 pt".into())]);
+        dialog_frame(&mut app, &ctx, screen, vec![]);
+        let d = app.ui.dialog.as_ref().unwrap();
+        assert!(["Top", "Bottom", "Inside", "Outside"].iter().all(|e| d.s(&format!("margin{e}")) == "72 pt"), "linked: {:?}", d.fields);
+        // Adjust Layout applies at once, and the frame follows the margins.
+        let labels = dialog_frame(&mut app, &ctx, screen, vec![]);
+        click_dialog(&mut app, &ctx, screen, visible_label(&labels, screen, "Adjust Layout").center());
+        assert!(app.ui.dialog.is_none(), "applied");
+        let doc = &app.session.active().unwrap().doc;
+        let b = doc.item(designcraft_doc::ItemId(f["id"].as_u64().unwrap())).unwrap().bounds();
+        assert!((b.y0 - 72.0).abs() < 1e-6 && doc.page(0).unwrap().margins.outside == 72.0, "{b:?}");
     }
 
     fn scope_control(app: &mut DesignApp, ctx: &egui::Context, method: &str, params: Value) -> Value {

@@ -3112,6 +3112,30 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Presentation", ["Präsentation", "Présentation", "Presentación", "プレゼンテーション", "演示文稿"]),
     ("Extras", ["Extras", "Options supplémentaires", "Extras", "エクストラ", "附加"]),
     ("Column", ["Spalte", "Colonne", "Columna", "段", "栏"]),
+    // Document Setup
+    ("Page Size:", ["Seitenformat:", "Format de page :", "Tamaño de página:", "ページサイズ:", "页面大小："]),
+    (
+        "Adjust page elements to document changes",
+        [
+            "Seitenelemente an Dokumentänderungen anpassen",
+            "Adapter les éléments de page aux modifications du document",
+            "Ajustar los elementos de página a los cambios del documento",
+            "ページ要素をドキュメントの変更に合わせて調整",
+            "根据文档更改调整页面元素",
+        ],
+    ),
+    (
+        "Apply the changes; objects follow the new page size and margins",
+        [
+            "Änderungen anwenden; Objekte folgen dem neuen Seitenformat und den Rändern",
+            "Appliquer les modifications ; les objets suivent le nouveau format et les marges",
+            "Aplicar los cambios; los objetos siguen el nuevo tamaño de página y los márgenes",
+            "変更を適用し、オブジェクトを新しいページサイズとマージンに合わせます",
+            "应用更改；对象跟随新的页面大小和边距",
+        ],
+    ),
+    ("Bleed:", ["Anschnitt:", "Fond perdu :", "Sangrado:", "裁ち落とし:", "出血："]),
+    ("Slug:", ["Infobereich:", "Ligne-bloc :", "Indicaciones:", "印刷可能領域:", "辅助信息区："]),
 ];
 
 /// Interface direction; independent of document binding and paragraph direction.
