@@ -163,7 +163,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Swatches…",
             [],
             None,
-            "{path?|base64?, replace?: bool} — colour swatches from a swatch exchange (.ase) file; names already in the document are kept unless `replace` → {added, replaced}",
+            "{path?|base64?, replace?: bool} — colour swatches from a swatch exchange (.ase) file; a name the file repeats gets a number (\"Red 2\") and an unnamed color is named by its value; names already in the document are kept unless `replace` → {added, replaced}",
             has_doc,
             load_swatches
         ),
@@ -903,8 +903,17 @@ fn load_swatches(s: &mut Session, p: &Value) -> Result<Value> {
         for (i, x) in d.swatches.iter().enumerate() {
             at.entry(x.name.clone()).or_insert(i);
         }
+        let mut names = FileNames::default();
         let (mut added, mut replaced) = (0, 0);
-        for w in incoming {
+        for mut w in incoming {
+            // An unnamed color is named by its value, and a name the file already gave gets a number.
+            if w.name.is_empty()
+                && let SwatchValue::Color { color, .. } = w.value
+            {
+                w.name = value_name(color);
+                w.named = false;
+            }
+            w.name = names.unique(std::mem::take(&mut w.name));
             match at.get(&w.name).and_then(|&i| d.swatches.get_mut(i)) {
                 Some(x) if x.locked => {}
                 Some(x) => {
@@ -923,6 +932,32 @@ fn load_swatches(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(json!({"added": added, "replaced": replaced}))
     })
+}
+
+/// The swatch names one `.ase` file has given. A name already given gets the first free number
+/// ("Red 2"), as [`Styles::unique_name`] numbers names.
+#[derive(Default)]
+struct FileNames {
+    taken: std::collections::HashSet<String>,
+    /// The last number tried for each repeated name.
+    last: std::collections::HashMap<String, usize>,
+}
+
+impl FileNames {
+    fn unique(&mut self, base: String) -> String {
+        if self.taken.insert(base.clone()) {
+            return base;
+        }
+        // Each pass tries the next number, and only finitely many names are taken.
+        let n = self.last.entry(base.clone()).or_insert(1);
+        loop {
+            *n += 1;
+            let name = format!("{base} {n}");
+            if self.taken.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
 }
 
 fn save_swatches(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1705,11 +1740,12 @@ mod color_tests {
         let named = |s: &Session, name: &str| -> Vec<(SwatchValue, bool)> {
             s.doc().unwrap().doc.swatches.iter().filter(|w| w.name == name).map(|w| (w.value.clone(), w.hidden)).collect()
         };
-        // With `replace`, the file's second "New" replaces its first, only the first "Twin" changes, the hidden
+        // With `replace`, the file's second "New" is added as "New 2", only the first "Twin" changes, the hidden
         // swatch becomes visible, and the locked [Black] stays.
         let r = s.execute("swatch.load", &json!({"base64": b64, "replace": true})).unwrap();
-        assert_eq!((r["added"].as_u64(), r["replaced"].as_u64()), (Some(1), Some(3)));
-        assert_eq!(named(&s, "New"), [(ink(0.5), false)]);
+        assert_eq!((r["added"].as_u64(), r["replaced"].as_u64()), (Some(2), Some(2)));
+        assert_eq!(named(&s, "New"), [(ink(0.4), false)]);
+        assert_eq!(named(&s, "New 2"), [(ink(0.5), false)]);
         assert_eq!(named(&s, "Twin"), [(ink(0.6), false), (ink(0.2), false)]);
         assert_eq!(named(&s, "Unnamed"), [(ink(0.7), false)]);
         assert_eq!(named(&s, "[Black]"), [(ink(1.0), false)]);
@@ -1718,6 +1754,51 @@ mod color_tests {
         let r = s.execute("swatch.load", &json!({"base64": b64})).unwrap();
         assert_eq!((r["added"].as_u64(), r["replaced"].as_u64()), (Some(0), Some(0)));
         assert_eq!(s.doc().unwrap().doc.swatches, before);
+    }
+
+    #[test]
+    fn loading_swatches_numbers_repeated_names_and_names_unnamed_colors() {
+        use designcraft_color::{Color, ColorType};
+        let ink = |k: f32| SwatchValue::Color { color: Color::cmyk(0.0, 0.0, 0.0, k), color_type: ColorType::Process };
+        let sw = |name: &str, k: f32| Swatch { name: name.into(), value: ink(k), locked: false, named: true, hidden: false };
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        s.edit(|d, _| {
+            d.swatches.push(sw("Kept", 0.1));
+            Ok(())
+        })
+        .unwrap();
+        // "Red 2" comes before the second "Red", which takes "Red 3". Two unnamed colors share a value.
+        let file = designcraft_color::ase::write(&[
+            sw("Red", 0.2),
+            sw("Red 2", 0.3),
+            sw("Red", 0.4),
+            sw("", 0.55),
+            sw("", 0.55),
+            sw("", 0.65),
+            sw("Kept", 0.7),
+        ]);
+        let b64 = crate::cmd::base64_encode(&file);
+        let named = |s: &Session, name: &str| -> Vec<(SwatchValue, bool)> {
+            s.doc().unwrap().doc.swatches.iter().filter(|w| w.name == name).map(|w| (w.value.clone(), w.named)).collect()
+        };
+        // Names already in the document are kept.
+        let r = s.execute("swatch.load", &json!({"base64": b64})).unwrap();
+        assert_eq!((r["added"].as_u64(), r["replaced"].as_u64()), (Some(6), Some(0)));
+        assert_eq!(named(&s, "Red"), [(ink(0.2), true)]);
+        assert_eq!(named(&s, "Red 2"), [(ink(0.3), true)]);
+        assert_eq!(named(&s, "Red 3"), [(ink(0.4), true)]);
+        assert_eq!(named(&s, "C=0 M=0 Y=0 K=55"), [(ink(0.55), false)]);
+        assert_eq!(named(&s, "C=0 M=0 Y=0 K=55 2"), [(ink(0.55), false)]);
+        assert_eq!(named(&s, "C=0 M=0 Y=0 K=65"), [(ink(0.65), false)]);
+        assert_eq!(named(&s, "Kept"), [(ink(0.1), true)]);
+        assert!(named(&s, "").is_empty());
+        // With `replace`, the same file again replaces each of its colors once.
+        let r = s.execute("swatch.load", &json!({"base64": b64, "replace": true})).unwrap();
+        assert_eq!((r["added"].as_u64(), r["replaced"].as_u64()), (Some(0), Some(7)));
+        assert_eq!(named(&s, "Red"), [(ink(0.2), true)]);
+        assert_eq!(named(&s, "Red 3"), [(ink(0.4), true)]);
+        assert_eq!(named(&s, "Kept"), [(ink(0.7), true)]);
     }
 
     #[test]
