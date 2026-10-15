@@ -35,11 +35,13 @@ pub struct ViewInfo {
     pub zoom: f64,
     pub snap: SnapView,
     pub unit: Unit,
+    /// The toolbox's Stroke box is in front (X): colour tools apply to strokes.
+    pub stroke_in_front: bool,
 }
 
 impl ViewInfo {
     pub const fn at_zoom(zoom: f64) -> Self {
-        Self { zoom, snap: SnapView::FACTORY, unit: Unit::Points }
+        Self { zoom, snap: SnapView::FACTORY, unit: Unit::Points, stroke_in_front: false }
     }
 }
 
@@ -59,6 +61,10 @@ impl Session {
             return;
         }
         self.tool = designcraft_tools::create(id);
+        // Any other tool unloads the place cursor.
+        if id != "placeGun" {
+            self.loaded = None;
+        }
         // Leaving the Type tool keeps the text frame selected.
         if id != "type"
             && let Some(st) = self.active_mut()
@@ -93,6 +99,7 @@ impl Session {
             layer,
             snap: view.snap,
             unit: view.unit,
+            stroke_in_front: view.stroke_in_front,
         };
         Some(f(self.tool.as_mut(), &cx))
     }

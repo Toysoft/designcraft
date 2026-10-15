@@ -303,8 +303,17 @@ fn items(glyphs: &[Glyph], hyph_after: &[bool], emergency_after: &[bool], sp: &S
     let n = glyphs.len();
     let mut hy_cache = Vec::new();
     let mut last_space = NONE;
+    // Spaces before the paragraph end or a forced break hang: they take no room on the line (as
+    // in InDesign, where "2 VOOR " fits a frame as wide as "2 VOOR").
+    let mut hangs = vec![false; n];
+    for i in (0..n).rev() {
+        hangs[i] = glyphs[i].is_space() && glyphs.get(i + 1).is_none_or(|nx| hangs[i + 1] || is_forced(nx.ch));
+    }
     for (i, g) in glyphs.iter().enumerate() {
         let prev_hang = if i > 0 { right_hang(&glyphs[i - 1], sp) } else { 0.0 };
+        if hangs[i] {
+            continue;
+        }
         if is_forced(g.ch) {
             it.push(Item::glue(0.0, INF, 0.0));
             ig.push(i);

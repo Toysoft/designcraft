@@ -579,6 +579,36 @@ fn round_trips_small_document() {
 }
 
 #[test]
+fn round_trips_overridden_parent_items() {
+    let mut d = Document::new(&NewDocument { pages: 1, ..Default::default() });
+    let lid = d.default_layer();
+    let (ppi, ppage) = d.parent_page_for(0).unwrap();
+    let px = d.parents[ppi].pages[ppage].x;
+    let pid = designcraft_doc::ItemId(d.alloc());
+    let frame = designcraft_doc::Item::new(pid, lid, Shape::Rectangle, shapes::rectangle(Rect::new(px + 40.0, 40.0, px + 200.0, 120.0)));
+    d.insert_item(SpreadRef::Parent(ppi), frame.clone(), None).unwrap();
+    // What layout.overrideParentItems leaves behind: a linked local copy, and the parent item listed on the page.
+    let mut copy = frame;
+    copy.id = designcraft_doc::ItemId(d.alloc());
+    copy.xf = designcraft_geom::Affine::translate((d.spreads[0].pages[0].x - px, 0.0)) * copy.xf;
+    copy.overrides = Some(pid);
+    d.insert_item(SpreadRef::Doc(0), copy, None).unwrap();
+    std::sync::Arc::make_mut(&mut d.spreads[0]).pages[0].overridden.push(pid);
+
+    let back = import_idml(&export_idml(&d)).unwrap();
+    let parent_ids: Vec<_> = back.parents[ppi].items.iter().map(|i| i.id).collect();
+    assert_eq!(parent_ids.len(), 1);
+    let page = &back.spreads[0].pages[0];
+    assert_eq!(page.overridden, parent_ids);
+    let local: Vec<_> = back.spreads[0].items.iter().collect();
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].overrides, Some(parent_ids[0]));
+    // Rendering skips overridden parent items, so page 1 shows only the local copy.
+    let shown_parent = back.parents[ppi].items.iter().filter(|i| !page.overridden.contains(&i.id)).count();
+    assert_eq!(shown_parent + local.len(), 1);
+}
+
+#[test]
 fn uri_and_base64_helpers() {
     assert_eq!(import::uri_to_path("file:/a%20b/c.png"), "/a b/c.png");
     assert_eq!(import::uri_to_path("file:///C:/x/y.jpg"), "C:/x/y.jpg");
@@ -866,6 +896,25 @@ fn cjk_character_attributes_import_from_independent_xml_and_round_trip() {
     assert_eq!(a.trailing_aki, b.trailing_aki);
     assert_eq!(a.kenten_character, b.kenten_character);
     assert_eq!(a.leading_model, b.leading_model);
+}
+
+#[test]
+fn text_stroke_alignment_imports_as_stroke_behind_fill_and_round_trips() {
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" StrokeColor="Color/Black" StrokeWeight="2" StrokeAlignment="OutsideAlignment"><Content>Behind</Content></CharacterStyleRange>
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" StrokeColor="Color/Black" StrokeAlignment="CenterAlignment"><Content>Over</Content></CharacterStyleRange>
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>Plain</Content></CharacterStyleRange>
+      </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let flags = |d: &Document| -> Vec<(String, Option<bool>)> {
+        let st = d.stories.values().find(|s| s.text.contains("Behind")).unwrap();
+        st.runs().map(|(r, f)| (st.text[r].to_string(), f.over.stroke_behind_fill)).filter(|(t, _)| !t.trim().is_empty()).collect()
+    };
+    let want = vec![("Behind".to_string(), Some(true)), ("Over".to_string(), Some(false)), ("Plain".to_string(), None)];
+    let doc = import_idml(&fixture_with_story(story)).unwrap();
+    assert_eq!(flags(&doc), want);
+    let back = import_idml(&export_idml(&doc)).unwrap();
+    assert_eq!(flags(&back), want);
 }
 
 #[test]
@@ -2168,4 +2217,55 @@ fn frame_preference_property_color_resolves_for_frames_and_object_styles() {
     let colors: Vec<_> = d.spreads[0].items.iter().map(|it| it.text_frame().unwrap().options.column_rule_color.as_str()).collect();
     assert_eq!(colors, vec!["Near", "Near", "Far", designcraft_color::swatch::NONE]);
     assert_eq!(d.styles.object_style("Child").unwrap().text_frame.as_ref().unwrap().column_rule_color, "Near");
+}
+
+/// A two-page spread with ruler guides on its pages (and one on the parent), in `origin` ruler
+/// coordinates.
+fn guides_package(origin: &str) -> Vec<u8> {
+    let prefs = PREFS.replace("</idPkg:Preferences>", &format!(r#"<ViewPreference RulerOrigin="{origin}"/></idPkg:Preferences>"#));
+    let spread = SPREAD.replace(
+        r#"<Page Self="p2" AppliedMaster="m1" GeometricBounds="0 0 700 500" ItemTransform="1 0 0 1 0 -350"/>"#,
+        r#"<Page Self="p2" AppliedMaster="m1" GeometricBounds="0 0 700 500" ItemTransform="1 0 0 1 0 -350">
+      <Guide Self="g1" Orientation="Vertical" Location="40" FitToPage="true" ItemLayer="L1" Locked="true"/>
+      <Guide Self="g2" Orientation="Horizontal" Location="100" FitToPage="false"/>
+    </Page>"#,
+    );
+    let master = MASTER.replace(
+        r#"<Page Self="mp1" GeometricBounds="0 0 700 500" ItemTransform="1 0 0 1 -500 -350"/>"#,
+        r#"<Page Self="mp1" GeometricBounds="0 0 700 500" ItemTransform="1 0 0 1 -500 -350"><Guide Self="mg" Orientation="Vertical" Location="84"/></Page>"#,
+    );
+    zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", STYLES),
+        ("Resources/Preferences.xml", &prefs),
+        ("MasterSpreads/MasterSpread_m1.xml", &master),
+        ("Spreads/Spread_sp1.xml", &spread),
+        ("Stories/Story_s1.xml", STORY),
+    ])
+}
+
+/// Ruler guides come in from IDML (they were dropped): on their page, measured from the ruler
+/// origin, with Fit to Page, Locked and their layer; parent pages' too. They go out again.
+#[test]
+fn ruler_guides_import_and_round_trip() {
+    use designcraft_doc::Orientation::{Horizontal, Vertical};
+    let guides = |d: &Document| {
+        let p = &d.spreads[0].pages[1];
+        p.guides.iter().map(|g| (g.orientation, g.position, g.spread, g.locked, g.layer.is_some())).collect::<Vec<_>>()
+    };
+    // The second page starts at x 500 in our spread coordinates.
+    let d = import_idml(&guides_package("PageOrigin")).unwrap();
+    assert_eq!(guides(&d), [(Vertical, 540.0, false, true, true), (Horizontal, 100.0, true, false, false)]);
+    let d = import_idml(&guides_package("SpineOrigin")).unwrap();
+    assert_eq!(guides(&d)[0].1, 540.0, "the spine is the second page's left edge");
+    let d = import_idml(&guides_package("SpreadOrigin")).unwrap();
+    assert_eq!(guides(&d)[0].1, 40.0);
+    assert_eq!(d.parents[0].pages[0].guides.len(), 1, "a parent page's guide");
+    assert_eq!(d.parents[0].pages[0].guides[0].position, 84.0);
+    // Round trip: written under each page, read back where they were.
+    let d = import_idml(&guides_package("PageOrigin")).unwrap();
+    let back = import_idml(&export_idml(&d)).unwrap();
+    assert_eq!(guides(&back), guides(&d));
+    assert_eq!(back.parents[0].pages[0].guides.len(), 1);
 }

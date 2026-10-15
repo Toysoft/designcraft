@@ -374,32 +374,9 @@ impl Renderer {
                 let lg = &fg.lines[i];
                 self.stats.glyphs += lg.glyphs;
                 for (si, bp) in &lg.runs {
-                    if let Some(c) = fill_of(*si) {
-                        let st = &cs.styles[*si as usize];
-                        let op = crate::overprints(f, &st.fill, st.fill_tint, false);
-                        if op {
-                            ctx.push_layer(
-                                None,
-                                Some(vello_cpu::peniko::BlendMode::new(vello_cpu::peniko::Mix::Multiply, vello_cpu::peniko::Compose::SrcOver)),
-                                None,
-                                None,
-                                None,
-                            );
-                        }
-                        ctx.set_paint(c);
-                        ctx.fill_path(bp);
-                        if op {
-                            ctx.pop_layer();
-                        }
-                    }
                     let st = &cs.styles[*si as usize];
-                    if st.stroke != designcraft_color::swatch::NONE
-                        && let Some(c) = doc.resolve_color(&st.stroke, st.stroke_tint)
-                    {
-                        ctx.set_paint(color_of(&c, 1.0));
-                        ctx.set_stroke(kurbo::Stroke::new(st.stroke_weight));
-                        ctx.stroke_path(bp);
-                    }
+                    let fill = fill_of(*si).map(|c| (c, crate::overprints(f, &st.fill, st.fill_tint, false)));
+                    paint_glyphs(ctx, bp, fill, stroke_of(doc, st), st.stroke_weight, st.stroke_behind_fill);
                 }
             }
             for &i in &shown {
@@ -472,6 +449,62 @@ impl Renderer {
 }
 
 /// Kurbo stroke for a table edge.
+/// A run's stroke colour, if it has one.
+fn stroke_of(doc: &designcraft_doc::Document, st: &designcraft_compose::RunStyle) -> Option<peniko::Color> {
+    if st.stroke == designcraft_color::swatch::NONE {
+        return None;
+    }
+    doc.resolve_color(&st.stroke, st.stroke_tint).map(|c| color_of(&c, 1.0))
+}
+
+/// Paint glyph outlines: the fill (multiplied when it overprints), then the stroke over it. With
+/// stroke behind fill a double-width stroke goes first and the fill covers its inner half; with
+/// no fill to cover it, the glyph shapes are cut out of the stroke instead.
+fn paint_glyphs(
+    ctx: &mut RenderContext,
+    bp: &BezPath,
+    fill: Option<(peniko::Color, bool)>,
+    stroke: Option<peniko::Color>,
+    weight: f64,
+    behind: bool,
+) {
+    let paint_fill = |ctx: &mut RenderContext| {
+        let Some((c, overprint)) = fill else { return };
+        if overprint {
+            ctx.push_layer(None, Some(peniko::BlendMode::new(peniko::Mix::Multiply, peniko::Compose::SrcOver)), None, None, None);
+        }
+        ctx.set_paint(c);
+        ctx.fill_path(bp);
+        if overprint {
+            ctx.pop_layer();
+        }
+    };
+    let Some(sc) = stroke else {
+        paint_fill(ctx);
+        return;
+    };
+    if !behind {
+        paint_fill(ctx);
+        ctx.set_paint(sc);
+        ctx.set_stroke(kurbo::Stroke::new(weight));
+        ctx.stroke_path(bp);
+        return;
+    }
+    ctx.set_paint(sc);
+    ctx.set_stroke(kurbo::Stroke::new(weight * 2.0));
+    if fill.is_some() {
+        ctx.stroke_path(bp);
+        paint_fill(ctx);
+    } else {
+        ctx.push_layer(None, None, None, None, None);
+        ctx.stroke_path(bp);
+        ctx.push_layer(None, Some(peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::DestOut)), None, None, None);
+        ctx.fill_path(bp);
+        ctx.pop_layer();
+        ctx.pop_layer();
+    }
+}
+
 fn cell_stroke(s: &designcraft_doc::CellStroke) -> kurbo::Stroke {
     let st = kurbo::Stroke::new(s.weight).with_caps(kurbo::Cap::Square);
     match &s.kind {
@@ -500,17 +533,8 @@ impl Renderer {
         ctx.set_transform(f.view * xf);
         for (si, bp) in designcraft_compose::path_glyphs(cs, ft, path, pt) {
             let st = &cs.styles[si as usize];
-            if let Some(c) = doc.resolve_color(&st.fill, st.fill_tint) {
-                ctx.set_paint(color_of(&c, 1.0));
-                ctx.fill_path(&bp);
-            }
-            if st.stroke != designcraft_color::swatch::NONE
-                && let Some(c) = doc.resolve_color(&st.stroke, st.stroke_tint)
-            {
-                ctx.set_paint(color_of(&c, 1.0));
-                ctx.set_stroke(kurbo::Stroke::new(st.stroke_weight));
-                ctx.stroke_path(&bp);
-            }
+            let fill = doc.resolve_color(&st.fill, st.fill_tint).map(|c| (color_of(&c, 1.0), false));
+            paint_glyphs(ctx, &bp, fill, stroke_of(doc, st), st.stroke_weight, st.stroke_behind_fill);
             self.stats.glyphs += 1;
         }
     }

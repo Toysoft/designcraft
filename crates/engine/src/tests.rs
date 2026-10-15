@@ -877,3 +877,58 @@ fn duplicating_a_page_to_an_index_is_one_undo_step() {
     assert!(s.execute("layout.pages.duplicateSpread", &json!({"spread": 0, "to": 4})).is_err());
     assert_eq!(widths(&s), [300.0, 400.0, 500.0]);
 }
+
+#[test]
+fn the_type_tool_draws_a_text_frame_over_a_locked_frame() {
+    // Adobe's "Set up a modern magazine layout" (4:03): with the page frame locked (Cmd+L), the
+    // Type tool draws text frames on top of it; the locked frame stays an empty frame.
+    use designcraft_tools::{PointerEvent, PointerKind, SnapView};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 612, "height": 792, "facingPages": false})).unwrap();
+    let big = s.execute("frame.create", &json!({"rect": [36, 36, 576, 756], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+    s.execute("object.stroke", &json!({"ids": [big], "swatch": "[Black]", "weight": 6})).unwrap();
+    s.execute("object.lock", &json!({"ids": [big]})).unwrap();
+    s.execute("edit.deselectAll", &json!({})).unwrap();
+    s.set_tool("type");
+    let v = ViewInfo { snap: SnapView::OFF, ..ViewInfo::at_zoom(1.0) };
+    let layout = s.layout();
+    let at = |x: f64, y: f64| layout.to_canvas(designcraft_doc::SpreadRef::Doc(0), designcraft_geom::Point::new(x, y));
+    let (a, b) = (at(100.0, 100.0), at(300.0, 200.0));
+    s.pointer(&PointerEvent::new(PointerKind::Down, a.x, a.y), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Drag, 200.0 + a.x - 100.0, a.y + 50.0), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Drag, b.x, b.y), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Up, b.x, b.y), v).unwrap();
+    let d = &s.doc().unwrap().doc;
+    let it = d.item(designcraft_doc::ItemId(big)).unwrap();
+    assert!(matches!(it.content, designcraft_doc::Content::Unassigned), "the locked frame stays empty");
+    let frames: Vec<_> = d.spreads[0].items.iter().filter(|i| i.is_text_frame()).collect();
+    assert_eq!(frames.len(), 1, "a new text frame");
+    let r = frames[0].bounds();
+    assert!((r.x0 - 100.0).abs() < 1e-6 && (r.y1 - 200.0).abs() < 1e-6, "{r:?}");
+    // The engine refuses to turn a locked empty frame into a text frame.
+    assert!(s.execute("text.placeCaret", &json!({"frame": big, "point": [300, 400]})).is_err());
+    // Unlocked, a press inside converts it, as before.
+    s.execute("object.unlockAll", &json!({})).unwrap();
+    s.execute("text.placeCaret", &json!({"frame": big, "point": [300, 400]})).unwrap();
+    assert!(s.doc().unwrap().doc.item(designcraft_doc::ItemId(big)).unwrap().is_text_frame());
+}
+
+/// A line is set when its baseline fits in the frame; its descenders may hang below the frame, as
+/// in InDesign. A 103 pt heading in a 78.5 pt frame (Cap Height first baseline) was overset.
+#[test]
+fn a_line_fits_when_its_baseline_does() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let overset = |s: &mut Session, height: f64| {
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 400, 36.0 + height], "content": "text", "text": "Gyp"})).unwrap();
+        s.execute("object.textFrameOptions", &json!({"ids": [r["id"]], "firstBaseline": "capHeight", "inset": 0})).unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 3})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"size": 103}})).unwrap();
+        let st = s.execute("story.get", &json!({"story": r["story"]})).unwrap();
+        !st["overset"].is_null()
+    };
+    // Cap height of the default font at 103 pt is about 70 pt: the baseline fits in 78.5 pt, the
+    // descent (about 25 pt more) doesn't.
+    assert!(!overset(&mut s, 78.5), "the line is set; its descenders hang below the frame");
+    assert!(overset(&mut s, 50.0), "a baseline below the frame still oversets the line");
+}

@@ -9,8 +9,8 @@ use designcraft_color::{Color, ColorType, Gradient, GradientKind, GradientStop, 
 use designcraft_doc::{
     Asset, AssetId, BaselineGrid, CellRange, CharAttrs, CharFormat, CharRun, CharacterStyle, Columns, ColumnsKind, Content, DocSettings, Document,
     DropShadow, Effects, Fill, GridAlign, GridRelative, Guide, Item, ItemId, Kerning, LAYER_COLORS, Layer, LayerId, ListType, Margins, ObjectStyle,
-    Page, PageId, PageSide, ParaAttrs, ParaFormat, ParagraphStyle, ParentInfo, RowHeightMode, Rule, Section, Shape, SpanColumns, Spread, SpreadId,
-    Story, StoryId, Stroke, Styles, TabStop, Table, TextFrame, TextFrameOptions, TextWrap, story as st,
+    Orientation, Page, PageId, PageSide, ParaAttrs, ParaFormat, ParagraphStyle, ParentInfo, RowHeightMode, Rule, Section, Shape, SpanColumns, Spread,
+    SpreadId, Story, StoryId, Stroke, Styles, TabStop, Table, TextFrame, TextFrameOptions, TextWrap, story as st,
 };
 use designcraft_geom::corners::{Corner, CornerOptions};
 use designcraft_geom::{Affine, Anchor, PathData, Point, Rect, SubPath};
@@ -29,21 +29,11 @@ fn uniform_cell_stroke(edges: &[designcraft_doc::CellStrokeAttrs; 4]) -> Option<
     Some(designcraft_doc::CellStroke { weight: first.weight?, color: first.color.clone()?, tint: first.tint?, kind: first.kind.clone()? })
 }
 
-/// Import an IDML package. Linked images are read from disk when available (not on wasm).
+/// Import an IDML package without reading its linked images from disk: this crate never touches
+/// the file system, so a caller that wants the links brings its own reader
+/// ([`import_idml_with`]). The engine passes one that checks the automation roots.
 pub fn import_idml(bytes: &[u8]) -> Result<Document> {
-    import_idml_with(bytes, &default_reader)
-}
-
-fn default_reader(path: &str) -> Option<Vec<u8>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read(path).ok()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        None
-    }
+    import_idml_with(bytes, &|_| None)
 }
 
 /// Import with a custom reader for linked files (`path` → bytes).
@@ -68,7 +58,9 @@ pub fn import_idml_report(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u
     let mut lenient: HashMap<String, String> = HashMap::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| IdmlError::NotIdml(e.to_string()))?;
-        if f.is_dir() {
+        // A folder entry of the archive (the zip crate's own `is_dir`; spelled out so no file-system
+        // probe appears in this crate).
+        if f.name().ends_with('/') {
             continue;
         }
         let name = f.name().to_string();
@@ -116,6 +108,14 @@ pub fn import_idml_report(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u
     Ok(Imported { document, warnings })
 }
 
+/// View Preferences › Ruler Origin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RulerOrigin {
+    Spread,
+    Page,
+    Spine,
+}
+
 /// A package part name in the form the lookup compares: InDesign and other IDML writers differ
 /// in percent-encoding, case, path separators and a leading `./` or `/`.
 fn normalize_part_name(name: &str) -> String {
@@ -159,6 +159,8 @@ struct ItemCtx {
 
 struct Importer<'r> {
     read_link: &'r dyn Fn(&str) -> Option<Vec<u8>>,
+    /// View Preferences › Ruler Origin: where a guide's Location is measured from.
+    ruler_origin: RulerOrigin,
     next_id: u64,
     settings: DocSettings,
     default_margins: Option<(Margins, Columns)>,
@@ -242,6 +244,40 @@ fn nums(s: &str) -> Vec<f64> {
     s.split_whitespace().filter_map(|v| v.parse().ok()).collect()
 }
 
+/// The viewBox size of an SVG whose root has a viewBox but no width/height (percentages count as
+/// none): InDesign places such a file at one viewBox unit to the point.
+fn svg_viewbox_size(data: &[u8]) -> Option<(f64, f64)> {
+    use quick_xml::events::Event;
+    if data.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'<') {
+        return None;
+    }
+    let mut r = quick_xml::Reader::from_reader(data);
+    let mut buf = Vec::new();
+    let root = loop {
+        match r.read_event_into(&mut buf).ok()? {
+            Event::Start(e) | Event::Empty(e) => break e.into_owned(),
+            Event::Eof => return None,
+            _ => buf.clear(),
+        }
+    };
+    if root.local_name().as_ref() != b"svg" {
+        return None;
+    }
+    let attr = |name: &[u8]| {
+        root.attributes().with_checks(false).flatten().find(|a| a.key.as_ref() == name).and_then(|a| a.unescape_value().ok().map(|v| v.to_string()))
+    };
+    let absolute = |name: &[u8]| attr(name).is_some_and(|v| !v.trim().ends_with('%'));
+    if absolute(b"width") || absolute(b"height") {
+        return None;
+    }
+    let vb: Vec<f64> =
+        attr(b"viewBox")?.split(|c: char| c.is_whitespace() || c == ',').filter(|v| !v.is_empty()).filter_map(|v| v.parse().ok()).collect();
+    match vb[..] {
+        [_, _, w, h] if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 => Some((w, h)),
+        _ => None,
+    }
+}
+
 fn parse_affine(s: Option<&str>) -> Affine {
     match s.map(nums) {
         Some(v) if v.len() == 6 => Affine::new([v[0], v[1], v[2], v[3], v[4], v[5]]),
@@ -275,6 +311,7 @@ impl<'r> Importer<'r> {
         styles.paragraph.iter_mut().for_each(|s| s.based_on = None);
         Importer {
             read_link,
+            ruler_origin: RulerOrigin::Spread,
             next_id: 0,
             settings: DocSettings::default(),
             default_margins: None,
@@ -362,6 +399,11 @@ impl<'r> Importer<'r> {
                     if let Some(v) = e.num("CursorKeyIncrement") {
                         self.settings.keyboard_increment = v;
                     }
+                    self.ruler_origin = match e.get("RulerOrigin") {
+                        Some("PageOrigin") => RulerOrigin::Page,
+                        Some("SpineOrigin") => RulerOrigin::Spine,
+                        _ => RulerOrigin::Spread,
+                    };
                 }
                 "GridPreference" => self.grid_prefs(e),
                 "PasteboardPreference" => {
@@ -1235,6 +1277,12 @@ impl<'r> Importer<'r> {
         }
         a.stroke_tint = tint(e.num("StrokeTint"));
         a.stroke_weight = e.num("StrokeWeight");
+        // Text strokes are centred on the outline or lie outside it, behind the fill.
+        a.stroke_behind_fill = e.prop("StrokeAlignment").and_then(|v| match v.trim() {
+            "OutsideAlignment" => Some(true),
+            "CenterAlignment" => Some(false),
+            _ => None,
+        });
         a.capitalization = e.prop("Capitalization").and_then(|v| names::caps_in(v.trim()));
         a.position = e.prop("Position").and_then(|v| names::position_in(v.trim()));
         a.underline = e.boolean("Underline");
@@ -1965,6 +2013,33 @@ impl<'r> Importer<'r> {
 
     // ---------- spreads and items ----------
 
+    /// Ruler guides of a `<Page>` (its `<Guide>` children), `page` its rectangle in our spread
+    /// coordinates. A guide's Location is measured from the ruler origin: the spread's top left, the
+    /// page's, or the spine. Fit to Page off: the guide crosses the spread.
+    fn guides_of(&self, p: &El, page: Rect, spine: f64) -> Vec<Guide> {
+        p.find_all("Guide")
+            .filter_map(|g| {
+                let at = g.num("Location").filter(|v| v.is_finite() && v.abs() < 1e7)?;
+                let orientation = if g.get("Orientation") == Some("Horizontal") { Orientation::Horizontal } else { Orientation::Vertical };
+                let position = match (orientation, self.ruler_origin) {
+                    (Orientation::Horizontal, RulerOrigin::Page) => page.y0 + at,
+                    (Orientation::Horizontal, _) => at,
+                    (Orientation::Vertical, RulerOrigin::Page) => page.x0 + at,
+                    (Orientation::Vertical, RulerOrigin::Spine) => spine + at,
+                    (Orientation::Vertical, RulerOrigin::Spread) => at,
+                };
+                Some(Guide {
+                    orientation,
+                    position,
+                    spread: g.get("FitToPage") == Some("false"),
+                    locked: g.get("Locked") == Some("true"),
+                    layer: g.get("ItemLayer").and_then(|l| self.layer_ids.get(l)).copied(),
+                    liquid: false,
+                })
+            })
+            .collect()
+    }
+
     fn spread(&mut self, e: &El, id: SpreadId, master: bool) -> Spread {
         let facing = self.settings.facing_pages;
         // Page rectangles in IDML spread coordinates.
@@ -1982,6 +2057,9 @@ impl<'r> Importer<'r> {
         let min_y = pages.iter().map(|(r, _)| r.y0).fold(f64::INFINITY, f64::min);
         let (min_x, min_y) = if min_x.is_finite() { (min_x, min_y) } else { (0.0, 0.0) };
         let shift = Affine::translate((-min_x, -min_y));
+        // The spine: between a left and a right page (else the spread's left edge).
+        let spine = pages.iter().map(|(r, _)| r.x0 - min_x).filter(|x| *x > 1e-6).fold(f64::INFINITY, f64::min);
+        let spine = if spine.is_finite() && facing { spine } else { 0.0 };
         let show = e.get("ShowMasterItems") != Some("false");
         let first_abs: usize = self.spreads.iter().map(|s| s.pages.len()).sum();
         let mut out_pages = Vec::new();
@@ -2014,7 +2092,7 @@ impl<'r> Importer<'r> {
                 parent,
                 side,
                 overridden: vec![],
-                guides: Vec::<Guide>::new(),
+                guides: self.guides_of(p, Rect::new(r.x0 - min_x, r.y0 - min_y, r.x1 - min_x, r.y1 - min_y), spine),
                 show_parent_items: show,
                 liquid: Default::default(),
                 transition: None,
@@ -2158,6 +2236,7 @@ impl<'r> Importer<'r> {
         it.name = e.get("Name").filter(|n| *n != "$ID/").unwrap_or("").to_string();
         it.locked = e.get("Locked") == Some("true");
         it.hidden = e.get("Visible") == Some("false");
+        it.overrides = e.get("OverriddenPageItem").and_then(|s| self.item_ids.get(s)).copied().filter(|i| self.is_parent_item(*i));
         it.nonprinting = e.get("Nonprinting") == Some("true");
         it.object_style = e
             .get("AppliedObjectStyle")
@@ -2367,7 +2446,7 @@ impl<'r> Importer<'r> {
         let size = ((r - l).abs(), (b - t).abs());
         let link = g.find("Link");
         let uri = link.and_then(|k| k.get("LinkResourceURI")).map(uri_to_path);
-        let graphic = |asset| {
+        let graphic = |asset, size| {
             Content::Graphic(designcraft_doc::Graphic {
                 asset,
                 size,
@@ -2384,13 +2463,17 @@ impl<'r> Importer<'r> {
         {
             // Every placement of a linked file shares one asset; read the file once.
             if let Some(id) = self.linked_assets.get(p) {
-                return graphic(*id);
+                let size = self.assets.get(id).and_then(|a| svg_viewbox_size(&a.data)).unwrap_or(size);
+                return graphic(*id, size);
             }
             if let Some(d) = (self.read_link)(p) {
                 data = d;
                 read_from = Some(p.clone());
             }
         }
+        // InDesign draws a viewBox-only SVG at one unit to the point: its GraphicBounds are the
+        // art's bounds, which can overhang the viewBox, so they must not size the viewBox.
+        let size = svg_viewbox_size(&data).unwrap_or(size);
         let (mime, px) = sniff_image(&data);
         let mime = mime.map(str::to_string).unwrap_or_else(|| match link.and_then(|k| k.get("LinkResourceFormat")).unwrap_or("") {
             f if f.contains("JPEG") => "image/jpeg".into(),
@@ -2412,7 +2495,7 @@ impl<'r> Importer<'r> {
         if let Some(p) = read_from {
             self.linked_assets.insert(p, id);
         }
-        graphic(id)
+        graphic(id, size)
     }
 
     fn link_threads(&mut self) {

@@ -364,12 +364,25 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
     if let Some(sw) = sw.as_ref().filter(|w| !w.hidden && !w.locked) {
         let cur = if stroke { stroke_tint } else { fill_tint };
         let mut tint = cur * 100.0;
+        let mut commit = None;
         ui.horizontal(|ui| {
             ui.label("T");
-            if ui.add(egui::Slider::new(&mut tint, 0.0..=100.0).suffix("%").integer()).drag_stopped() {
-                let _ = super::apply_swatch(app, stroke, &sw.name, Some(tint / 100.0));
+            // The slider applies on release. The field keeps typed text while it has focus (the
+            // tint is read back from the document every frame) and applies it, clamped, on Enter
+            // or when it loses focus.
+            ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(60.0);
+            if ui.add(egui::Slider::new(&mut tint, 0.0..=100.0).integer().show_value(false)).drag_stopped() {
+                commit = Some(tint);
+            }
+            if let Some(v) =
+                crate::widgets::NumField::number("color_tint", Some(f64::from(cur) * 100.0), "%", 0).width(44.0).range(0.0, 100.0).show(ui)
+            {
+                commit = Some(v as f32);
             }
         });
+        if let Some(v) = commit {
+            let _ = super::apply_swatch(app, stroke, &sw.name, Some(v / 100.0));
+        }
     }
     let mut send: Option<serde_json::Value> = None;
     match mode {

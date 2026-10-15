@@ -330,7 +330,7 @@ pub fn relative_between(from_dir: &Path, target: &Path) -> String {
 }
 
 pub fn fingerprint_of(path: &Path) -> Option<Fingerprint> {
-    Some(fingerprint_from(&std::fs::metadata(path).ok()?))
+    Some(fingerprint_from(&crate::io::metadata(path).ok()?))
 }
 
 /// Size and modification time (whole seconds) from a file's metadata.

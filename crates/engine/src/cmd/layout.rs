@@ -88,7 +88,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let count = p.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 9999) as usize;
                 let st = s.doc()?;
                 let n = st.doc.page_count();
-                let after = p.get("after").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(n - 1);
+                let after = p.get("after").and_then(Value::as_u64).map(|v| usize::try_from(v).unwrap_or(usize::MAX)).unwrap_or(n.saturating_sub(1));
                 let parent = parent_ref(&st.doc, p.get("parent")).unwrap_or_else(|| st.doc.parents.first().map(|x| x.id));
                 s.edit(|d, _| {
                     let ids = d.insert_pages(Some(after), count, parent)?;
@@ -476,11 +476,16 @@ pub fn specs() -> Vec<CommandSpec> {
                 let start = page - 1;
                 let p = p.clone();
                 s.edit(|d, _| {
+                    // The settings the command does not name stay as the section was: read it
+                    // before the list is rebuilt (#717).
+                    let existing = d.sections.iter().find(|x| x.start == start).cloned();
                     d.sections.retain(|x| x.start != start || start == 0);
                     if p.get("remove").and_then(Value::as_bool).unwrap_or(false) && start != 0 {
+                        // The pages after it follow the previous section's numbers again.
+                        d.repaginate();
                         return ok();
                     }
-                    let mut sec = d.sections.iter().find(|x| x.start == start).cloned().unwrap_or(designcraft_doc::Section {
+                    let mut sec = existing.unwrap_or(designcraft_doc::Section {
                         start,
                         start_number: None,
                         style: Default::default(),
@@ -508,6 +513,8 @@ pub fn specs() -> Vec<CommandSpec> {
                     d.sections.retain(|x| x.start != start);
                     d.sections.push(sec);
                     d.sections.sort_by_key(|x| x.start);
+                    // Facing pages take their sides from their numbers: odd on the right.
+                    d.repaginate();
                     Ok(json!({"names": (0..d.page_count()).map(|i| d.page_name(i)).collect::<Vec<_>>()}))
                 })
             }
@@ -1034,6 +1041,28 @@ mod page_numbering_view_tests {
         assert_eq!(s.resolve_page("1"), Some(0));
         assert_eq!(s.resolve_page("9"), None);
     }
+
+    /// `layout.section` edits one named setting; the others stay as the section was (#717).
+    #[test]
+    fn updating_a_section_keeps_settings_the_command_does_not_name() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"pages": 4})).unwrap();
+        s.execute(
+            "layout.section",
+            &json!({"page": 2, "startNumber": 1, "style": "lowerRoman", "prefix": "A-", "includePrefix": true, "marker": "First"}),
+        )
+        .unwrap();
+        assert_eq!(s.page_label(1), "A-i");
+        s.execute("layout.section", &json!({"page": 2, "marker": "Second"})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        let sec = d.sections.iter().find(|x| x.start == 1).expect("the page-2 section is still the only one there");
+        assert_eq!(sec.marker, "Second");
+        assert_eq!(sec.start_number, Some(1), "startNumber is kept");
+        assert_eq!(sec.style, designcraft_doc::NumberStyle::LowerRoman, "style is kept");
+        assert_eq!(sec.prefix, "A-", "prefix is kept");
+        assert!(sec.include_prefix, "includePrefix is kept");
+        assert_eq!(s.page_label(1), "A-i");
+    }
 }
 
 #[cfg(test)]
@@ -1058,5 +1087,91 @@ mod adjust_tests {
         s.execute("layout.marginsAndColumns", &json!({"margins": 36})).unwrap();
         let b2 = s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().bounds();
         assert_eq!(b, b2);
+    }
+}
+
+#[cfg(test)]
+mod section_side_tests {
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// Each spread's pages as (name, side), side `L`, `R` or `S`.
+    fn spreads(s: &Session) -> Vec<Vec<(String, char)>> {
+        let d = &s.doc().unwrap().doc;
+        let mut abs = 0;
+        d.spreads
+            .iter()
+            .map(|sp| {
+                sp.pages
+                    .iter()
+                    .map(|p| {
+                        let side = match p.side {
+                            designcraft_doc::PageSide::Left => 'L',
+                            designcraft_doc::PageSide::Right => 'R',
+                            designcraft_doc::PageSide::Single => 'S',
+                        };
+                        abs += 1;
+                        (d.page_name(abs - 1), side)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn pages(v: &[&[(&str, char)]]) -> Vec<Vec<(String, char)>> {
+        v.iter().map(|sp| sp.iter().map(|(n, c)| (n.to_string(), *c)).collect()).collect()
+    }
+
+    #[test]
+    fn a_section_starting_at_one_on_a_left_page_moves_it_to_the_right() {
+        // Chris Nielsen's "Numbering Page Sections" (7:03): with the spread 8–9 selected, the
+        // section starts on page 8, which becomes a lone right-hand page 1; the pages after it
+        // shuffle and their objects go with them. Undo puts them back.
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 612, "height": 792, "facingPages": true, "pages": 10})).unwrap();
+        let id = s.execute("frame.create", &json!({"spread": 4, "rect": [700, 100, 800, 200], "content": "text", "text": "TOPIC"})).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let page_of = |s: &Session| {
+            let d = &s.doc().unwrap().doc;
+            d.page_of_item(designcraft_doc::ItemId(id)).unwrap()
+        };
+        assert_eq!(page_of(&s), 8, "page 9, the right page of the spread 8–9");
+        let before = spreads(&s);
+        s.execute("layout.section", &json!({"page": 8, "startNumber": 1})).unwrap();
+        assert_eq!(
+            spreads(&s),
+            pages(&[
+                &[("1", 'R')],
+                &[("2", 'L'), ("3", 'R')],
+                &[("4", 'L'), ("5", 'R')],
+                &[("6", 'L'), ("7", 'R')],
+                &[("1", 'R')],
+                &[("2", 'L'), ("3", 'R')],
+            ])
+        );
+        assert_eq!(page_of(&s), 8, "the object stays on its page, now the left page of a spread");
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(spreads(&s), before);
+        // On a right page (the video's page 9) nothing moves; an even start on a right page moves
+        // it to the left.
+        s.execute("layout.section", &json!({"page": 9, "startNumber": 1})).unwrap();
+        assert_eq!(spreads(&s)[4], pages(&[&[("8", 'L'), ("1", 'R')]])[0]);
+        s.execute("layout.section", &json!({"page": 9, "startNumber": 2})).unwrap();
+        assert_eq!(spreads(&s)[4..], pages(&[&[("8", 'L')], &[("2", 'L'), ("3", 'R')]]));
+        // Removing the section numbers the pages on from 9 again.
+        s.execute("layout.section", &json!({"page": 9, "remove": true})).unwrap();
+        assert_eq!(spreads(&s), before);
+    }
+
+    #[test]
+    fn single_sided_documents_keep_their_pages() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"facingPages": false, "pages": 4})).unwrap();
+        s.execute("layout.section", &json!({"page": 2, "startNumber": 1})).unwrap();
+        let sp = spreads(&s);
+        assert_eq!(sp.len(), 4);
+        assert!(sp.iter().all(|p| p.len() == 1 && p[0].1 == 'S'), "{sp:?}");
     }
 }

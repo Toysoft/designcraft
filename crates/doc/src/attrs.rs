@@ -190,6 +190,13 @@ impl Digits {
     }
 }
 
+/// Does `c` belong to a script that capitalizes the first letter of sentences, words and headings?
+/// Georgian doesn't: Unicode maps Mkhedruli to Mtavruli capitals, but those are only for all-caps
+/// text, never for a sentence's, a title's or an index heading's first letter.
+pub fn capitalizes(c: char) -> bool {
+    !matches!(c, '\u{10A0}'..='\u{10FF}' | '\u{1C90}'..='\u{1CBF}' | '\u{2D00}'..='\u{2D2F}')
+}
+
 /// The BCP 47 tag of a language name as InDesign and IDML write it ("English: USA", "Chinese:
 /// Simplified", or a locale code such as "de_DE_2006"), for the shaper's localized forms (`locl`)
 /// and everything that depends on the language (quotes, hyphenation and spelling, line breaking,
@@ -272,6 +279,7 @@ pub fn language_tag(language: &str) -> Option<&'static str> {
         "persian" | "farsi" => "fa",
         "urdu" => "ur",
         "hebrew" => "he",
+        "georgian" => "ka",
         _ => return None,
     })
 }
@@ -753,6 +761,9 @@ attr_set! {
         stroke: String = "[None]".into(),
         stroke_tint: f32 = 1.0,
         stroke_weight: f64 = 1.0,
+        /// Stroke behind fill: the stroke is painted under the fill and lies wholly outside the
+        /// letters at its full weight, so the letters keep their shape. Off, it straddles the outline.
+        stroke_behind_fill: bool = false,
         capitalization: Capitalization = Capitalization::Normal,
         position: Position = Position::Normal,
         underline: bool = false,
@@ -990,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn stroke_behind_fill_is_saved_only_when_set() {
+        assert!(!CharProps::default().stroke_behind_fill);
+        assert_eq!(serde_json::to_value(CharAttrs::default()).unwrap(), serde_json::json!({}));
+        let mut a = CharAttrs::default();
+        a.set_json("strokeBehindFill", &serde_json::json!(true)).unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v, serde_json::json!({"strokeBehindFill": true}));
+        assert_eq!(serde_json::from_value::<CharAttrs>(v).unwrap(), a);
+        let mut p = CharProps::default();
+        p.apply(&a);
+        assert!(p.stroke_behind_fill);
+    }
+
+    #[test]
     fn digits_map_to_their_script() {
         assert_eq!(Digits::Default.map('7', "Arabic"), '7');
         assert_eq!(Digits::Hindi.map('3', ""), '\u{0663}');
@@ -1004,6 +1029,7 @@ mod tests {
         assert_eq!(language_tag("English: USA"), Some("en-US"));
         assert_eq!(language_tag("English: Australian"), Some("en"));
         assert_eq!(language_tag("Turkish"), Some("tr"));
+        assert_eq!(language_tag("Georgian"), Some("ka"));
         assert_eq!(language_tag("Japanese"), Some("ja"));
         assert_eq!(language_tag("Korean"), Some("ko"));
         assert_eq!(language_tag("Chinese"), Some("zh"));

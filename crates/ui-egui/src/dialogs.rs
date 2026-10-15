@@ -1169,7 +1169,9 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             None => crate::i18n::tr(&app.ui.language, "Dialog"),
         },
     };
-    egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
+    let host = egui::Id::new("dialog");
+    let instance = host.with(&d.id);
+    crate::modal_drag::modal(ctx, host, instance).show(ctx, |ui| {
         let frame_margin = egui::Frame::popup(ui.style()).total_margin().sum();
         let available = (ctx.content_rect().size() - frame_margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
         let preferred_width: f32 = match d.id.as_str() {
@@ -1181,6 +1183,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         let width = preferred_width.min(available.x);
         ui.set_min_width(380.0_f32.min(width));
         ui.set_max_width(width);
+        let title_top = ui.cursor().top();
         if crate::i18n::is_rtl(&app.ui.language) {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1190,6 +1193,12 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         } else {
             crate::rtl::label(ui, egui::RichText::new(title).font(semibold(16.0)));
         }
+        let margin = egui::Frame::popup(ui.style()).inner_margin;
+        let title_row = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left() - margin.leftf(), title_top - margin.topf()),
+            egui::pos2(ui.max_rect().right() + margin.rightf(), ui.min_rect().bottom()),
+        );
+        crate::modal_drag::title_drag(ui, instance, title_row);
         ui.add_space(10.0);
         // Keep the title and action buttons outside the scrollable body. Oversized
         // forms remain reachable at large UI scales, without shrinking their text.
@@ -2073,7 +2082,7 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             if let Some(target) = d.fields.get("target").and_then(Value::as_u64) {
                 app.activate_import_target(&crate::ImportRequest { purpose: "place".into(), target: Some(target) })?;
             }
-            app.open_file("file.place", json!({"path": d.s("path"), "pdfPage": d.n("page").unwrap_or(1.0).max(1.0) as u64, "pdfCrop": if crop.is_empty() { "crop".to_string() } else { crop }}))
+            app.place_file(json!({"path": d.s("path"), "pdfPage": d.n("page").unwrap_or(1.0).max(1.0) as u64, "pdfCrop": if crop.is_empty() { "crop".to_string() } else { crop }}))
         }
         "print" => {
             let pages = if d.s("range") == "all" { Value::Null } else { json!(d.s("pages")) };
@@ -3287,6 +3296,9 @@ fn character_color(lang: &str, ui: &mut egui::Ui, d: &mut Dialog, cf: &CharField
         ui.end_row();
         crate::rtl::label(ui, crate::i18n::tr(lang, "Weight:"));
         char_number(ui, d, cf, "strokeWeight", " pt", 1.0, (0.0, 800.0));
+        ui.end_row();
+        ui.label("");
+        char_check(ui, d, cf, "strokeBehindFill", crate::i18n::tr(lang, "Stroke Behind Fill"));
         ui.end_row();
     });
 }
@@ -6013,5 +6025,70 @@ mod tests {
         }
         assert_eq!(crate::menus::shortcut_of(&app, "app.palette").as_deref(), Some("Cmd+K"));
         assert_eq!(d.s("recording"), "", "recording ends with the recorded shortcut");
+    }
+
+    #[test]
+    fn dragging_the_title_moves_the_dialog_and_dragging_the_body_does_not() {
+        use egui::{Event, Modifiers, PointerButton, Pos2, vec2};
+        use egui_kittest::{Harness, kittest::Queryable};
+        fn drag(h: &mut Harness<'static, DesignApp>, from: Pos2, to: Pos2) {
+            h.event(Event::PointerMoved(from));
+            h.run_steps(1);
+            h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+            for step in 1..=8 {
+                h.event(Event::PointerMoved(from + (to - from) * (step as f32 / 8.0)));
+                h.run_steps(1);
+            }
+            h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            h.run_steps(3);
+        }
+        let rect = |h: &Harness<'static, DesignApp>| h.ctx.memory(|m| m.area_rect(egui::Id::new("dialog"))).unwrap();
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.ui.dialog = Some(Dialog::new("insertTable", Value::Null));
+        let mut ready = false;
+        let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            move |ui, app: &mut DesignApp| {
+                if !ready {
+                    crate::theme::install_fonts(ui.ctx(), &app.ui.language);
+                    crate::theme::apply(ui.ctx(), &crate::theme::Tokens::for_brightness(crate::theme::Brightness::default()));
+                    ready = true;
+                    return;
+                }
+                show(app, ui.ctx());
+            },
+            app,
+        );
+        h.run_steps(4);
+        let centred = rect(&h);
+        assert!((centred.center() - egui::pos2(600.0, 400.0)).length() < 1.0, "{centred:?}");
+        assert!(centred.width() < 1000.0 && centred.height() < 700.0, "the area is the dialog, not the backdrop: {centred:?}");
+
+        let title = h.get_by_label("Create Table").rect().center();
+        drag(&mut h, title, title + vec2(100.0, 60.0));
+        let moved = rect(&h);
+        assert!((moved.min - centred.min - vec2(100.0, 60.0)).length() < 2.0, "{centred:?} -> {moved:?}");
+
+        let body = egui::pos2(moved.right() - 40.0, moved.center().y);
+        drag(&mut h, body, body + vec2(-150.0, 80.0));
+        assert_eq!(rect(&h), moved, "a drag in the body leaves the dialog in place");
+
+        // The title row stays inside the top edge.
+        let title = h.get_by_label("Create Table").rect().center();
+        drag(&mut h, title, title - vec2(0.0, 1000.0));
+        assert!(rect(&h).top().abs() < 1.0, "{:?}", rect(&h));
+
+        // Opened again, the dialog starts centred.
+        h.state_mut().ui.dialog = None;
+        h.run_steps(2);
+        h.state_mut().ui.dialog = Some(Dialog::new("insertTable", Value::Null));
+        h.run_steps(4);
+        assert!((rect(&h).center() - centred.center()).length() < 1.0, "{:?}", rect(&h));
+
+        // Past the left edge, about 100 px of the title row stays inside.
+        let title = h.get_by_label("Create Table").rect().center();
+        drag(&mut h, title, title - vec2(900.0, 0.0));
+        assert!((rect(&h).right() - 100.0).abs() < 2.0, "{:?}", rect(&h));
     }
 }

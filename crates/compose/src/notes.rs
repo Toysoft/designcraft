@@ -5,6 +5,11 @@
 //! the first footnote and the space between footnotes). A line that would collide moves to the
 //! next column with its footnotes. After the story is laid out the footnotes of each column are
 //! stacked against the column bottom, with the separator rule above the first one.
+//!
+//! The footnotes of a column read as one text: the first footnote's first baseline sits at the
+//! First Baseline offset below the top of the footnote area, and each later footnote's first
+//! baseline sits its first line's leading (plus Space Between Footnotes) below the previous
+//! footnote's last baseline. Only the last footnote's descent counts toward the area's height.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -22,8 +27,36 @@ pub(crate) struct Placed {
     k: usize,
     fi: usize,
     col: usize,
-    h: f64,
+    m: NoteMetrics,
     text: Arc<ComposedStory>,
+}
+
+/// Vertical metrics of a composed footnote, relative to the top of its composed text.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NoteMetrics {
+    /// First and last baselines (the first one includes the First Baseline offset).
+    first: f64,
+    last: f64,
+    /// Leading of the first line: its baseline's distance below the previous footnote's last.
+    lead: f64,
+    /// Descent of the last line.
+    descent: f64,
+}
+
+/// Height of footnotes stacked baseline to baseline, from the top of the footnote area to the
+/// last footnote's descent.
+fn stack_height<'a>(notes: impl IntoIterator<Item = &'a NoteMetrics>, space_between: f64) -> f64 {
+    let mut h: Option<f64> = None;
+    let mut descent = 0.0;
+    for m in notes {
+        let last = match h {
+            None => m.last,
+            Some(prev) => prev + space_between + m.lead + (m.last - m.first),
+        };
+        h = Some(last);
+        descent = m.descent;
+    }
+    h.map_or(0.0, |h| h + descent)
 }
 
 pub(crate) struct Notes {
@@ -36,7 +69,7 @@ pub(crate) struct Notes {
     pub key: Option<usize>,
     pub placed: Vec<Placed>,
     /// Composed footnote text by (index, label, width).
-    cache: HashMap<(usize, String, u64), (Arc<ComposedStory>, f64)>,
+    cache: HashMap<(usize, String, u64), (Arc<ComposedStory>, NoteMetrics)>,
     notes: Vec<Arc<designcraft_doc::Footnote>>,
 }
 
@@ -88,7 +121,7 @@ impl Notes {
         v
     }
 
-    fn compose(&mut self, doc: &Document, k: usize, w: f64, f: &FrameSpec, opts: &ComposeOptions) -> (Arc<ComposedStory>, f64) {
+    fn compose(&mut self, doc: &Document, k: usize, w: f64, f: &FrameSpec, opts: &ComposeOptions) -> (Arc<ComposedStory>, NoteMetrics) {
         let o = &doc.footnote_options;
         let label = format!("{}{}", o.label(self.numbers[k], true), o.separator);
         let key = (k, label.clone(), w.to_bits());
@@ -102,6 +135,7 @@ impl Notes {
             vertical: false,
             exclusions: vec![],
             page_name: f.page_name.clone(),
+            section_marker: f.section_marker.clone(),
             page: f.page,
             grid: None,
             left_page: f.left_page,
@@ -109,14 +143,19 @@ impl Notes {
         };
         let nopts = ComposeOptions {
             page_name: opts.page_name.clone(),
+            section_marker: opts.section_marker.clone(),
             page: opts.page,
             running: opts.running.clone(),
             label: Some(label),
             xrefs: opts.xrefs.clone(),
         };
         let cs = crate::compose(doc, &self.notes[k].text, std::slice::from_ref(&spec), &nopts);
-        let h = cs.frames.first().and_then(|ft| ft.lines.last()).map_or(0.0, |l| l.baseline + l.descent);
-        let v = (Arc::new(cs), h);
+        let lines = cs.frames.first().map(|ft| ft.lines.as_slice()).unwrap_or_default();
+        let m = match (lines.first(), lines.last()) {
+            (Some(a), Some(z)) => NoteMetrics { first: a.baseline, last: z.baseline, lead: a.leading, descent: z.descent },
+            _ => NoteMetrics::default(),
+        };
+        let v = (Arc::new(cs), m);
         self.cache.insert(key, v.clone());
         v
     }
@@ -125,25 +164,20 @@ impl Notes {
     #[allow(clippy::too_many_arguments)]
     pub fn reserve(&mut self, doc: &Document, fi: usize, col: usize, extra: &[usize], w: f64, f: &FrameSpec, opts: &ComposeOptions) -> f64 {
         let o = &doc.footnote_options;
-        let mut n = 0usize;
-        let mut h = 0.0;
-        for p in self.placed.iter().filter(|p| p.fi == fi && p.col == col) {
-            n += 1;
-            h += p.h;
-        }
+        let (space_between, space_before) = (o.space_between, o.space_before);
+        let mut ms: Vec<NoteMetrics> = self.placed.iter().filter(|p| p.fi == fi && p.col == col).map(|p| p.m).collect();
         for &k in extra {
-            n += 1;
-            h += self.compose(doc, k, w, f, opts).1;
+            ms.push(self.compose(doc, k, w, f, opts).1);
         }
-        if n == 0 { 0.0 } else { h + o.space_between * (n - 1) as f64 + o.space_before }
+        if ms.is_empty() { 0.0 } else { stack_height(&ms, space_between) + space_before }
     }
 
     pub fn place(&mut self, doc: &Document, k: usize, fi: usize, col: usize, w: f64, f: &FrameSpec, opts: &ComposeOptions) {
         if self.placed.iter().any(|p| p.k == k) {
             return;
         }
-        let (text, h) = self.compose(doc, k, w, f, opts);
-        self.placed.push(Placed { k, fi, col, h, text });
+        let (text, m) = self.compose(doc, k, w, f, opts);
+        self.placed.push(Placed { k, fi, col, m, text });
     }
 
     /// Stack each column's footnotes against its bottom, rule above the first.
@@ -159,7 +193,7 @@ impl Notes {
         for (fi, ci) in groups {
             let (Some(_), Some(col)) = (frames.get(fi), cols.get(fi).and_then(|c| c.get(ci))) else { continue };
             let here: Vec<&Placed> = self.placed.iter().filter(|p| p.fi == fi && p.col == ci).collect();
-            let total: f64 = here.iter().map(|p| p.h).sum::<f64>() + o.space_between * (here.len() - 1) as f64;
+            let total = stack_height(here.iter().map(|p| &p.m), o.space_between);
             let top = col.y1 - total;
             let ft = &mut out.frames[fi];
             if o.rule.on && o.rule.weight > 0.0 {
@@ -171,20 +205,29 @@ impl Notes {
                     tint: o.rule.tint,
                 });
             }
-            let mut y = top;
+            // Previous footnote's last baseline and bottom.
+            let mut prev: Option<(f64, f64)> = None;
             for p in here {
-                let note = &story.notes[p.k];
+                let Some(note) = story.notes.get(p.k) else { continue };
+                let (y, y0) = match prev {
+                    None => (top, top),
+                    Some((last, bottom)) => {
+                        let first = last + o.space_between + p.m.lead;
+                        (first - p.m.first, (bottom + o.space_between).min(first))
+                    }
+                };
+                let y1 = y + p.m.last + p.m.descent;
                 ft.notes.push(PlacedNote {
                     id: note.id,
                     index: p.k,
                     column: ci as u32,
                     label: o.label(self.numbers[p.k], true),
                     origin: Point::new(col.x0, y),
-                    rect: Rect::new(col.x0, y, col.x1, y + p.h),
+                    rect: Rect::new(col.x0, y0, col.x1, y1),
                     text: p.text.clone(),
                     source: Arc::from(note.text.text.as_str()),
                 });
-                y += p.h + o.space_between;
+                prev = Some((y + p.m.last, y1));
             }
         }
     }

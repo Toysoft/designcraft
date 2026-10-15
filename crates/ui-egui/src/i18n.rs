@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::OnceLock};
 mod ar;
 mod it;
 mod ja;
+mod ka;
 mod pt_br;
 mod uk;
 
@@ -21,6 +22,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("pt-br", "Português (Brasil)"),
     ("it", "Italiano"),
     ("uk", "Українська"),
+    ("ka", "ქართული"),
 ];
 
 /// English → [German, French, Spanish, Japanese, Simplified Chinese].
@@ -55,6 +57,23 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    (
+        "Bulleted & Numbered Lists",
+        [
+            "Aufzählungszeichen und nummerierte Listen",
+            "Listes à puces et numérotées",
+            "Listas con viñetas y numeradas",
+            "箇条書き",
+            "项目符号列表和编号列表",
+        ],
+    ),
+    ("Current Page Number", ["Aktuelle Seitenzahl", "Numéro de page actuelle", "Número de página actual", "現在のページ番号", "当前页码"]),
+    ("Apply Color (,)", ["Farbe anwenden (,)", "Appliquer la couleur (,)", "Aplicar color (,)", "カラーを適用 (,)", "应用颜色 (,)"]),
+    ("Apply Gradient (.)", ["Verlauf anwenden (.)", "Appliquer le dégradé (.)", "Aplicar degradado (.)", "グラデーションを適用 (.)", "应用渐变 (.)"]),
+    ("View Options", ["Ansichtsoptionen", "Options d’affichage", "Opciones de visualización", "表示オプション", "视图选项"]),
+    ("Frame Edges", ["Rahmenkanten", "Bords du bloc", "Bordes del marco", "フレーム枠", "框架边缘"]),
+    ("Rulers", ["Lineale", "Règles", "Reglas", "定規", "标尺"]),
+    ("Hidden Characters", ["Verborgene Zeichen", "Caractères masqués", "Caracteres ocultos", "制御文字", "隐藏字符"]),
     ("Reverse Path", ["Pfadrichtung umkehren", "Inverser le tracé", "Invertir trazado", "パスの方向反転", "反转路径"]),
     ("Set Anchor", ["Ankerpunkt festlegen", "Définir le point d’ancrage", "Definir punto de ancla", "アンカーポイントを設定", "设置锚点"]),
     ("Clear", ["Löschen", "Effacer", "Borrar", "消去", "清除"]),
@@ -191,6 +210,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Buttons and Forms", ["Schaltflächen und Formulare", "Boutons et formulaires", "Botones y formularios", "ボタンとフォーム", "按钮和表单"]),
     ("Liquid Layout", ["Flüssiges Layout", "Mise en page liquide", "Maquetación líquida", "リキッドレイアウト", "自适应版面"]),
     ("Workspace", ["Arbeitsbereich", "Espace de travail", "Espacio de trabajo", "ワークスペース", "工作区"]),
+    ("Editorial", ["Redaktion", "Éditorial", "Editorial", "エディトリアル", "编辑"]),
+    ("Object & Layout", ["Objekt und Layout", "Objet et mise en page", "Objeto y diseño", "オブジェクト＆レイアウト", "对象和版面"]),
+    ("Styles", ["Formate", "Styles", "Estilos", "スタイル", "样式"]),
+    ("Essentials Classic", ["Essentials Classic", "Essentials Classic", "Essentials Classic", "Essentials Classic", "基本功能（经典）"]),
     ("Split Window", ["Fenster teilen", "Fractionner la fenêtre", "Dividir ventana", "ウィンドウを分割", "拆分窗口"]),
     ("New Window", ["Neues Fenster", "Nouvelle fenêtre", "Nueva ventana", "新規ウィンドウ", "新建窗口"]),
     (
@@ -2456,6 +2479,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Inward", ["Inward", "Inward", "Inward", "Inward", "向内"]),
     ("Metrics", ["Metrics", "Metrics", "Metrics", "Metrics", "度量"]),
     ("Optical", ["Optical", "Optical", "Optical", "Optical", "视觉"]),
+    (
+        "Optical Margin Alignment",
+        ["Optischer Randausgleich", "Marges optiques", "Alineación de márgenes ópticos", "オプティカルマージン揃え", "视觉边距对齐"],
+    ),
     ("Applies to fill", ["Applies to fill", "Applies to fill", "Applies to fill", "Applies to fill", "应用于填色"]),
     ("Applies to text", ["Applies to text", "Applies to text", "Applies to text", "Applies to text", "应用于文本"]),
     ("Gray", ["Gray", "Gray", "Gray", "Gray", "灰度"]),
@@ -3014,6 +3041,7 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     static UKRAINIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static PORTUGUESE_BR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static ITALIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    static GEORGIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     if lang == "ar" {
         return ARABIC.get_or_init(|| ar::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
@@ -3029,6 +3057,9 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     }
     if lang == "it" {
         return ITALIAN.get_or_init(|| it::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
+    }
+    if lang == "ka" {
+        return GEORGIAN.get_or_init(|| ka::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
     if lang == "uk" {
         return UKRAINIAN.get_or_init(|| uk::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
@@ -3050,10 +3081,11 @@ pub(crate) fn ukrainian_catalog() -> Vec<&'static str> {
     uk::TABLE.iter().map(|(_, text)| *text).chain(uk::CONTEXT.iter().map(|(_, _, text)| *text)).collect()
 }
 
-/// Count captions in Ukrainian put the category before the value so every count uses
-/// a grammatical form; other languages keep the existing value-first caption.
+/// Count captions in Ukrainian and Georgian put the category before the value so every count
+/// uses one grammatical form (Georgian nouns stay singular after numerals: `გვერდი: 5`); other
+/// languages keep the existing value-first caption.
 pub fn count_label(lang: &str, noun: &str, count: usize) -> String {
-    if lang == "uk" { format!("{}: {count}", tr(lang, noun)) } else { format!("{count} {}", tr(lang, noun)) }
+    if matches!(lang, "uk" | "ka") { format!("{}: {count}", tr(lang, noun)) } else { format!("{count} {}", tr(lang, noun)) }
 }
 
 /// Localize reserved built-in style names only; user-defined names are document data.
@@ -3067,7 +3099,14 @@ pub fn style_name<'a>(lang: &str, name: &'a str) -> &'a str {
 /// Built-in workspace captions; custom workspace names remain unchanged.
 pub fn workspace_name<'a>(lang: &str, name: &'a str) -> &'a str {
     match name {
-        "Essentials" | "Advanced" | "Book" | "Digital Publishing" | "Interactive for PDF" | "Printing and Proofing" | "Typography" => tr(lang, name),
+        "Essentials"
+        | "Essentials Classic"
+        | "Advanced"
+        | "Book"
+        | "Digital Publishing"
+        | "Interactive for PDF"
+        | "Printing and Proofing"
+        | "Typography" => tr(lang, name),
         _ => name,
     }
 }
@@ -3099,8 +3138,11 @@ mod tests {
         for (key, expected) in uk::TABLE {
             assert_eq!(tr("uk", key), *expected, "uk: {key}");
         }
+        for (key, expected) in ka::TABLE {
+            assert_eq!(tr("ka", key), *expected, "ka: {key}");
+        }
         let unknown = String::from("A user-defined untranslated label");
-        for lang in ["uk", "ar", "pt-br", "it", "zh", "ja", "de", "fr", "es", "", "unknown"] {
+        for lang in ["uk", "ar", "pt-br", "it", "ka", "zh", "ja", "de", "fr", "es", "", "unknown"] {
             assert!(std::ptr::eq(tr(lang, &unknown), unknown.as_str()));
         }
     }
@@ -3183,6 +3225,29 @@ mod tests {
         assert_eq!(style_name("uk", "My layout style"), "My layout style");
         assert_eq!(workspace_name("uk", "Essentials"), "Основне");
         assert_eq!(workspace_name("uk", "My workspace"), "My workspace");
+    }
+
+    #[test]
+    fn georgian_catalog_preserves_placeholders_and_counts() {
+        let catalog: HashMap<_, _> = ka::TABLE.iter().copied().collect();
+        assert_eq!(catalog.len(), ka::TABLE.len(), "duplicate Georgian keys");
+        let placeholders = |s: &str| {
+            s.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name.to_owned())).collect::<std::collections::BTreeSet<_>>()
+        };
+        for (key, translation) in ka::TABLE {
+            assert!(!translation.trim().is_empty(), "empty {key}");
+            assert_eq!(placeholders(key), placeholders(translation), "placeholders: {key}");
+            assert_eq!(key.ends_with('…'), translation.ends_with('…'), "ellipsis: {key}");
+            // Georgian has no capitals in running text: Mtavruli never appears in the interface.
+            assert!(!translation.chars().any(|c| ('\u{1C90}'..='\u{1CBF}').contains(&c)), "Mtavruli: {key}");
+        }
+        assert_eq!(tr("ka", "File"), "ფაილი");
+        assert_eq!(tr("ka", "Save As…"), "შენახვა როგორც…");
+        assert_eq!(tr("ka", "Unknown label"), "Unknown label");
+        assert!(!is_rtl("ka"));
+        for n in [1, 2, 5, 21] {
+            assert_eq!(count_label("ka", "pages", n), format!("გვერდი: {n}"));
+        }
     }
 
     #[test]

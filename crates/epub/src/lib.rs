@@ -425,8 +425,14 @@ fn class_selector(tag: &str, class: &str) -> Option<String> {
     Some(selector)
 }
 
-/// One story as XHTML paragraphs.
+/// One story as XHTML paragraphs (anchored objects left out; see [`story_html_with`]).
 pub fn story_html(doc: &Document, sid: StoryId) -> String {
+    story_html_with(doc, sid, &mut |_| String::new())
+}
+
+/// One story as XHTML paragraphs, each anchored object written where it is anchored as the
+/// markup `object` returns for it.
+fn story_html_with(doc: &Document, sid: StoryId, object: &mut dyn FnMut(&designcraft_doc::AnchoredObject) -> String) -> String {
     let Some(st) = doc.story(sid) else { return String::new() };
     let (pc, cc) = (para_classes(&doc.styles), char_classes(&doc.styles));
     let mut out = String::new();
@@ -451,18 +457,32 @@ pub fn story_html(doc: &Document, sid: StoryId) -> String {
                 continue;
             }
             let raw = &st.text[a..b];
-            let t = if raw.chars().any(|c| designcraft_doc::vars::var_index(c).is_some()) {
-                let sub: String = raw
-                    .chars()
-                    .map(|c| match designcraft_doc::vars::var_index(c) {
-                        Some(i) => doc.variable_value(i, None).unwrap_or_default(),
-                        None => c.to_string(),
-                    })
-                    .collect();
-                story_markup(&sub)
-            } else {
-                story_markup(raw)
+            // Text with variables substituted; each anchored object's markup in place of its mark.
+            let text = |seg: &str| {
+                if seg.chars().any(|c| designcraft_doc::vars::var_index(c).is_some()) {
+                    let sub: String = seg
+                        .chars()
+                        .map(|c| match designcraft_doc::vars::var_index(c) {
+                            Some(i) => doc.variable_value(i, None).unwrap_or_default(),
+                            None => c.to_string(),
+                        })
+                        .collect();
+                    story_markup(&sub)
+                } else {
+                    story_markup(seg)
+                }
             };
+            let mut mark = st.text.get(..a).map_or(0, |t| t.matches(designcraft_doc::OBJECT_MARK).count());
+            let mut t = String::new();
+            for (i, seg) in raw.split(designcraft_doc::OBJECT_MARK).enumerate() {
+                if i > 0 {
+                    if let Some(o) = st.objects.get(mark) {
+                        t.push_str(&object(o));
+                    }
+                    mark += 1;
+                }
+                t.push_str(&text(seg));
+            }
             let (ctag, cls) = if f.style != story::NO_CHAR_STYLE {
                 let (tag, class) = export_mapping(&doc.styles, &f.style, true, &cc);
                 (tag, format!(" class=\"{}\"", xml_attr(&class)))
@@ -563,6 +583,50 @@ fn ext(mime: &str) -> &'static str {
     }
 }
 
+/// The markup for one graphic item: an `<img>`, or an HTML5 player for video and sound (with
+/// `true`), its file registered in `images` under the name `img_src` is given. `None` for an
+/// item that isn't a graphic or whose asset has no data.
+fn graphic_html<'a>(
+    doc: &'a Document,
+    it: &Item,
+    images: &mut BTreeMap<String, (&'a str, &'a [u8])>,
+    img_src: &dyn Fn(&str, &str, &[u8]) -> String,
+) -> Option<(String, bool)> {
+    let Content::Graphic(g) = &it.content else { return None };
+    let a = doc.assets.get(&g.asset)?;
+    if a.data.is_empty() {
+        return None;
+    }
+    let mime = safe_mime(&a.mime);
+    // Video and sound: an HTML5 player (with the poster, when there is one).
+    if let Some(kind) = designcraft_doc::media_kind(mime) {
+        let name = format!("media/{}.{}", g.asset.0, ext(mime));
+        images.insert(name.clone(), (mime, a.data.as_slice()));
+        let m = it.media.clone().unwrap_or_default();
+        let mut attrs = String::new();
+        for (on, attr) in [(m.controls, " controls=\"controls\""), (m.play_on_page_load, " autoplay=\"autoplay\""), (m.looping, " loop=\"loop\"")] {
+            if on {
+                attrs.push_str(attr);
+            }
+        }
+        if let Some(pa) = m.poster.and_then(|p| doc.assets.get(&p)) {
+            let poster_mime = safe_mime(&pa.mime);
+            let pn = format!("images/{}.{}", pa.id.0, ext(poster_mime));
+            images.insert(pn.clone(), (poster_mime, pa.data.as_slice()));
+            if kind == "video" {
+                attrs.push_str(&format!(" poster=\"{}\"", xml_attr(&img_src(&pn, poster_mime, &pa.data))));
+            }
+        }
+        let markup = format!("<{kind} src=\"{}\"{attrs}>{}</{kind}>", xml_attr(&img_src(&name, mime, &a.data)), xml_text(&a.name));
+        return Some((markup, true));
+    }
+    let name = format!("images/{}.{}", g.asset.0, ext(mime));
+    images.insert(name.clone(), (mime, a.data.as_slice()));
+    // Alt text from Object Export Options, else the file name.
+    let alt = if it.alt_text.is_empty() { a.name.as_str() } else { it.alt_text.as_str() };
+    Some((format!("<img src=\"{}\" alt=\"{}\"/>", xml_attr(&img_src(&name, mime, &a.data)), xml_attr(alt)), false))
+}
+
 /// The content in reading order as HTML sections and figures; `img_src` names each image
 /// (a package path, or a data URI for single-file HTML). Returns (body, images by name, table of
 /// contents).
@@ -587,50 +651,38 @@ fn body_html<'a>(
                         toc.push((anchor.clone(), first));
                     }
                 }
-                let _ = write!(body, "<section id=\"{anchor}\">\n{}</section>\n", story_html(doc, *sid));
+                // Anchored objects go where they are anchored: their graphics in the text, an
+                // above-line object as a block of its own.
+                let mut object = |o: &designcraft_doc::AnchoredObject| {
+                    let mut out = String::new();
+                    o.item.walk(&mut |it| {
+                        if let Some((markup, _)) = graphic_html(doc, it, &mut images, img_src) {
+                            out.push_str(&markup);
+                        }
+                    });
+                    match &o.position {
+                        designcraft_doc::AnchorPosition::AboveLine { align, .. } if !out.is_empty() => {
+                            let align = match align {
+                                designcraft_doc::anchored::AnchorAlign::Left => "left",
+                                designcraft_doc::anchored::AnchorAlign::Center => "center",
+                                designcraft_doc::anchored::AnchorAlign::Right => "right",
+                            };
+                            format!("<span class=\"anchored\" style=\"display:block;text-align:{align}\">{out}</span>")
+                        }
+                        _ => out,
+                    }
+                };
+                let _ = write!(body, "<section id=\"{anchor}\">\n{}</section>\n", story_html_with(doc, *sid, &mut object));
             }
             Block::Image(iid) => {
-                let Some(Content::Graphic(g)) = doc.item(*iid).map(|i| &i.content) else { continue };
-                let Some(a) = doc.assets.get(&g.asset) else { continue };
-                if a.data.is_empty() {
+                let Some(it) = doc.item(*iid) else { continue };
+                let Some((markup, media)) = graphic_html(doc, it, &mut images, img_src) else { continue };
+                if media {
+                    let _ = writeln!(body, "<figure>{markup}</figure>");
                     continue;
                 }
-                let mime = safe_mime(&a.mime);
-                // Video and sound: an HTML5 player (with the poster, when there is one).
-                if let Some(kind) = designcraft_doc::media_kind(mime) {
-                    let name = format!("media/{}.{}", g.asset.0, ext(mime));
-                    images.insert(name.clone(), (mime, a.data.as_slice()));
-                    let m = doc.item(*iid).and_then(|i| i.media.clone()).unwrap_or_default();
-                    let mut attrs = String::new();
-                    for (on, attr) in
-                        [(m.controls, " controls=\"controls\""), (m.play_on_page_load, " autoplay=\"autoplay\""), (m.looping, " loop=\"loop\"")]
-                    {
-                        if on {
-                            attrs.push_str(attr);
-                        }
-                    }
-                    if let Some(pa) = m.poster.and_then(|p| doc.assets.get(&p)) {
-                        let poster_mime = safe_mime(&pa.mime);
-                        let pn = format!("images/{}.{}", pa.id.0, ext(poster_mime));
-                        images.insert(pn.clone(), (poster_mime, pa.data.as_slice()));
-                        if kind == "video" {
-                            attrs.push_str(&format!(" poster=\"{}\"", xml_attr(&img_src(&pn, poster_mime, &pa.data))));
-                        }
-                    }
-                    let _ = writeln!(
-                        body,
-                        "<figure><{kind} src=\"{}\"{attrs}>{}</{kind}></figure>",
-                        xml_attr(&img_src(&name, mime, &a.data)),
-                        xml_text(&a.name)
-                    );
-                    continue;
-                }
-                let name = format!("images/{}.{}", g.asset.0, ext(mime));
-                images.insert(name.clone(), (mime, a.data.as_slice()));
-                // Alt text from Object Export Options, else the file name.
-                let alt = doc.item(*iid).map(|i| i.alt_text.as_str()).filter(|t| !t.is_empty()).unwrap_or(&a.name);
                 // Object Export Options: alignment and a page break before.
-                let eo = doc.item(*iid).map(|i| i.export_options.clone()).unwrap_or_default();
+                let eo = &it.export_options;
                 let mut css = String::new();
                 if matches!(eo.align.as_str(), "left" | "center" | "right") {
                     css.push_str(&format!("text-align:{};", eo.align));
@@ -639,8 +691,7 @@ fn body_html<'a>(
                     css.push_str("page-break-before:always;break-before:page;");
                 }
                 let style = if css.is_empty() { String::new() } else { format!(" style=\"{}\"", xml_attr(&css)) };
-                let _ =
-                    writeln!(body, "<figure{style}><img src=\"{}\" alt=\"{}\"/></figure>", xml_attr(&img_src(&name, mime, &a.data)), xml_attr(alt));
+                let _ = writeln!(body, "<figure{style}>{markup}</figure>");
             }
         }
     }
@@ -786,6 +837,62 @@ mod tests {
         z.by_name("OEBPS/style.css").unwrap().read_to_string(&mut css).unwrap();
         assert!(css.contains("p.basic-paragraph"));
         assert!(z.by_name("OEBPS/nav.xhtml").is_ok());
+    }
+
+    /// #766: anchored graphics are exported where they are anchored (inline in the text, an
+    /// above-line object as a block of its own), and their images go into the package.
+    #[test]
+    fn anchored_objects_are_exported_in_place() {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(36.0, 36.0, 300.0, 200.0), lid, "AB\nCD", ParaFormat::default()).unwrap();
+        let aid = AssetId(d.alloc());
+        d.assets.insert(
+            aid,
+            Arc::new(Asset {
+                page: 0,
+                id: aid,
+                name: "dot.png".into(),
+                mime: "image/png".into(),
+                link: None,
+                data: Arc::new(vec![7]),
+                pixels: Some((1, 1)),
+            }),
+        );
+        let graphic = |d: &mut Document, alt: &str| {
+            let mut item = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(Rect::new(0.0, 0.0, 10.0, 10.0)));
+            item.alt_text = alt.into();
+            item.content = Content::Graphic(Graphic {
+                asset: aid,
+                size: (1.0, 1.0),
+                xf: Affine::IDENTITY,
+                auto_fit: Default::default(),
+                fit_align: 4,
+                crop: [0.0; 4],
+            });
+            item
+        };
+        let inline = designcraft_doc::AnchoredObject::new(graphic(&mut d, "inline"), designcraft_doc::AnchorPosition::Inline { y_offset: 0.0 });
+        let above = designcraft_doc::AnchoredObject::new(
+            graphic(&mut d, "above"),
+            designcraft_doc::AnchorPosition::AboveLine { align: designcraft_doc::anchored::AnchorAlign::Center, space_before: 0.0, space_after: 0.0 },
+        );
+        let st = d.story_mut(sid).unwrap();
+        st.insert_object(1, inline);
+        // Byte offsets: "A" (1), the mark (3), "B\nC" (3): the second object goes between C and D.
+        st.insert_object(7, above);
+        let bytes = export_epub(&d, &EpubOptions::default()).unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut html = String::new();
+        z.by_name("OEBPS/content.xhtml").unwrap().read_to_string(&mut html).unwrap();
+        let img = |alt: &str| format!("<img src=\"images/{}.png\" alt=\"{alt}\"/>", aid.0);
+        assert!(html.contains(&format!("A{}B</p>", img("inline"))), "{html}");
+        assert!(html.contains(&format!("C<span class=\"anchored\" style=\"display:block;text-align:center\">{}</span>D", img("above"))), "{html}");
+        assert!(z.by_name(&format!("OEBPS/images/{}.png", aid.0)).is_ok(), "the image is in the package");
+        let page = export_html(&d, &HtmlOptions::default());
+        assert!(page.contains("alt=\"inline\"") && page.contains("alt=\"above\""), "{page}");
+        // story_html on its own still leaves objects out.
+        assert!(!story_html(&d, sid).contains("<img"));
     }
 
     #[test]

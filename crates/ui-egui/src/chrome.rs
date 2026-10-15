@@ -63,19 +63,7 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                             crate::rtl::widget(ui, egui::RichText::new(format!("{shown} ▾")).font(semibold(11.5)).color(t.text)),
                             |ui| {
                                 let customs: Vec<String> = app.ui.custom_workspaces.iter().map(|w| w.name.clone()).collect();
-                                for w in [
-                                    "Essentials",
-                                    "Advanced",
-                                    "Book",
-                                    "Digital Publishing",
-                                    "Interactive for PDF",
-                                    "Printing and Proofing",
-                                    "Typography",
-                                ]
-                                .into_iter()
-                                .map(str::to_string)
-                                .chain(customs.iter().cloned())
-                                {
+                                for w in crate::menus::WORKSPACES.iter().map(|w| w.to_string()).chain(customs.iter().cloned()) {
                                     if ui
                                         .selectable_label(w == current, crate::rtl::widget(ui, crate::i18n::workspace_name(&app.ui.language, &w)))
                                         .clicked()

@@ -150,6 +150,16 @@ pub fn view_centre(app: &DesignApp) -> Option<(SpreadRef, Point)> {
     Some((slot.spread, slot.to_spread(c)))
 }
 
+/// Where a file dropped on the window lands: the spread under the pointer, or under the view
+/// centre when the pointer isn't over the canvas, and that point in spread coordinates.
+pub fn drop_point(app: &DesignApp, screen: Option<Pos2>) -> Option<(SpreadRef, Point)> {
+    let rect = app.canvas_rect?;
+    let Some(pos) = screen.filter(|p| rect.contains(*p)) else { return view_centre(app) };
+    let st = app.session.active()?;
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    layout.spread_at(Xf::new(rect, app.view()?).to_canvas(pos))
+}
+
 /// Absolute page index under the view centre.
 pub fn current_page(app: &DesignApp) -> Option<usize> {
     let st = app.session.active()?;
@@ -190,6 +200,28 @@ pub fn set_zoom(app: &mut DesignApp, z: f64) {
     let Some(rect) = app.canvas_rect else { return };
     let cur = app.view().map(|v| v.zoom).unwrap_or(1.0);
     zoom_at(app, rect.center(), z / cur);
+}
+
+/// Whether the wheel motion now arriving was made with Alt down. As egui does for Ctrl/Cmd, a
+/// motion keeps its key to its end: the wheel is smoothed over a few frames, and a trackpad swipe
+/// coasts on after the key is let go.
+fn wheel_alt(ui: &egui::Ui) -> bool {
+    let id = egui::Id::new("canvas_wheel_alt");
+    // Alt, and whether a trackpad swipe is under way.
+    let (mut alt, mut swipe): (bool, bool) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    ui.input(|i| {
+        for e in &i.events {
+            if let egui::Event::MouseWheel { phase, modifiers, .. } = e {
+                (alt, swipe) = match phase {
+                    egui::TouchPhase::Start => (modifiers.alt, true),
+                    egui::TouchPhase::Move => (modifiers.alt || (swipe && alt), swipe),
+                    egui::TouchPhase::End | egui::TouchPhase::Cancel => (false, false),
+                };
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, (alt, swipe)));
+    alt
 }
 
 pub fn apply_view_request(app: &mut DesignApp, p: &Value) {
@@ -1524,6 +1556,7 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
     let wants_text = app.session.wants_text();
     let space = ui.input(|i| i.key_down(egui::Key::Space)) && !wants_text && !ui.ctx().text_edit_focused();
     // Scroll / zoom.
+    let alt = wheel_alt(ui);
     if resp.hovered() {
         let (scroll, zoom_delta, m, hover) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers, i.pointer.hover_pos()));
         if let Some(hp) = hover {
@@ -1531,6 +1564,10 @@ fn handle_input(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, r
                 zoom_at(app, hp, zoom_delta as f64);
             } else if m.command && scroll.y != 0.0 {
                 zoom_at(app, hp, (1.0 + scroll.y as f64 * 0.003).clamp(0.5, 2.0));
+            } else if alt && scroll != egui::Vec2::ZERO {
+                // Alt + wheel zooms by as much as Ctrl/Cmd + wheel, which egui turns into `zoom_delta`.
+                let speed = ui.ctx().options(|o| o.input_options.scroll_zoom_speed);
+                zoom_at(app, hp, (speed * (scroll.x + scroll.y)).exp() as f64);
             } else if scroll != egui::Vec2::ZERO
                 && let Some(v) = app.view_mut()
             {
@@ -2039,6 +2076,86 @@ mod tests {
             h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
         }
         h.run_steps(3);
+    }
+
+    fn new_document() -> Harness<'static, DesignApp> {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        harness(app)
+    }
+
+    fn held(modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::ModifiersChanged(modifiers)
+    }
+
+    fn wheel(phase: egui::TouchPhase, up: f32, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, up), phase, modifiers }
+    }
+
+    // Plays `events` with the pointer at `at`, a frame each, and lets the motion settle.
+    fn play(h: &mut Harness<'_, DesignApp>, at: Pos2, events: &[egui::Event]) -> View {
+        h.hover_at(at);
+        for event in events {
+            h.event(event.clone());
+            h.step();
+        }
+        h.run_steps(30);
+        *h.state().view().unwrap()
+    }
+
+    /// Alt + wheel scrolled the view like the plain wheel; it zooms at the pointer (#470).
+    #[test]
+    fn alt_wheel_zooms_at_the_pointer() {
+        use egui::{Modifiers, TouchPhase::Move};
+        let mut h = new_document();
+        let rect = h.state().canvas_rect.unwrap();
+        let at = rect.center() + vec2(150.0, 90.0);
+        let before = *h.state().view().unwrap();
+        let under = Xf::new(rect, &before).to_canvas(at);
+        let zoomed = play(&mut h, at, &[held(Modifiers::ALT), wheel(Move, 100.0, Modifiers::ALT)]);
+        assert!(zoomed.zoom > before.zoom * 1.2, "wheel up zooms in: {} -> {}", before.zoom, zoomed.zoom);
+        let still = Xf::new(rect, &zoomed).to_canvas(at);
+        assert!((still.x - under.x).abs() < 0.01 && (still.y - under.y).abs() < 0.01, "the point under the pointer stays: {under:?} -> {still:?}");
+        let back = play(&mut h, at, &[held(Modifiers::ALT), wheel(Move, -100.0, Modifiers::ALT)]);
+        assert!((back.zoom - before.zoom).abs() < 1e-6, "wheel down zooms out: {} -> {}", zoomed.zoom, back.zoom);
+        // The plain wheel still scrolls.
+        let scrolled = play(&mut h, at, &[held(Modifiers::NONE), wheel(Move, 100.0, Modifiers::NONE)]);
+        assert!(scrolled.zoom == back.zoom && scrolled.origin.y < back.origin.y, "{back:?} -> {scrolled:?}");
+    }
+
+    /// Alt zooms exactly as Ctrl/Cmd does, also when the key is let go while the wheel's motion is
+    /// still arriving: the rest of it zooms too and does not scroll the page.
+    #[test]
+    fn alt_wheel_zooms_like_ctrl_wheel_to_the_end_of_the_motion() {
+        use egui::{
+            Modifiers,
+            TouchPhase::{End, Move, Start},
+        };
+        const NONE: Modifiers = Modifiers::NONE;
+        // Each motion in steps; the views are compared after every step.
+        let motions: [fn(Modifiers) -> Vec<Vec<egui::Event>>; 4] = [
+            |key| vec![vec![held(key), wheel(Move, 100.0, key)]],
+            // A wheel turned fast, the key let go a frame later.
+            |key| vec![vec![held(key), wheel(Move, 400.0, key), held(NONE)]],
+            // A trackpad swipe that coasts on after the key is let go; once it has ended, the wheel scrolls.
+            |key| {
+                vec![
+                    vec![held(key), wheel(Start, 0.0, key), wheel(Move, 50.0, key), held(NONE), wheel(Move, 200.0, NONE)],
+                    vec![wheel(End, 0.0, NONE), wheel(Move, 100.0, NONE)],
+                ]
+            },
+            |key| vec![vec![held(key | Modifiers::SHIFT), wheel(Move, 100.0, key | Modifiers::SHIFT)]],
+        ];
+        for (i, motion) in motions.iter().enumerate() {
+            let (mut with_alt, mut with_command) = (new_document(), new_document());
+            let at = with_alt.state().canvas_rect.unwrap().center() + vec2(150.0, 90.0);
+            let start = *with_alt.state().view().unwrap();
+            for (alt, command) in motion(Modifiers::ALT).iter().zip(motion(Modifiers::COMMAND)) {
+                let (alt, command) = (play(&mut with_alt, at, alt), play(&mut with_command, at, &command));
+                assert!(command.zoom > start.zoom, "motion {i} zooms");
+                assert_eq!(alt, command, "motion {i}");
+            }
+        }
     }
 
     fn units(h: &Harness<'_, DesignApp>) -> (Unit, Unit) {

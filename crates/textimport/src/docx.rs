@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use designcraft_doc::story::{BASIC_PARAGRAPH, NO_CHAR_STYLE};
-use designcraft_doc::{CharAttrs, CharFormat, ParaAttrs, ParaFormat, Story, StoryId, Table};
+use designcraft_doc::{CharAttrs, CharFormat, ListType, ParaAttrs, ParaFormat, Story, StoryId, Table};
 use quick_xml::events::Event;
 
+use crate::docx_numbering::{ListPara, Numbering};
 use crate::{ImportError, Imported, ImportedStyle};
 
 /// A minimal element tree (local names, attributes by local name).
@@ -43,10 +44,10 @@ impl El {
             .collect()
     }
     /// `<w:x w:val="…"/>` → the value; a bare `<w:b/>` counts as "on".
-    fn val(&self, name: &str) -> Option<String> {
+    pub(crate) fn val(&self, name: &str) -> Option<String> {
         self.child(name).map(|e| e.attr("val").unwrap_or("true").to_string())
     }
-    fn on(&self, name: &str) -> Option<bool> {
+    pub(crate) fn on(&self, name: &str) -> Option<bool> {
         self.val(name).map(|v| !matches!(v.as_str(), "0" | "false" | "none"))
     }
 }
@@ -216,6 +217,12 @@ struct Ctx {
     footnotes: HashMap<String, El>,
     warnings: Vec<String>,
     next_table: u64,
+    numbering: Numbering,
+    /// A paragraph style's list (`w:numPr` numId and ilvl, through `w:basedOn`), by style id.
+    style_lists: HashMap<String, (Option<String>, Option<String>)>,
+    /// The number the model's own list counter is at (it restarts after a paragraph that isn't
+    /// in a list), to tell where a numbered paragraph needs an explicit Start At.
+    model_counter: u32,
 }
 
 impl Ctx {
@@ -236,10 +243,20 @@ impl Ctx {
                     first = false;
                     let ppr = e.child("pPr");
                     let style = self.para_style(ppr);
-                    let attrs = para_attrs(ppr);
+                    let mut attrs = para_attrs(ppr);
+                    let list = self.list(ppr);
+                    if let Some(l) = &list {
+                        // The level's indents, unless the paragraph sets its own.
+                        let direct = attrs;
+                        attrs = l.attrs.clone();
+                        attrs.merge(&direct);
+                    }
                     let at = st.len();
                     st.format_paras(at..at, |f| *f = ParaFormat { style: style.clone(), para: attrs.clone(), ..Default::default() });
                     self.inline(e, st, allow_notes);
+                    if let Some(n) = self.start_at(list.as_ref(), st.len() == at) {
+                        st.format_paras(at..at, |f| f.para.start_at = Some(Some(n)));
+                    }
                 }
                 "tbl" => {
                     let rows: Vec<Vec<String>> = e
@@ -269,6 +286,35 @@ impl Ctx {
                 _ => {}
             }
         }
+    }
+
+    /// The list a paragraph is in (its own `w:numPr`, else its style's), counting it.
+    fn list(&mut self, ppr: Option<&El>) -> Option<ListPara> {
+        let direct = ppr.and_then(|p| p.child("numPr"));
+        let style = ppr.and_then(|p| p.val("pStyle")).and_then(|id| self.style_lists.get(&id));
+        let num_id = direct.and_then(|n| n.val("numId")).or_else(|| style.and_then(|s| s.0.clone()))?;
+        let ilvl = direct.and_then(|n| n.val("ilvl")).or_else(|| style.and_then(|s| s.1.clone()));
+        // A level that isn't a small number is no list.
+        let ilvl = ilvl.map_or(Some(0), |l| l.trim().parse::<u32>().ok())?;
+        self.numbering.next(num_id.trim(), ilvl)
+    }
+
+    /// Start At for a paragraph, so that the model numbers it as Word does: only where the
+    /// model's counter (which follows the previous numbered paragraph, and restarts after one
+    /// that isn't in a list) would give a different number.
+    fn start_at(&mut self, list: Option<&ListPara>, empty: bool) -> Option<u32> {
+        let Some(l) = list else {
+            self.model_counter = 0;
+            return None;
+        };
+        // Bullets and empty paragraphs leave the counter alone (they show no number).
+        if l.attrs.list_type != Some(ListType::Numbers) || empty {
+            return None;
+        }
+        let want = l.number.max(1);
+        let next = self.model_counter.saturating_add(1);
+        self.model_counter = want;
+        (want != next).then_some(want)
     }
 
     /// Runs (and hyperlinks, fields' results) of a paragraph.
@@ -302,7 +348,9 @@ impl Ctx {
                 "footnoteReference" if allow_notes => {
                     if let Some(note) = e.attr("id").and_then(|id| self.footnotes.get(id).cloned()) {
                         let mut ns = Story::new(StoryId(0));
+                        let counter = std::mem::take(&mut self.model_counter);
                         self.blocks(&note, &mut ns, false);
+                        self.model_counter = counter;
                         // Word puts the reference mark in the note text: we generate the number.
                         let len = st.len();
                         let id = st.insert_note(len, "", ParaFormat::default());
@@ -328,17 +376,63 @@ impl Ctx {
     }
 }
 
+/// Largest `word/numbering.xml` read.
+const NUMBERING_LIMIT: u64 = 16 * 1024 * 1024;
+/// Deepest `w:basedOn` chain followed (a cycle stops here too).
+const MAX_STYLE_DEPTH: usize = 32;
+
+/// Each paragraph style's list: the first `w:numId` and `w:ilvl` on its `w:basedOn` chain.
+fn style_lists(styles: &El) -> HashMap<String, (Option<String>, Option<String>)> {
+    let by_id: HashMap<&str, &El> = styles.els().filter(|s| s.name == "style").filter_map(|s| Some((s.attr("styleId")?, s))).collect();
+    let mut out = HashMap::new();
+    for (id, s) in &by_id {
+        let (mut num_id, mut ilvl) = (None, None);
+        let mut cur = Some(*s);
+        for _ in 0..MAX_STYLE_DEPTH {
+            let Some(c) = cur else { break };
+            if let Some(n) = c.child("pPr").and_then(|p| p.child("numPr")) {
+                num_id = num_id.or_else(|| n.val("numId"));
+                ilvl = ilvl.or_else(|| n.val("ilvl"));
+            }
+            if num_id.is_some() && ilvl.is_some() {
+                break;
+            }
+            cur = c.val("basedOn").and_then(|b| by_id.get(b.as_str()).copied());
+        }
+        if num_id.is_some() {
+            out.insert(id.to_string(), (num_id, ilvl));
+        }
+    }
+    out
+}
+
 pub fn import(bytes: &[u8]) -> Result<Imported, ImportError> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| ImportError::Corrupt(e.to_string()))?;
     let doc = part(&mut zip, "word/document.xml")?.ok_or_else(|| ImportError::Corrupt("no word/document.xml (not a Word document)".into()))?;
     let doc = parse(&doc)?;
     // Styles.
-    let mut ctx = Ctx { para_names: HashMap::new(), char_names: HashMap::new(), footnotes: HashMap::new(), warnings: vec![], next_table: 0 };
+    let mut ctx = Ctx {
+        para_names: HashMap::new(),
+        char_names: HashMap::new(),
+        footnotes: HashMap::new(),
+        warnings: vec![],
+        next_table: 0,
+        numbering: Numbering::default(),
+        style_lists: HashMap::new(),
+        model_counter: 0,
+    };
+    // Lists that can't be read leave plain paragraphs, not a failed import.
+    match part_capped(&mut zip, "word/numbering.xml", NUMBERING_LIMIT).and_then(|s| s.map(|s| parse(&s)).transpose()) {
+        Ok(Some(n)) => ctx.numbering = Numbering::parse(&n),
+        Ok(None) => {}
+        Err(_) => ctx.warnings.push("The Word file's list definitions could not be read: lists were imported as plain paragraphs.".into()),
+    }
     let mut para_styles = Vec::new();
     let mut char_styles = Vec::new();
     if let Some(styles) = part(&mut zip, "word/styles.xml")?.map(|s| parse(&s)).transpose()? {
         let ids: HashMap<String, String> =
             styles.els().filter(|s| s.name == "style").filter_map(|s| Some((s.attr("styleId")?.to_string(), s.val("name")?))).collect();
+        ctx.style_lists = style_lists(&styles);
         for s in styles.els().filter(|s| s.name == "style") {
             let (Some(id), Some(name)) = (s.attr("styleId"), s.val("name")) else { continue };
             let kind = s.attr("type").unwrap_or("paragraph");
@@ -404,9 +498,14 @@ mod tests {
     use std::io::Write;
 
     pub(crate) fn docx(document: &str, styles: &str, footnotes: &str) -> Vec<u8> {
+        docx_parts(&[("word/document.xml", document), ("word/styles.xml", styles), ("word/footnotes.xml", footnotes)])
+    }
+
+    /// A zip of `(part name, XML)`; empty parts are left out.
+    fn docx_parts(parts: &[(&str, &str)]) -> Vec<u8> {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let o = zip::write::SimpleFileOptions::default();
-        for (n, c) in [("word/document.xml", document), ("word/styles.xml", styles), ("word/footnotes.xml", footnotes)] {
+        for &(n, c) in parts {
             if c.is_empty() {
                 continue;
             }
@@ -509,5 +608,188 @@ mod tests {
         let i = import(&docx(&document, "", "")).unwrap();
         i.story.check().unwrap();
         assert_eq!(i.story.text, "Kept text. MOVED HERE. Plain INSERTED\nEnd.");
+    }
+
+    /// A paragraph in a Word list: `w:numPr` with `numId` and, unless `None`, `ilvl`.
+    fn list_p(num_id: &str, ilvl: Option<&str>, text: &str) -> String {
+        let ilvl = ilvl.map(|l| format!(r#"<w:ilvl w:val="{l}"/>"#)).unwrap_or_default();
+        format!(r#"<w:p><w:pPr><w:numPr>{ilvl}<w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+    }
+
+    fn plain_p(text: &str) -> String {
+        format!(r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+    }
+
+    fn lists_docx(numbering: &str, styles: &str, body: &[String]) -> Imported {
+        let document = format!(r#"<w:document {W}><w:body>{}</w:body></w:document>"#, body.concat());
+        let i = import(&docx_parts(&[("word/document.xml", &document), ("word/styles.xml", styles), ("word/numbering.xml", numbering)])).unwrap();
+        i.story.check().unwrap();
+        i
+    }
+
+    /// The label the model gives paragraph `i` when its number is `n`.
+    fn label(st: &Story, i: usize, n: u32) -> String {
+        let mut p = designcraft_doc::ParaProps::default();
+        p.apply(&st.paras[i].para);
+        match p.list_type {
+            ListType::Numbers => p.number_label(n),
+            ListType::Bullets => p.bullet_label(),
+            ListType::None => String::new(),
+        }
+    }
+
+    /// Regression (#626): pandoc's Markdown list example lost its bullets and numbers.
+    #[test]
+    fn bullets_and_numbers_from_numbering_xml() {
+        let numbering = format!(
+            r#"<w:numbering {W}>
+              <w:abstractNum w:abstractNumId="990"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>
+                <w:pPr><w:ind w:left="480" w:hanging="480"/></w:pPr></w:lvl></w:abstractNum>
+              <w:abstractNum w:abstractNumId="991"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+                <w:pPr><w:ind w:left="480" w:hanging="480"/></w:pPr></w:lvl></w:abstractNum>
+              <w:num w:numId="1000"><w:abstractNumId w:val="990"/></w:num>
+              <w:num w:numId="1001"><w:abstractNumId w:val="991"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
+            </w:numbering>"#
+        );
+        let body = [
+            plain_p("Intro paragraph."),
+            list_p("1000", Some("0"), "first item"),
+            list_p("1000", Some("0"), "second item"),
+            list_p("1001", Some("0"), "step one"),
+            list_p("1001", Some("0"), "step two"),
+        ];
+        let st = lists_docx(&numbering, "", &body).story;
+        let types: Vec<Option<ListType>> = st.paras.iter().map(|p| p.para.list_type).collect();
+        assert_eq!(types, [None, Some(ListType::Bullets), Some(ListType::Bullets), Some(ListType::Numbers), Some(ListType::Numbers)]);
+        assert_eq!(label(&st, 1, 1), "•\t");
+        assert_eq!(st.paras[3].para.number_style, Some(designcraft_doc::NumberStyle::Arabic));
+        assert_eq!((label(&st, 3, 1), label(&st, 4, 2)), ("1.\t".to_string(), "2.\t".to_string()));
+        // The model's own counter already starts at 1 and carries on: no Start At needed.
+        assert_eq!((st.paras[3].para.start_at, st.paras[4].para.start_at), (None, None));
+        assert_eq!((st.paras[1].para.left_indent, st.paras[1].para.first_line_indent), (Some(24.0), Some(-24.0)));
+    }
+
+    /// Level 1 inside level 0, parent numbers in a label, numbering that carries on past a plain
+    /// paragraph, and a `num` with a start override restarting.
+    #[test]
+    fn nested_levels_and_restarts() {
+        let numbering = format!(
+            r#"<w:numbering {W}>
+              <w:abstractNum w:abstractNumId="1">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2)"/><w:suff w:val="space"/>
+                  <w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1.%2.%3"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+              <w:num w:numId="2"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num>
+              <w:num w:numId="3"><w:abstractNumId w:val="1"/></w:num>
+            </w:numbering>"#
+        );
+        let body = [
+            list_p("1", None, "A"),
+            list_p("1", Some("1"), "B"),
+            list_p("1", Some("1"), "C"),
+            list_p("1", Some("2"), "D"),
+            list_p("1", Some("0"), "E"),
+            plain_p("Between"),
+            list_p("1", Some("0"), "F"),
+            list_p("2", Some("0"), "G"),
+            list_p("3", Some("0"), "H"),
+        ];
+        let st = lists_docx(&numbering, "", &body).story;
+        let start: Vec<Option<Option<u32>>> = st.paras.iter().map(|p| p.para.start_at).collect();
+        // Word's numbers: 1, a, b, 1.b.I, 2, –, 3, 1 (own counter), 4 (shares numId 1's). E's 2
+        // follows the model's counter (1 after D).
+        assert_eq!(start, [None, Some(Some(1)), None, Some(Some(1)), None, None, Some(Some(3)), Some(Some(1)), Some(Some(4))]);
+        assert_eq!(label(&st, 1, 1), "a) ");
+        assert_eq!(label(&st, 3, 1), "1.b.I\t");
+        assert_eq!(st.paras[1].para.left_indent, Some(72.0));
+        assert_eq!(st.paras[1].para.first_line_indent, Some(-18.0));
+    }
+
+    /// A paragraph style's `w:numPr` (inherited through `w:basedOn`) makes its paragraphs a list;
+    /// numId 0 on a paragraph takes it out of the list.
+    #[test]
+    fn style_lists_and_num_id_zero() {
+        let numbering = format!(
+            r#"<w:numbering {W}>
+              <w:abstractNum w:abstractNumId="7">
+                <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/><w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr></w:lvl>
+                <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:rPr><w:rFonts w:ascii="Courier New"/></w:rPr></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="5"><w:abstractNumId w:val="7"/></w:num>
+            </w:numbering>"#
+        );
+        let styles = format!(
+            r#"<w:styles {W}>
+              <w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/><w:pPr><w:numPr><w:numId w:val="5"/></w:numPr></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="ListBullet2"><w:name w:val="List Bullet 2"/><w:basedOn w:val="ListBullet"/>
+                <w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr></w:pPr></w:style>
+            </w:styles>"#
+        );
+        let styled =
+            |id: &str, extra: &str, text: &str| format!(r#"<w:p><w:pPr><w:pStyle w:val="{id}"/>{extra}</w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#);
+        let body = [
+            styled("ListBullet", "", "one"),
+            styled("ListBullet2", "", "two"),
+            styled("ListBullet", r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr>"#, "not a list"),
+        ];
+        let st = lists_docx(&numbering, &styles, &body).story;
+        assert_eq!(label(&st, 0, 1), "•\t");
+        assert_eq!(label(&st, 1, 1), "◦\t");
+        assert_eq!(st.paras[2].para.list_type, None);
+        assert_eq!(st.paras[2].style, "List Bullet");
+    }
+
+    /// Hostile list definitions: missing abstractNums and levels, huge or negative levels and
+    /// starts, a long label, a `w:basedOn` cycle. No panic; what can't be a list is plain.
+    #[test]
+    fn hostile_numbering_falls_back_to_plain_paragraphs() {
+        let long = "x".repeat(10_000);
+        let numbering = format!(
+            r#"<w:numbering {W}>
+              <w:abstractNum w:abstractNumId="1">
+                <w:lvl w:ilvl="0"><w:start w:val="99999999999999"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1{long}%9%"/></w:lvl>
+                <w:lvl w:ilvl="99999999999999"><w:numFmt w:val="decimal"/></w:lvl>
+                <w:lvl w:ilvl="-1"><w:numFmt w:val="decimal"/></w:lvl>
+                <w:lvl w:ilvl="3"><w:start w:val="-5"/><w:numFmt w:val="ordinalText"/><w:lvlText w:val="%4^"/><w:lvlRestart w:val="99"/></w:lvl>
+              </w:abstractNum>
+              <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+              <w:num w:numId="2"><w:abstractNumId w:val="404"/></w:num>
+              <w:num w:numId="3"/>
+              <w:num><w:abstractNumId w:val="1"/></w:num>
+            </w:numbering>"#
+        );
+        let styles = format!(
+            r#"<w:styles {W}>
+              <w:style w:type="paragraph" w:styleId="A"><w:name w:val="A"/><w:basedOn w:val="B"/></w:style>
+              <w:style w:type="paragraph" w:styleId="B"><w:name w:val="B"/><w:basedOn w:val="A"/></w:style>
+            </w:styles>"#
+        );
+        let body = [
+            list_p("2", None, "missing abstractNum"),
+            list_p("3", None, "num without abstractNum"),
+            list_p("404", None, "unknown numId"),
+            list_p("1", Some("99999999999999"), "huge level"),
+            list_p("1", Some("9"), "level 9"),
+            list_p("1", Some("-1"), "negative level"),
+            list_p("1", Some("1"), "undefined level"),
+            r#"<w:p><w:pPr><w:pStyle w:val="A"/><w:numPr><w:ilvl w:val="0"/></w:numPr></w:pPr><w:r><w:t>cycle</w:t></w:r></w:p>"#.to_string(),
+            list_p("1", None, "huge start"),
+            list_p("1", Some("3"), "negative start"),
+        ];
+        let st = lists_docx(&numbering, &styles, &body).story;
+        assert!(st.paras[..8].iter().all(|p| p.para.list_type.is_none()), "{:?}", st.paras);
+        assert_eq!(st.paras[8].para.start_at, Some(Some(u32::MAX)));
+        let expr = st.paras[8].para.number_expression.clone().unwrap_or_default();
+        assert!(expr.starts_with("^#x") && expr.chars().count() < 80, "{expr}");
+        // A start below 0 counts from 0, which the model shows as 1; `^` in a label is literal.
+        assert_eq!(label(&st, 9, 1), "1^\t");
+        // Unreadable list definitions leave plain paragraphs and a warning, not a failed import.
+        let document = format!(r#"<w:document {W}><w:body>{}</w:body></w:document>"#, list_p("1", None, "x"));
+        let i = import(&docx_parts(&[("word/document.xml", &document), ("word/numbering.xml", "<w:numbering></w:num>")])).unwrap();
+        assert_eq!(i.story.paras[0].para.list_type, None);
+        assert_eq!(i.warnings.len(), 1);
     }
 }

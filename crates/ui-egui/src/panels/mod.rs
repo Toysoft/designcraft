@@ -12,6 +12,10 @@ pub mod properties;
 pub mod styles;
 pub mod swatches;
 pub mod table;
+pub mod typography;
+
+#[cfg(test)]
+mod color_panel_tests;
 
 use designcraft_doc::{Content, StrokeAlign, WrapMode};
 use designcraft_geom::Rect;
@@ -43,6 +47,8 @@ pub struct SelInfo {
     /// Uniform corner (shape, size) — the first corner.
     pub corner: (designcraft_geom::corners::CornerShape, f64),
     pub wrap_invert: bool,
+    /// Text wrap offsets: top, left, bottom, right.
+    pub wrap_offsets: [f64; 4],
     pub locked: bool,
 }
 
@@ -69,6 +75,7 @@ pub fn color_target(app: &mut DesignApp) -> Option<(String, f32, String, f32)> {
 
 /// Apply a swatch (and tint) to the fill or stroke of what colour edits apply to.
 pub fn apply_swatch(app: &mut DesignApp, stroke: bool, swatch: &str, tint: Option<f32>) -> Result<Value, String> {
+    remember_swatch(app, swatch);
     if colors_affect_text(app) {
         let (k, kt) = if stroke { ("stroke", "strokeTint") } else { ("fill", "fillTint") };
         let mut attrs = json!({k: swatch});
@@ -82,6 +89,19 @@ pub fn apply_swatch(app: &mut DesignApp, stroke: bool, swatch: &str, tint: Optio
         p["tint"] = json!(t);
     }
     app.run(if stroke { "object.stroke" } else { "object.fill" }, p)
+}
+
+/// Keep `swatch` as the colour or gradient Apply Color / Apply Gradient use next.
+pub fn remember_swatch(app: &mut DesignApp, swatch: &str) {
+    let Some(st) = app.session.active() else { return };
+    if swatch == designcraft_color::swatch::NONE {
+        return;
+    }
+    if designcraft_color::swatch::resolve_gradient(&st.doc.swatches, swatch).is_some() {
+        app.ui.last_gradient = Some(swatch.to_string());
+    } else if st.doc.resolve_color(swatch, 1.0).is_some() {
+        app.ui.last_color = Some(swatch.to_string());
+    }
 }
 
 /// Fill (or stroke) tint of the first selected item (1 = 100%).
@@ -136,6 +156,7 @@ pub fn sel_info(app: &DesignApp) -> Option<SelInfo> {
             .unwrap_or_else(|| "solid".into()),
         corner: (first.corners.corners[0].shape, first.corners.corners[0].size),
         wrap_invert: first.wrap.invert,
+        wrap_offsets: first.wrap.offsets,
         locked: first.locked,
     })
 }

@@ -55,12 +55,12 @@ score below).
 |---|---|---|---|---|---|
 | PDF / AI (PDF-compatible) | `.pdf`, `.ai` | ✓ page boxes, layers, pages | ✓ rendered with hayro, embedded as vector in PDF export, crop to page boxes | layer visibility depth; editable vectors not offered (#227) | 3% |
 | JPEG, PNG, GIF, BMP, WebP | | ✓ | ✓ | CMYK JPEG/TIFF keep inks in PDF (#35) | 2% |
-| TIFF | `.tif` | ✓ incl. CMYK, alpha, paths | ✓ incl. CMYK | clipping paths from 8BIM resources unverified | 1% |
+| TIFF | `.tif` | ✓ incl. CMYK, alpha, indexed colour, paths | ✓ incl. CMYK | clipping paths from 8BIM resources unverified | 1% |
 | PSD | `.psd` | ✓ layers, comps, alpha, paths | ~ composite + Object Layer Options | layer comps partial | 1% |
 | EPS | `.eps` | ✓ (PostScript) | ~ preview only (no interpreter) | | <1% |
 | SVG | `.svg` | ✓ | ✓ (usvg) | | <1% |
 | HEIC | `.heic` | ✓ | ✗ | | <1% |
-| Word | `.docx` | ✓ styles, footnotes, tables, track changes, options | ✓ styles by name, footnotes, tables, tabs, breaks, moved text (#257), style mapping and conflicts | `.doc` not supported (InDesign reads it) | 2% |
+| Word | `.docx` | ✓ styles, footnotes, tables, track changes, options | ✓ styles by name, footnotes, tables, tabs, breaks, moved text (#257), bullets and numbering from `numbering.xml` (#626; parent levels in a label are fixed text), style mapping and conflicts | `.doc` not supported (InDesign reads it) | 2% |
 | RTF | `.rtf` | ✓ | ✓ | | <1% |
 | Excel | `.xlsx`, `.xls` | ✓ | ~ `.xlsx` first sheet's used range | no sheet/range options; `.xls` ✗ | <1% |
 | Plain text, Markdown | `.txt`, `.md` | ✓ (txt) | ✓ | | <1% |

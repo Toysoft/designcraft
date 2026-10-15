@@ -5,6 +5,7 @@ use designcraft_doc::{Document, ItemId, Shape};
 use designcraft_geom::{Affine, Anchor, AnchorKind, Point};
 use serde_json::{Value, json};
 
+use super::object::path_editable;
 use super::{CommandSpec, bad, cmd, has_doc, point_param};
 use crate::{Result, Session};
 
@@ -69,6 +70,7 @@ fn erase_or_smooth(s: &mut Session, p: &Value, smooth: bool) -> Result<Value> {
         .map(|a| a.iter().filter_map(|v| Some(Point::new(v.get(0)?.as_f64()?, v.get(1)?.as_f64()?))).collect())
         .unwrap_or_default();
     s.edit(|d, _| {
+        path_editable(d, id, cmd)?;
         let inv = to_inner(d, id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let scale = inv.determinant().abs().sqrt().max(1e-9);
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
@@ -135,6 +137,7 @@ fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let at = point_param(p, "at").ok_or_else(|| bad("path.addAnchor", "missing at"))?;
     let tol = p.get("tolerance").and_then(Value::as_f64).unwrap_or(4.0);
     s.edit(|d, _| {
+        path_editable(d, id, "path.addAnchor")?;
         let inv = to_inner(d, id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let q = inv * at;
@@ -154,6 +157,7 @@ fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
 fn delete_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let (id, si, ai) = anchor_param(p, "path.deleteAnchor")?;
     s.edit(|d, sel| {
+        path_editable(d, id, "path.deleteAnchor")?;
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let sp = it.path.subpaths.get_mut(si).ok_or_else(|| bad("path.deleteAnchor", "no such subpath"))?;
         if ai >= sp.anchors.len() {
@@ -181,6 +185,7 @@ fn convert_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let to = point_param(p, "to");
     let corner = p.get("corner").and_then(Value::as_bool);
     s.edit(|d, _| {
+        path_editable(d, id, "path.convertAnchor")?;
         let inv = to_inner(d, id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let sp = it.path.subpaths.get_mut(si).ok_or_else(|| bad("path.convertAnchor", "no such subpath"))?;

@@ -44,7 +44,7 @@ fn print_booklet(s: &mut Session, p: &Value) -> Result<Value> {
     match str_param(p, "path") {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
-            crate::atomic::write_file(path, &r.bytes)?;
+            crate::io::write_file(path, &r.bytes).map_err(EngineError::Other)?;
             Ok(json!({"path": path, "bytes": r.bytes.len(), "sheets": r.pages, "warnings": r.warnings}))
         }
         None => Ok(json!({"base64": super::file::base64_encode(&r.bytes), "bytes": r.bytes.len(), "sheets": r.pages, "warnings": r.warnings})),
@@ -59,7 +59,7 @@ fn export_html(s: &mut Session, p: &Value) -> Result<Value> {
     match str_param(p, "path") {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
-            crate::atomic::write_file(path, text.as_bytes())?;
+            crate::io::write_file(path, text.as_bytes()).map_err(EngineError::Other)?;
             Ok(json!({"path": path, "bytes": text.len()}))
         }
         None => Ok(json!({"bytes": text.len(), "text": text})),
@@ -91,7 +91,7 @@ fn export_text(s: &mut Session, p: &Value) -> Result<Value> {
     match path {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
-            crate::atomic::write_file(path, text.as_bytes())?;
+            crate::io::write_file(path, text.as_bytes()).map_err(EngineError::Other)?;
             Ok(json!({"path": path, "bytes": text.len()}))
         }
         None => Ok(json!({"bytes": text.len(), "text": text})),
@@ -160,7 +160,7 @@ fn export_epub(s: &mut Session, p: &Value) -> Result<Value> {
     match p.get("path").and_then(Value::as_str) {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
-            crate::atomic::write_file(path, &bytes)?;
+            crate::io::write_file(path, &bytes).map_err(crate::EngineError::Other)?;
             Ok(serde_json::json!({"path": path, "bytes": bytes.len()}))
         }
         None => Ok(serde_json::json!({"base64": super::file::base64_encode(&bytes), "bytes": bytes.len()})),
@@ -598,7 +598,7 @@ fn export_pdf(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
-    crate::atomic::write_file(path, bytes)
+    crate::io::write_file(path, bytes).map_err(EngineError::Other)
 }
 #[cfg(target_arch = "wasm32")]
 fn write_file(path: &str, _bytes: &[u8]) -> Result<()> {
@@ -849,6 +849,45 @@ mod placed_pdf_print_tests {
         let mut s = page_with(&v20);
         let e = s.execute("file.exportPdf", &json!({"standard": "x4"})).unwrap_err().to_string();
         assert!(e.contains("logo.pdf is PDF 2.0") && e.contains("PDF 1.6"), "{e}");
+    }
+
+    /// A one-page PDF with a black box whose catalog says `/Version /1.7`, as TCPDF writes it.
+    fn catalog_v17(header: &str) -> Vec<u8> {
+        let content = "0 0 0 1 k 0 0 200 200 re f";
+        let mut pdf = format!("{header}\n").into_bytes();
+        let mut offsets = Vec::new();
+        for body in [
+            "<</Type/Catalog/Pages 2 0 R/Version /1.7>>".to_owned(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_owned(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R/Resources<<>>>>".to_owned(),
+            format!("<</Length {}>>\nstream\n{content}\nendstream", content.len()),
+        ] {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", offsets.len()).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f\r\n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(format!("trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    /// A placed PDF whose catalog `/Version /1.7` overrides its header failed the PDF/X-4 export
+    /// with "logo.pdf is PDF 1.7", though a 1.7 header alone is relabelled (#907).
+    #[test]
+    fn catalog_version_17_placed_in_pdfx4() {
+        for header in ["%PDF-1.7", "%PDF-1.4"] {
+            let pdf = catalog_v17(header);
+            assert_eq!(hayro_syntax::Pdf::new(pdf.clone()).unwrap().version(), hayro_syntax::PdfVersion::Pdf17);
+            let mut s = page_with(&pdf);
+            let r = s.execute("file.exportPdf", &json!({"standard": "x4"})).unwrap_or_else(|e| panic!("{header}: {e}"));
+            assert!(r["warnings"].to_string().contains("logo.pdf: a PDF 1.7 placed in a PDF 1.6 file"), "{}", r["warnings"]);
+            let out = base64_decode(r["base64"].as_str().unwrap());
+            assert!(out.starts_with(b"%PDF-1.6"));
+            assert_eq!(hayro_syntax::Pdf::new(out).unwrap().version(), hayro_syntax::PdfVersion::Pdf16);
+        }
     }
 }
 

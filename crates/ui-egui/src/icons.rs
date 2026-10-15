@@ -301,6 +301,7 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32) {
         }
         "panel-effects" => pen.text(10.0, 10.0, "fx", 11.0),
         "panel-character" => pen.text(10.0, 10.5, "A", 15.0),
+        "panel-typography" => pen.text(10.0, 10.5, "OT", 11.5),
         "panel-paragraph" => pen.text(10.0, 10.5, "¶", 15.0),
         "panel-pstyles" => {
             pen.text(8.0, 10.0, "¶", 13.0);
@@ -454,6 +455,19 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32) {
             pen.line(&[(5.0, 10.0), (4.0, 10.0), (4.0, 17.0), (16.0, 17.0), (16.0, 10.0), (15.0, 10.0)]);
         }
         "screen-normal" => pen.rect(3.0, 4.0, 17.0, 16.0),
+        // View Options: a frame's dashed edges with a ruler's ticks above.
+        "view-options" => {
+            pen.w = 1.1;
+            for (x0, x1) in [(4.0, 6.5), (8.5, 11.5), (13.5, 16.0)] {
+                pen.line(&[(x0, 9.0), (x1, 9.0)]);
+                pen.line(&[(x0, 17.0), (x1, 17.0)]);
+            }
+            pen.line(&[(4.0, 9.0), (4.0, 17.0)]);
+            pen.line(&[(16.0, 9.0), (16.0, 17.0)]);
+            for x in [5.0, 8.0, 11.0, 14.0] {
+                pen.line(&[(x, 4.0), (x, 6.0)]);
+            }
+        }
         "screen-preview" => {
             pen.rect(3.0, 4.0, 17.0, 16.0);
             pen.frect(6.0, 7.0, 14.0, 13.0);
@@ -878,6 +892,7 @@ mod tests {
     /// What icon `name` paints into a 20×20 rect, as the painter's shape list.
     fn drawing(name: &str) -> String {
         let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx, "en");
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
             paint(ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0)), name, Color32::WHITE);
         });
@@ -896,5 +911,13 @@ mod tests {
         assert_ne!(drawn[0], drawn[1], "Scale draws like Free Transform");
         assert_ne!(drawn[0], drawn[2], "Shear draws like Free Transform");
         assert_ne!(drawn[1], drawn[2], "Scale and Shear draw alike");
+    }
+
+    #[test]
+    fn typography_panel_has_its_own_icon() {
+        let unknown = drawing("no-such-icon");
+        let typography = drawing("panel-typography");
+        assert_ne!(typography, unknown, "panel-typography falls back to the placeholder");
+        assert_ne!(typography, drawing("panel-character"), "Typography draws the Character icon");
     }
 }

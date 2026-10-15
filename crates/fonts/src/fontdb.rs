@@ -125,6 +125,8 @@ pub struct FontFace {
     em: std::sync::OnceLock<((f64, f64), bool)>,
     /// The font menu group and native family name, read on first use.
     group: std::sync::OnceLock<(FontGroup, Option<String>)>,
+    /// The PostScript name, read on first use.
+    postscript: std::sync::OnceLock<Option<String>>,
     /// Format, class and PANOSE numbers (the font menus), read on first use.
     kind: std::sync::OnceLock<crate::kind::FaceKind>,
 }
@@ -309,6 +311,13 @@ impl FontFace {
         let (g, n) = self.group.get_or_init(|| self.skrifa().map(|f| crate::group::classify(&f, &self.family)).unwrap_or_default());
         (*g, n.as_deref())
     }
+    /// The PostScript name (`name` ID 6), read from the font once. None for a variable font's
+    /// named instance: the file's name belongs to its default instance.
+    pub fn postscript_name(&self) -> Option<&str> {
+        self.postscript
+            .get_or_init(|| if self.is_variable() { None } else { self.skrifa().and_then(|f| name(&f, &[StringId::POSTSCRIPT_NAME])) })
+            .as_deref()
+    }
     /// Glyph id for `c` (0 = .notdef).
     pub fn glyph_for(&self, c: char) -> u32 {
         self.skrifa().and_then(|f| f.charmap().map(c)).map(|g| g.to_u32()).unwrap_or(0)
@@ -342,6 +351,7 @@ struct CatalogEntry {
     /// The font menu group and native family name, read by the scan.
     group: FontGroup,
     native: Option<String>,
+    postscript: Option<String>,
 }
 
 /// What the scan reads of one face in a font file: its names and font menu group.
@@ -352,6 +362,7 @@ struct ScannedFace {
     style: String,
     group: FontGroup,
     native: Option<String>,
+    postscript: Option<String>,
 }
 
 /// Process-wide font database: the fonts every document shares (bundled, installed, added), and
@@ -628,7 +639,8 @@ fn file_face_names(path: &std::path::Path) -> Vec<ScannedFace> {
                     crate::group::classify(&skrifa::FontRef::new(&font).ok()?, &family)
                 }
             };
-            Some(ScannedFace { family, style, group, native })
+            let postscript = name(&f, &[StringId::POSTSCRIPT_NAME]);
+            Some(ScannedFace { family, style, group, native, postscript })
         })
         .collect()
 }
@@ -779,6 +791,7 @@ fn make_face(bytes: FontBytes, source: FontSource, index: u32, family: String, s
         bmp: std::sync::OnceLock::new(),
         em: std::sync::OnceLock::new(),
         group: std::sync::OnceLock::new(),
+        postscript: std::sync::OnceLock::new(),
         kind: std::sync::OnceLock::new(),
     })
 }
@@ -843,6 +856,12 @@ fn without_format_suffix(family: &str) -> Option<&str> {
 /// The named style part of a style with axis settings (`Bold {wght:650}` → `Bold`).
 pub fn base_style(style: &str) -> &str {
     style.split('{').next().unwrap_or(style).trim()
+}
+
+/// Do two style names name the same face? Spacing, punctuation and case don't count, as when a face
+/// is looked up (InDesign documents can carry `Regular ` with a trailing space).
+pub fn same_style(a: &str, b: &str) -> bool {
+    norm(a) == norm(b)
 }
 
 fn norm(s: &str) -> String {
@@ -1010,6 +1029,15 @@ impl FontDb {
         });
     }
 
+    /// Whether the installed fonts are cataloged: a lookup by family name won't wait for the
+    /// scan (always true on wasm, which has none). See [`FontDb::scan_in_background`].
+    pub fn system_fonts_cataloged(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        return true;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.cataloged.get().is_some()
+    }
+
     /// Catalog the installed fonts on a background thread, so the first lookup by family name
     /// (opening a file, the font menus) doesn't wait for the scan. A no-op once they are
     /// cataloged, and on wasm.
@@ -1054,7 +1082,14 @@ impl FontDb {
                     continue;
                 }
                 for f in file_face_names(&p) {
-                    found.push(CatalogEntry { family: f.family, style: f.style, path: p.clone(), group: f.group, native: f.native });
+                    found.push(CatalogEntry {
+                        family: f.family,
+                        style: f.style,
+                        path: p.clone(),
+                        group: f.group,
+                        native: f.native,
+                        postscript: f.postscript,
+                    });
                 }
             }
         }
@@ -1092,18 +1127,33 @@ impl FontDb {
     /// [`MAX_DOCUMENT_FONT_FILES`] (in name order), files over [`MAX_DOCUMENT_FONT_BYTES`] or past
     /// [`MAX_DOCUMENT_FONTS_TOTAL`] in all, and files that aren't fonts are skipped with a note. A
     /// missing folder loads nothing (scope 0).
+    ///
+    /// The folder is named by a document, so this crate does not trust it: `allow` (`Ok`, or why a
+    /// path may not be read) is asked about
+    /// the folder and about every font file in it before either is opened, and a path it refuses
+    /// is skipped with its message (the engine passes its automation-root check; a host with no
+    /// roots passes `&|_| Ok(())`).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_document_fonts(&self, folder: &std::path::Path) -> DocumentFonts {
+    pub fn load_document_fonts(&self, folder: &std::path::Path, allow: &dyn Fn(&std::path::Path) -> Result<(), String>) -> DocumentFonts {
         let mut out = DocumentFonts::default();
+        if let Err(why) = allow(folder) {
+            out.skipped.push(why);
+            return out;
+        }
         let Ok(entries) = std::fs::read_dir(folder) else { return out };
-        let mut files: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-                matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "otc")) && p.is_file()
-            })
-            .collect();
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for path in entries.flatten().map(|e| e.path()) {
+            let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+            if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc" | "otc")) {
+                continue;
+            }
+            // Each file is vetted before it is touched at all, a link out of the folder included.
+            match allow(&path) {
+                Ok(()) if path.is_file() => files.push(path),
+                Ok(()) => {}
+                Err(why) => out.skipped.push(why),
+            }
+        }
         files.sort();
         let mut total = 0u64;
         let mut own: Vec<Arc<FontFace>> = Vec::new();
@@ -1201,6 +1251,11 @@ impl FontDb {
     /// The shared fonts' face for `family` + `style` (see [`ScopedFonts::face`]).
     pub fn face(&self, family: &str, style: &str) -> Arc<FontFace> {
         self.scoped(0).face(family, style)
+    }
+
+    /// The shared face with PostScript name `name` (see [`ScopedFonts::postscript_face`]).
+    pub fn postscript_face(&self, name: &str) -> Option<(String, String)> {
+        self.scoped(0).postscript_face(name)
     }
 
     /// Is `family` among the shared fonts (loaded, or installed on the system)?
@@ -1492,6 +1547,21 @@ impl ScopedFonts<'_> {
     /// without a format suffix (see [`ScopedFonts::face`])?
     pub fn has_family(&self, family: &str) -> bool {
         self.has_exact_family(family) || without_format_suffix(family).is_some_and(|base| self.has_exact_family(base))
+    }
+
+    /// The family and style of the face whose PostScript name is `name`, ignoring case (the
+    /// document's, loaded, or installed on the system, not loading it). SVGs exported from
+    /// Illustrator name fonts this way (`font-family="'MyriadPro-Regular'"`).
+    pub fn postscript_face(&self, name: &str) -> Option<(String, String)> {
+        let named = |ps: Option<&str>| ps.is_some_and(|ps| ps.eq_ignore_ascii_case(name));
+        if let Some(f) = self.own().iter().chain(self.db.read_faces().iter()).find(|f| named(f.postscript_name())) {
+            return Some((f.family.clone(), f.style.clone()));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(c) = self.db.read_catalog().iter().find(|c| named(c.postscript.as_deref())) {
+            return Some((c.family.clone(), c.style.clone()));
+        }
+        None
     }
 
     fn has_exact_family(&self, family: &str) -> bool {
