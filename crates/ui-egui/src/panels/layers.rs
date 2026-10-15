@@ -230,6 +230,7 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
             }
             let (eye, lock) = eye_lock(ui, &app.ui.language, row, !it.hidden, it.locked, !l.visible, ("item", it.id.0));
             let name = item_label(&doc, it);
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, is_sel, &name));
             let field = Rect::from_min_max(row.min + vec2(2.0 * COL_W + 28.0, 3.0), pos2(row.max.x - 28.0, row.max.y - 3.0));
             let renaming = match rename_field(ui, field, it.id.0) {
                 // An empty name goes back to the automatic label.
@@ -257,13 +258,22 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
                 let _ = app.run("object.setFlags", json!({"ids": [it.id.0], "hidden": !it.hidden}));
             } else if lock {
                 let _ = app.run("object.setFlags", json!({"ids": [it.id.0], "locked": !it.locked}));
-            } else if resp.double_clicked() {
-                // Its own name, or the label it shows without the brackets.
-                let current = if it.name.is_empty() { name.trim_start_matches('<').trim_end_matches('>').to_string() } else { it.name.clone() };
-                start_rename(ui, it.id.0, &current);
             } else if sq || resp.clicked() {
-                let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-                let _ = app.run("selection.set", json!({"ids": [it.id.0], "add": add}));
+                // As InDesign's: a slow double-click (a second click on the selected object's row,
+                // after the double-click delay) renames it; a quick double-click only selects.
+                let (now, add) = ui.input(|i| (i.time, i.modifiers.shift || i.modifiers.command));
+                let delay = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+                let last_id = egui::Id::new(("layers_last_click", it.id.0));
+                let last: Option<f64> = ui.data(|d| d.get_temp(last_id));
+                ui.data_mut(|d| d.insert_temp(last_id, now));
+                let slow = !sq && !add && !resp.double_clicked() && last.is_some_and(|t| now - t > delay && now - t < SLOW_RENAME_WINDOW);
+                if slow && shown == [it.id] {
+                    // Its own name, or the label it shows without the brackets.
+                    let current = if it.name.is_empty() { name.trim_start_matches('<').trim_end_matches('>').to_string() } else { it.name.clone() };
+                    start_rename(ui, it.id.0, &current);
+                } else {
+                    let _ = app.run("selection.set", json!({"ids": [it.id.0], "add": add}));
+                }
             }
         }
     }
@@ -290,6 +300,9 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
         });
     });
 }
+
+/// Seconds within which a second click on a selected row renames it (after the double-click delay).
+const SLOW_RENAME_WINDOW: f64 = 1.5;
 
 /// The object whose row is being renamed.
 type RenameKey = u64;
@@ -369,6 +382,45 @@ mod tests {
         h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(("layer_open", first.0)), false));
         h.run_steps(2);
         assert!(!open(&h));
+    }
+
+    /// As InDesign's: a slow double-click on an object's row renames it; a quick one doesn't.
+    #[test]
+    fn a_slow_double_click_renames_an_object_and_a_quick_one_does_not() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [72, 72, 200, 200], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": []})).unwrap();
+        let mut h =
+            Harness::builder().with_size(egui::vec2(260.0, 400.0)).with_step_dt(0.05).build_ui_state(|ui, app: &mut DesignApp| show(app, ui), app);
+        h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(("layer_open", h.state().session.active().unwrap().active_layer.0)), true));
+        h.run_steps(2);
+        let row = h.get_by_label("<rectangle>").rect().center();
+        let click = |h: &mut Harness<'_, DesignApp>| {
+            h.input_mut().events.push(egui::Event::PointerMoved(row));
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos: row,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.step();
+            }
+        };
+        let renaming = |h: &Harness<'_, DesignApp>| h.query_by_role(egui::accesskit::Role::TextInput).is_some();
+        // A quick double-click selects it and doesn't rename.
+        click(&mut h);
+        click(&mut h);
+        h.run_steps(2);
+        assert_eq!(h.state().session.active().unwrap().selection.items, vec![ItemId(id)]);
+        assert!(!renaming(&h), "a double-click doesn't rename");
+        // A second click a moment later renames it.
+        h.run_steps(12);
+        click(&mut h);
+        h.run_steps(2);
+        assert!(renaming(&h), "a slow double-click renames");
     }
 
     #[test]
