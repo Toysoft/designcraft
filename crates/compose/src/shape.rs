@@ -462,8 +462,9 @@ pub(crate) fn collapse_tcy(glyphs: &mut [Glyph], vertical: bool) {
     }
 }
 
-/// The feature switches a run sets on its own text: Ligatures off and its OpenType features. Runs
-/// that differ only in these (and paint) shape as one, each switch over its run's bytes.
+/// The feature switches a run sets on its own text: Ligatures off, its OpenType features and a
+/// forced isolated form. Runs that differ only in these (and paint) shape as one, each switch over
+/// its run's bytes.
 fn switch_features(p: &CharProps) -> Vec<Feature> {
     let mut v = Vec::new();
     if !p.ligatures {
@@ -472,6 +473,11 @@ fn switch_features(p: &CharProps) -> Vec<Feature> {
     }
     for f in &p.otf_features {
         v.extend(feature(f));
+    }
+    // Isolated breaks the letter's joins. Initial, Medial and Final don't override the joins the
+    // text calls for: InDesign draws a word-final letter set to Medial in its final form.
+    if p.positional_form == "Isolated" {
+        v.extend(["isol", "-init", "-medi", "-fina"].into_iter().flat_map(feature));
     }
     v
 }
@@ -515,18 +521,6 @@ fn common_features(p: &CharProps) -> Vec<Feature> {
     };
     if !form.is_empty() {
         v.extend(feature(form));
-    }
-    let positional = match p.positional_form.as_str() {
-        "Initial" => Some("init"),
-        "Medial" => Some("medi"),
-        "Final" => Some("fina"),
-        "Isolated" => Some("isol"),
-        _ => None,
-    };
-    if let Some(tag) = positional {
-        for form in ["isol", "init", "medi", "fina"] {
-            v.extend(feature(&format!("{}{}", if form == tag { "" } else { "-" }, form)));
-        }
     }
     v
 }
@@ -1173,5 +1167,6 @@ fn shaping_key(p: &CharProps) -> CharProps {
     k.xml_tag.clone_from(&d.xml_tag);
     k.ligatures = d.ligatures;
     k.otf_features.clone_from(&d.otf_features);
+    k.positional_form.clone_from(&d.positional_form);
     k
 }

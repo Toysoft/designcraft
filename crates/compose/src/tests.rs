@@ -108,6 +108,28 @@ fn tracking_skips_a_mark_in_its_own_colour() {
     assert!((y_at(false) - y_at(true)).abs() < 1e-6, "{} vs {}", y_at(false), y_at(true));
 }
 
+/// A forced positional form on the base alone (InDesign writes `PositionalForm` per run) is a
+/// switch over the base's bytes; the mark after it still shapes with its base.
+#[test]
+fn a_positional_form_on_the_base_keeps_the_mark_on_it() {
+    let text = "Ax\u{301}y";
+    let x = text.find('x').unwrap();
+    let place = |forced: bool| {
+        let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 300.0, 100.0), ParaAttrs::default());
+        if forced {
+            d.story_mut(sid).unwrap().format_chars(x..x + 1, |f| f.over.positional_form = Some("Initial".into()));
+        }
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        let line = all_lines(&cs)[0].clone();
+        let at = line.glyphs.iter().position(|g| g.byte == x).unwrap();
+        let g = line.glyphs[at + 1].clone();
+        (g.x, g.y)
+    };
+    let (x0, y0) = place(false);
+    let (x1, y1) = place(true);
+    assert!((x0 - x1).abs() < 1e-6 && (y0 - y1).abs() < 1e-6, "the mark moved: {x0},{y0} → {x1},{y1}");
+}
+
 #[test]
 fn small_frame_oversets() {
     let (d, sid, _) = doc_with(LOREM, Rect::new(0.0, 0.0, 200.0, 40.0), ParaAttrs::default());
@@ -3314,6 +3336,26 @@ fn arabic_kashida_moves_marks_with_their_cluster_and_respects_nonjoiners() {
     d.settings.glyph_fallback = true;
     let cs = compose_story(&d, sid, &ComposeOptions::default());
     assert!(cs.frames[0].lines[0].glyphs.iter().all(|g| g.gid != g.face.glyph_for('\u{0640}') || g.len > 0));
+}
+
+/// Initial, Medial and Final don't override the joins the text calls for (InDesign draws a
+/// word-initial letter set to Final still joined to the next one).
+#[test]
+fn a_forced_final_form_keeps_the_letters_joined() {
+    let text = "ببب";
+    let gids = |form: Option<&str>| {
+        let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 180.0, 100.0), ParaAttrs::default());
+        d.settings.glyph_fallback = true;
+        if let Some(form) = form {
+            d.story_mut(sid).unwrap().format_chars(0..2, |f| f.over.positional_form = Some(form.into()));
+        }
+        let cs = compose_story(&d, sid, &ComposeOptions::default());
+        cs.frames[0].lines[0].glyphs.iter().map(|g| g.gid).collect::<Vec<_>>()
+    };
+    let natural = gids(None);
+    for form in ["Final", "Medial", "Initial"] {
+        assert_eq!(gids(Some(form)), natural, "{form}");
+    }
 }
 
 #[test]
