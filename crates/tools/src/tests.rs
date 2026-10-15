@@ -1214,6 +1214,23 @@ fn eyedropper_samples_a_placed_image_and_matches_other_objects() {
     assert_eq!(a, vec![Action::Exec("object.matchAttributes".into(), serde_json::json!({"from": photo.0}))]);
 }
 
+/// With text selected, the Eyedropper on a text frame picks up its text formatting instead of
+/// copying the frame's fill and stroke onto the selection (InDesign's Eyedropper).
+#[test]
+fn eyedropper_with_text_selected_picks_up_text_formatting() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (head, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 300.0, 140.0), lid, "Header", ParaFormat::default()).unwrap();
+    let (_, body) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 200.0, 300.0, 300.0), lid, "Body", ParaFormat::default()).unwrap();
+    let s = Selection::text(designcraft_doc::TextSel { story: body, anchor: 0, focus: 4, frame: None, cell: None });
+    let (c, l) = (Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let cx = ctx(&d, &s, &c, &l);
+    let mut t = create("eyedropper");
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 150.0 + off.x, 120.0 + off.y));
+    assert_eq!(a, vec![Action::Exec("type.pickUpFormat".into(), serde_json::json!({"frame": head.0, "point": [150.0, 120.0]}))]);
+}
+
 #[test]
 fn eyedropper_ignores_inactive_states_of_a_multi_state_object() {
     use designcraft_doc::{Asset, AssetId, Content, Graphic};

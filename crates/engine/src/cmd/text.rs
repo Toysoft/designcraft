@@ -34,6 +34,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             |s, p| select_at(s, p, str_param(p, "unit").unwrap_or("word"))
         ),
+        cmd!(
+            "type.pickUpFormat",
+            "Apply Text Attributes (Eyedropper)",
+            [],
+            None,
+            "{frame, point} — the Eyedropper with text selected: the character and paragraph formatting (styles and overrides) of the text under the point go to the selected text",
+            has_text,
+            pick_up_format
+        ),
         cmd!(noundo "text.selectSentence", "Select Sentence", [], None, "{frame, point} — the sentence under the point", has_doc, |s, p| {
             select_around(s, p, "text.selectSentence", sentence_bounds)
         }),
@@ -360,6 +369,38 @@ fn hit_byte_with(
     }
     let b = hit(&cs, fi, inner).unwrap_or(0);
     Some((sid, b, None))
+}
+
+/// The Eyedropper with text selected: the formatting of the text under `point` in `frame` goes to
+/// the selection, as InDesign's does (character style and overrides on the selected characters,
+/// paragraph style and overrides on their paragraphs).
+fn pick_up_format(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "type.pickUpFormat";
+    let frame = id_param(p, "frame").ok_or_else(|| bad(ID, "missing frame"))?;
+    let pt = point_param(p, "point").ok_or_else(|| bad(ID, "missing point"))?;
+    let (sid, b, cell) = hit_byte_with(s, frame, pt, compose::hit_char).ok_or_else(|| bad(ID, "not a text frame"))?;
+    let st = s.doc()?;
+    let sel = st.selection.text.ok_or_else(|| bad(ID, "select the text to format"))?;
+    let src = st.doc.text_story(sid, cell).ok_or(designcraft_doc::DocError::NoStory(sid))?;
+    let b = floor_char_boundary(&src.text, b);
+    // The character under the pointer (at the end of a line, the one before it).
+    let at = if b >= src.text.len() || src.text[b..].starts_with('\n') { b.saturating_sub(1) } else { b };
+    let at = floor_char_boundary(&src.text, at);
+    let chars = src.char_format_at(at).clone();
+    let para = src.paras.get(src.para_at(at)).cloned().ok_or(designcraft_doc::DocError::NoStory(sid))?;
+    let (a, e) = (sel.anchor.min(sel.focus), sel.anchor.max(sel.focus));
+    s.typing_format = None;
+    s.edit(|d, _| {
+        let story = d.text_story_mut(sel.story, sel.cell).ok_or(designcraft_doc::DocError::NoStory(sel.story))?;
+        if e > a {
+            story.format_chars(a..e, |f| *f = chars.clone());
+        }
+        story.format_paras(a..e, |f| {
+            f.style = para.style.clone();
+            f.para = para.para.clone();
+        });
+        Ok(json!({"style": chars.style, "paragraphStyle": para.style}))
+    })
 }
 
 /// Select the word, line, paragraph or story at `point` in `frame` (multiple clicks).
@@ -3043,5 +3084,44 @@ mod placeholder_tests {
         assert!(!text.contains(".O") && !text.contains(".L"), "sentences are spaced: {text}");
         assert!(st["overset"].is_null(), "nothing overset: {}", st["overset"]);
         assert!(text.len() > 1500, "the frame is filled: {}", text.len());
+    }
+}
+
+#[cfg(test)]
+mod pick_up_format_tests {
+    use designcraft_doc::ItemId;
+    use serde_json::json;
+
+    use crate::Session;
+
+    /// Typefool's video (12:04): select body text, Eyedropper, click the third header: the body
+    /// text takes the header's font, size and paragraph settings. DesignCraft copied the frame's
+    /// fill and stroke instead.
+    #[test]
+    fn the_eyedropper_copies_text_formatting_to_selected_text() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let head = s.execute("frame.create", &json!({"rect": [36, 36, 400, 100], "content": "text", "text": "Innovative Design"})).unwrap();
+        s.execute("text.select", &json!({"story": head["story"], "anchor": 0, "focus": 17})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"fontStyle": "Bold", "size": 18, "tracking": 20}})).unwrap();
+        s.execute("type.para", &json!({"attrs": {"align": "center", "spaceAfter": 6}})).unwrap();
+        let body = s.execute("frame.create", &json!({"rect": [36, 200, 400, 300], "content": "text", "text": "Body copy here.\nSecond."})).unwrap();
+        s.execute("text.select", &json!({"story": body["story"], "anchor": 0, "focus": 4})).unwrap();
+        // Click the header's middle (the frame's text starts at its top left).
+        let r = s.execute("type.pickUpFormat", &json!({"frame": head["id"], "point": [100, 50]})).unwrap();
+        assert!(r.is_object(), "{r}");
+        s.execute("text.select", &json!({"story": body["story"], "anchor": 0, "focus": 4})).unwrap();
+        let a = s.execute("type.selectionAttrs", &json!({})).unwrap();
+        assert_eq!((&a["chars"]["fontStyle"], &a["chars"]["size"], &a["chars"]["tracking"]), (&json!("Bold"), &json!(18.0), &json!(20.0)), "{a}");
+        assert_eq!((&a["para"]["align"], &a["para"]["spaceAfter"]), (&json!("center"), &json!(6.0)));
+        // Only the selected characters change; the second paragraph keeps its own.
+        s.execute("text.select", &json!({"story": body["story"], "anchor": 6, "focus": 10})).unwrap();
+        assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["size"], json!(12.0));
+        s.execute("text.select", &json!({"story": body["story"], "anchor": 17, "focus": 20})).unwrap();
+        assert_eq!(s.execute("type.selectionAttrs", &json!({})).unwrap()["para"]["align"], json!("left"));
+        // Not a text frame, or nothing selected: refused.
+        let rect = s.execute("frame.create", &json!({"rect": [500, 500, 520, 520]})).unwrap()["id"].as_u64().unwrap();
+        assert!(s.execute("type.pickUpFormat", &json!({"frame": rect, "point": [510, 510]})).is_err());
+        let _ = ItemId(rect);
     }
 }
