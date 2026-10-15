@@ -221,6 +221,36 @@ pub fn go_to_page(app: &mut DesignApp, abs: usize) {
     }
 }
 
+/// Presentation: the spread in view, centred and as large as `rect` allows.
+fn present_fit(app: &mut DesignApp, rect: Rect) {
+    let Some(st) = app.session.active() else { return };
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let Some(b) = current_slot(app, &layout).and_then(|i| layout.slots.get(i)).map(|s| s.bounds) else { return };
+    if b.width() <= 0.0 || b.height() <= 0.0 {
+        return;
+    }
+    let zoom = (rect.width() as f64 / b.width()).min(rect.height() as f64 / b.height()).clamp(0.05, 40.0);
+    let origin = Point::new(b.center().x - rect.width() as f64 / 2.0 / zoom, b.center().y - rect.height() as f64 / 2.0 / zoom);
+    if let Some(v) = app.view_mut() {
+        v.zoom = zoom;
+        v.origin = origin;
+    }
+}
+
+/// Centre the spread `delta` spreads after (or before) the one in view (keeps zoom); stops at the
+/// first and last spread. Parent spreads while they are being edited.
+pub fn step_spread(app: &mut DesignApp, delta: isize) {
+    let Some(st) = app.session.active() else { return };
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let Some(cur) = current_slot(app, &layout) else { return };
+    let to = cur.saturating_add_signed(delta).min(layout.slots.len().saturating_sub(1));
+    let Some(b) = layout.slots.get(to).map(|s| s.bounds) else { return };
+    let Some(rect) = app.canvas_rect else { return };
+    if let Some(v) = app.view_mut() {
+        v.origin = Point::new(b.center().x - rect.width() as f64 / 2.0 / v.zoom, b.center().y - rect.height() as f64 / 2.0 / v.zoom);
+    }
+}
+
 pub fn zoom_at(app: &mut DesignApp, screen: Pos2, factor: f64) {
     let Some(rect) = app.canvas_rect else { return };
     let Some(v) = app.view_mut() else { return };
@@ -323,10 +353,25 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let rect = view_rect(screen, rot);
     app.canvas_rect = Some(rect);
     let resp = ui.allocate_rect(full, Sense::click_and_drag());
-    if !app.view().is_some_and(|v| v.fitted) {
-        fit(app, rect, "spread");
+    if presenting {
+        // One spread at a time, as large as the screen allows; a click shows the next one,
+        // Shift-click the previous one. Tools and selection don't see the input.
+        present_fit(app, rect);
+        if resp.clicked() {
+            // The release that made the click says whether Shift was down.
+            let shift = ui.input(|i| {
+                i.modifiers.shift
+                    || i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. } if modifiers.shift))
+            });
+            step_spread(app, if shift { -1 } else { 1 });
+            present_fit(app, rect);
+        }
+    } else {
+        if !app.view().is_some_and(|v| v.fitted) {
+            fit(app, rect, "spread");
+        }
+        handle_input(app, ui, &resp, rect);
     }
-    handle_input(app, ui, &resp, rect);
     if bars {
         scrollbars(app, ui, outer, screen, rect, &t);
     }
@@ -334,7 +379,10 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let Some(&v) = app.view() else { return };
     let xf = Xf::new(rect, &v);
     let doc = st.doc.clone();
-    let layout = CanvasLayout::new(&doc, st.editing_parents);
+    let mut layout = CanvasLayout::new(&doc, st.editing_parents);
+    if presenting && let Some(cur) = current_slot(app, &layout) {
+        layout.slots = layout.slots.get(cur).copied().into_iter().collect();
+    }
     let painter = ui.painter_at(screen);
     let preview = matches!(app.ui.screen_mode, ScreenMode::Preview | ScreenMode::Presentation);
     let bg = if app.ui.screen_mode == ScreenMode::Presentation { Color32::BLACK } else { t.pasteboard };
@@ -404,6 +452,9 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         if app.ui.dynamic_spelling && !preview {
             draw_dynamic_spelling(app, ui.ctx(), &painter, &xf, &doc, &layout);
         }
+    }
+    if presenting {
+        return;
     }
     let sel_rect = draw_selection(app, &painter, &xf, &doc, &layout);
     draw_tool_overlays(app, &painter, &xf);
