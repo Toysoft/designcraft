@@ -352,6 +352,12 @@ impl Ctx {
                 // Tracked changes import as accepted: insertions and move destinations are kept,
                 // deletions (`del`) and move sources (`moveFrom`) are dropped.
                 "hyperlink" | "smartTag" | "ins" | "moveTo" | "fldSimple" | "customXml" => self.inline(e, st, allow_notes),
+                // A content control (date picker, drop-down, plain text) keeps its runs in `sdtContent`.
+                "sdt" => {
+                    if let Some(c) = e.child("sdtContent") {
+                        self.inline(c, st, allow_notes);
+                    }
+                }
                 _ => {}
             }
         }
@@ -618,6 +624,20 @@ mod tests {
         assert_eq!(i.para_styles[1].chars.size, Some(16.0));
         assert_eq!(i.para_styles[1].para.space_before, Some(12.0));
         assert_eq!(i.char_styles[0].chars.font_style.as_deref(), Some("Italic"));
+    }
+
+    /// A content control inside a paragraph (`w:sdt`) keeps its text, also around a hyperlink.
+    #[test]
+    fn inline_content_control_text_is_kept() {
+        let document = format!(
+            r#"<w:document {W}><w:body>
+              <w:p><w:r><w:t xml:space="preserve">Date: </w:t></w:r><w:sdt><w:sdtPr><w:alias w:val="d"/></w:sdtPr><w:sdtContent><w:r><w:t>1 May 2026</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t>.</w:t></w:r></w:p>
+              <w:p><w:sdt><w:sdtContent><w:hyperlink><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:sdtContent></w:sdt></w:p>
+            </w:body></w:document>"#
+        );
+        let st = import(&docx(&document, "", "")).unwrap().story;
+        st.check().unwrap();
+        assert_eq!(st.text, "Date: 1 May 2026.\nLink");
     }
 
     /// A page break ends its paragraph: the text after it is a paragraph of its own (same style).
