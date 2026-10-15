@@ -1311,17 +1311,29 @@ fn body_html<'a>(
     (body, images, toc)
 }
 
-/// Placed images (not video or sound) without alt text, by asset name: they are exported as
-/// decorative (`alt=""`), which an export can report.
+/// Placed images (not video or sound) without alt text, by asset name, including graphics
+/// anchored in the text: they are exported as decorative (`alt=""`), which an export can report.
 pub fn images_without_alt(doc: &Document) -> Vec<String> {
     let mut out = Vec::new();
-    for b in reading_order(doc) {
-        let Block::Image(iid) = b else { continue };
-        let Some(it) = doc.item(iid) else { continue };
-        let Content::Graphic(g) = &it.content else { continue };
-        let Some(a) = doc.assets.get(&g.asset) else { continue };
+    let mut check = |it: &Item| {
+        let Content::Graphic(g) = &it.content else { return };
+        let Some(a) = doc.assets.get(&g.asset) else { return };
         if !a.data.is_empty() && designcraft_doc::media_kind(safe_mime(&a.mime)).is_none() && it.alt_text.trim().is_empty() {
             out.push(a.name.clone());
+        }
+    };
+    for b in reading_order(doc) {
+        match b {
+            Block::Image(iid) => {
+                if let Some(it) = doc.item(iid) {
+                    check(it);
+                }
+            }
+            Block::Story(sid) => {
+                for o in doc.story(sid).map(|st| st.objects.as_slice()).unwrap_or_default() {
+                    o.item.walk(&mut |it| check(it));
+                }
+            }
         }
     }
     out
@@ -1562,6 +1574,10 @@ mod tests {
         assert!(page.contains("alt=\"inline\"") && page.contains("alt=\"above\""), "{page}");
         // story_html on its own still leaves objects out.
         assert!(!story_html(&d, sid).contains("<img"));
+        assert!(images_without_alt(&d).is_empty());
+        let bare = designcraft_doc::AnchoredObject::new(graphic(&mut d, ""), designcraft_doc::AnchorPosition::Inline { y_offset: 0.0 });
+        d.story_mut(sid).unwrap().insert_object(0, bare);
+        assert_eq!(images_without_alt(&d), vec!["dot.png".to_string()]);
     }
 
     fn st_typed(d: &mut Document, sid: StoryId) {
