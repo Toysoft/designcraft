@@ -495,64 +495,122 @@ pub fn buttons(app: &mut DesignApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Liquid Layout panel: the current page's rule, the selection's pins (object-based), the page's
-/// liquid guides, and Create Alternate Layout.
+/// Liquid page rules in InDesign's order, with their menu labels.
+pub const LIQUID_RULES: [(designcraft_doc::LiquidRule, &str); 5] = [
+    (designcraft_doc::LiquidRule::Off, "Off"),
+    (designcraft_doc::LiquidRule::Scale, "Scale"),
+    (designcraft_doc::LiquidRule::ReCenter, "Re-center"),
+    (designcraft_doc::LiquidRule::ObjectBased, "Object-based"),
+    (designcraft_doc::LiquidRule::GuideBased, "Guide-based"),
+];
+
+/// A liquid page rule's menu label.
+pub fn liquid_rule_label(rule: designcraft_doc::LiquidRule) -> &'static str {
+    LIQUID_RULES.iter().find(|(r, _)| *r == rule).map_or("Off", |(_, l)| l)
+}
+
+/// Whether page `abs` follows the object-based rule (its own, or its parent page's).
+fn object_based(d: &designcraft_doc::Document, abs: usize) -> bool {
+    use designcraft_doc::LiquidRule as L;
+    let Some((si, pi)) = d.page_loc(abs) else { return false };
+    match d.spreads[si].pages[pi].liquid {
+        L::ObjectBased => true,
+        L::ControlledByParent => {
+            d.parent_page_for(abs).and_then(|(ppi, ppg)| d.parents.get(ppi)?.pages.get(ppg).map(|p| p.liquid == L::ObjectBased)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Liquid Layout panel, laid out as InDesign's: the page's Liquid Page Rule (with "Page: n"),
+/// Content › Auto-Fit, and Object Constraints › Resize with Page (Height, Width) and Pin (Top,
+/// Left, Bottom, Right) for the selected object on an object-based page. The page's liquid
+/// guides follow (Create Alternate Layout is in the Layout menu).
 pub fn liquid(app: &mut DesignApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
-    let Some(page) = crate::canvas::current_page(app) else {
-        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "No document.")).size(11.0).color(t.text_dim));
+    let lang = app.ui.language.clone();
+    // The Page tool's page, the page in view, or (before the canvas lays out) the first.
+    let Some(page) = app.session.active().map(|s| s.selection.page.or_else(|| crate::canvas::current_page(app)).unwrap_or(0)) else {
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "No document.")).size(11.0).color(t.text_dim));
         return;
     };
     let Some(d) = app.session.active().map(|d| d.doc.clone()) else { return };
     let Some((si, pi)) = d.page_loc(page) else { return };
     let pg = d.spreads[si].pages[pi].clone();
-    use designcraft_doc::LiquidRule as L;
-    crate::rtl::label(ui, egui::RichText::new(format!("{} {}", crate::i18n::tr(&app.ui.language, "Page"), d.page_name(page))).strong());
-    let mut rule = pg.liquid;
-    egui::ComboBox::from_id_salt("liquid_rule")
-        .selected_text(crate::rtl::widget(
-            ui,
-            crate::i18n::tr(
-                &app.ui.language,
-                match rule {
-                    L::Off => "Off",
-                    L::Scale => "Scale",
-                    L::ReCenter => "Re-center",
-                    L::GuideBased => "Guide-based",
-                    L::ObjectBased => "Object-based",
-                },
-            ),
-        ))
-        .show_ui(ui, |ui| {
-            for (r, label) in
-                [(L::Off, "Off"), (L::Scale, "Scale"), (L::ReCenter, "Re-center"), (L::GuideBased, "Guide-based"), (L::ObjectBased, "Object-based")]
-            {
-                ui.selectable_value(&mut rule, r, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label)));
-            }
+    ui.horizontal(|ui| {
+        crate::widgets::caption(ui, crate::i18n::tr(&lang, "Liquid Page Rule:"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::widgets::caption(ui, &format!("{} {}", crate::i18n::tr(&lang, "Page:"), d.page_name(page)));
         });
-    if rule != pg.liquid {
-        let _ = app.run("liquid.pageRule", json!({"rule": rule, "pages": [page + 1]}));
-    }
-    if rule == L::ObjectBased
-        && let Some(id) = app.session.active().and_then(|s| s.selection.items.first().copied())
-        && let Some(it) = d.item(id)
-    {
-        ui.separator();
-        let l = it.liquid.unwrap_or(designcraft_doc::ObjectLiquid { resize_width: true, resize_height: true, ..Default::default() });
-        let mut v = [l.resize_width, l.resize_height, l.pin_top, l.pin_bottom, l.pin_left, l.pin_right];
-        let keys = ["resizeWidth", "resizeHeight", "pinTop", "pinBottom", "pinLeft", "pinRight"];
-        let labels = ["Resize width", "Resize height", "Pin top", "Pin bottom", "Pin left", "Pin right"];
-        ui.horizontal_wrapped(|ui| {
-            for ((on, key), label) in v.iter_mut().zip(keys).zip(labels) {
-                if crate::widgets::native_checkbox(ui, on, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).changed() {
-                    let _ = app.run("liquid.object", json!({key: *on}));
+    });
+    egui::ComboBox::from_id_salt("liquid_rule")
+        .selected_text(crate::rtl::widget(ui, crate::i18n::tr(&lang, liquid_rule_label(pg.liquid))))
+        .width(190.0)
+        .show_ui(ui, |ui| {
+            for (r, label) in LIQUID_RULES {
+                if ui.selectable_label(pg.liquid == r, crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).clicked() && r != pg.liquid {
+                    let _ = app.run("liquid.pageRule", json!({"rule": r, "pages": [page + 1]}));
                 }
             }
         });
-    }
+    ui.separator();
+    // The selected object (one on this page).
+    let item = app
+        .session
+        .active()
+        .and_then(|s| s.selection.items.first().copied())
+        .and_then(|id| d.item(id))
+        .filter(|it| d.page_of_item(it.id) == Some(page));
+    // Content: Auto-Fit (graphic frames).
+    crate::widgets::caption(ui, crate::i18n::tr(&lang, "Content:"));
+    let graphic = item.and_then(|it| if let designcraft_doc::Content::Graphic(g) = &it.content { Some(g.auto_fit) } else { None });
+    let mut auto = graphic.is_some_and(|f| f != designcraft_doc::Fitting::None);
+    ui.indent("liquid_content", |ui| {
+        let r = ui
+            .add_enabled_ui(graphic.is_some(), |ui| {
+                crate::widgets::native_checkbox(ui, &mut auto, crate::rtl::widget(ui, crate::i18n::tr(&lang, "Auto-Fit")))
+            })
+            .inner;
+        if r.changed() {
+            let _ = app.run("object.fittingOptions", json!({"autoFit": auto}));
+        }
+    });
+    // Object Constraints: for an object on an object-based page.
+    crate::widgets::caption(ui, crate::i18n::tr(&lang, "Object Constraints:"));
+    let on = item.is_some() && object_based(&d, page);
+    let l = item
+        .filter(|_| on)
+        .map(|it| it.liquid.unwrap_or(designcraft_doc::ObjectLiquid { resize_width: true, resize_height: true, ..Default::default() }))
+        .unwrap_or_default();
+    ui.indent("liquid_constraints", |ui| {
+        ui.add_enabled_ui(on, |ui| {
+            let rows: [(&str, [(&str, &str, bool); 2]); 2] = [
+                ("Resize with Page:", [("Height", "resizeHeight", l.resize_height), ("Width", "resizeWidth", l.resize_width)]),
+                ("Pin:", [("Top", "pinTop", l.pin_top), ("Left", "pinLeft", l.pin_left)]),
+            ];
+            for (title, boxes) in rows {
+                crate::widgets::caption(ui, crate::i18n::tr(&lang, title));
+                let mut grid_boxes = vec![boxes.to_vec()];
+                if title == "Pin:" {
+                    grid_boxes.push(vec![("Bottom", "pinBottom", l.pin_bottom), ("Right", "pinRight", l.pin_right)]);
+                }
+                egui::Grid::new(("liquid_grid", title)).num_columns(2).min_col_width(90.0).show(ui, |ui| {
+                    for row in grid_boxes {
+                        for (label, key, value) in row {
+                            let mut v = value;
+                            if crate::widgets::native_checkbox(ui, &mut v, crate::rtl::widget(ui, crate::i18n::tr(&lang, label))).changed() {
+                                let _ = app.run("liquid.object", json!({key: v}));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+    });
     if !pg.guides.is_empty() {
         ui.separator();
-        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Liquid guides")).size(11.0).color(t.text_dim));
+        crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&lang, "Liquid guides")).size(11.0).color(t.text_dim));
         for (gi, g) in pg.guides.iter().enumerate() {
             let mut on = g.liquid;
             let label = format!("{:?} at {:.1}", g.orientation, g.position);
@@ -561,22 +619,6 @@ pub fn liquid(app: &mut DesignApp, ui: &mut egui::Ui) {
             }
         }
     }
-    ui.separator();
-    let key = egui::Id::new("alt_layout");
-    let (mut name, mut w, mut h): (String, f64, f64) = ui.data(|x| x.get_temp(key)).unwrap_or(("Tablet H".into(), 1024.0, 768.0));
-    crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Create Alternate Layout")).size(11.0).color(t.text_dim));
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut name).desired_width(90.0));
-        ui.add(egui::DragValue::new(&mut w).range(1.0..=15552.0).suffix(" pt"));
-        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "×"));
-        ui.add(egui::DragValue::new(&mut h).range(1.0..=15552.0).suffix(" pt"));
-    });
-    if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Create"))).clicked()
-        && let Err(e) = app.run("layout.createAlternate", json!({"name": name, "width": w, "height": h}))
-    {
-        app.status(format!("Alternate layout: {e}"));
-    }
-    ui.data_mut(|x| x.insert_temp(key, (name, w, h)));
 }
 
 /// Media panel: the selected video or sound's playback options and poster.
@@ -1072,6 +1114,24 @@ mod tests {
         held_liquid_guide_origin_case(HeldGuideMutation::CreateGuidesThenAdd);
     }
 
+    fn liquid_guide_checkbox_count(h: &egui_kittest::Harness<'_, DesignApp>) -> usize {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::{NodeT, Queryable};
+
+        // The d07 panel keeps these object controls visible without a selection.
+        // Exclude only their actual nodes, while retaining every guide row.
+        let object_controls = ["Auto-Fit", "Height", "Width", "Top", "Left", "Bottom", "Right"].map(|label| {
+            let node = h.get_by_role_and_label(Role::CheckBox, label);
+            assert!(node.accesskit_node().is_disabled(), "{label} must stay disabled without a selected object");
+            node.accesskit_node().id()
+        });
+        h.root()
+            .children_recursive()
+            .filter(|node| node.accesskit_node().role() == Role::CheckBox)
+            .filter(|node| !object_controls.contains(&node.accesskit_node().id()))
+            .count()
+    }
+
     fn held_liquid_guide_origin_case(mutation: HeldGuideMutation) {
         use designcraft_doc::{Guide, LiquidRule, Orientation, Selection};
         use designcraft_engine::{DocState, HistoryEntry};
@@ -1324,10 +1384,7 @@ mod tests {
             }
             quiet_held(&h, blank);
             blank_guard(&h, blank, origin.layer_id);
-            assert_eq!(
-                h.root().children_recursive().filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox).count(),
-                if delete { 1 } else { 2 }
-            );
+            assert_eq!(liquid_guide_checkbox_count(&h), if delete { 1 } else { 2 });
             let current = h.get_by_label(if delete { "Vertical at 200.0" } else { "Vertical at 100.0" });
             assert_eq!(current.accesskit_node().role(), egui::accesskit::Role::CheckBox);
             let current_id = current.accesskit_node().locate().0;
@@ -1961,7 +2018,7 @@ mod tests {
                     assert!(r.enabled() && r.interact_rect.contains(p));
                 }
                 assert_eq!(h.ctx.layer_id_at(p), Some(origin.layer_id));
-                assert_eq!(h.root().children_recursive().filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox).count(), 1);
+                assert_eq!(liquid_guide_checkbox_count(&h), 1);
                 assert_eq!(h.get_by_label("Vertical at 100.0").accesskit_node().locate().0, origin.id.accesskit_id());
                 let held = h.ctx.read_response(origin.id).expect("actual origin response after press");
                 assert_eq!(held.rect, origin.rect);
@@ -1998,7 +2055,7 @@ mod tests {
                     && i.pointer.interact_pos() == Some(p)));
                 assert_eq!(crate::canvas::current_page(h.state()), Some(page));
                 assert_eq!(h.state().session.active().unwrap().selection, Selection::default());
-                assert_eq!(h.root().children_recursive().filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox).count(), 1);
+                assert_eq!(liquid_guide_checkbox_count(&h), 1);
                 let warmed = if intervene { &destination } else { &origin };
                 let current_node = h.get_by_label("Vertical at 100.0");
                 assert_eq!(current_node.accesskit_node().role(), egui::accesskit::Role::CheckBox);
@@ -2058,10 +2115,7 @@ mod tests {
             blank_guard(&h, blank, origin.layer_id);
             assert_eq!(crate::canvas::current_page(h.state()), Some(page), "actual route reached intended page");
             assert_eq!(h.state().session.active().unwrap().selection, Selection::default());
-            assert_eq!(
-                h.root().children_recursive().filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox).count(),
-                if page_switch { 1 } else { 2 }
-            );
+            assert_eq!(liquid_guide_checkbox_count(&h), if page_switch { 1 } else { 2 });
             let (label, warmed) = if page_switch && intervene { (b_label, &destination) } else { ("Vertical at 100.0", &origin) };
             let n = h.get_by_label(label);
             assert_eq!(n.accesskit_node().role(), egui::accesskit::Role::CheckBox);
@@ -2128,5 +2182,221 @@ mod tests {
             }
             eprintln!("context branch completed page_switch={page_switch} intervene={intervene}");
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn checkbox_held_liquid_guide_cannot_follow_queued_file_revert() {
+        use designcraft_doc::Selection;
+        use designcraft_engine::DocState;
+        use egui_kittest::{
+            Harness,
+            kittest::{NodeT, Queryable},
+        };
+        use std::sync::Arc;
+
+        struct TempNative(std::path::PathBuf);
+        impl Drop for TempNative {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        fn step(h: &mut Harness<'_, DesignApp>, events: Vec<egui::Event>) {
+            let frame = h.ctx.cumulative_frame_nr();
+            assert!(h.input().events.is_empty());
+            h.input_mut().events.extend(events);
+            h.run_steps(1);
+            assert_eq!(h.ctx.cumulative_frame_nr(), frame + 1);
+        }
+        fn quiet_held(h: &Harness<'_, DesignApp>, blank: egui::Pos2) {
+            assert!(h.ctx.input(|i| i.pointer.primary_down()
+                && !i.pointer.primary_pressed()
+                && !i.pointer.primary_released()
+                && i.pointer.interact_pos() == Some(blank)
+                && !i.events.iter().any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::PointerButton { .. } | egui::Event::Text(_)))));
+            assert!(!h.ctx.text_edit_focused());
+        }
+        fn restored(h: &Harness<'_, DesignApp>, saved: &DocState) {
+            assert_eq!(h.state().session.documents().len(), 1);
+            assert_eq!(h.state().session.active_index(), Some(0));
+            let st = h.state().session.active().unwrap();
+            assert_eq!(st.uid, saved.uid);
+            assert_eq!(st.selection, Selection::default());
+            assert_eq!(st.path, saved.path);
+            assert_eq!(st.saved_doc, saved.doc);
+            eprintln!(
+                "Revert aftermath: liquid={} undo={} redo={} dirty={}",
+                st.doc.spreads[0].pages[0].guides[0].liquid,
+                st.history.undo.len(),
+                st.history.redo.len(),
+                st.is_dirty()
+            );
+            assert_eq!(st.doc, saved.doc, "held origin must not reapply its edit after successful Revert");
+            assert!(st.history.undo.is_empty() && st.history.redo.is_empty());
+            assert!(!st.is_dirty());
+            assert!(st.interaction.is_none());
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "designcraft-cbc-revert-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let temp = TempNative(dir);
+        let path = temp.0.join("saved.designcraft");
+        let path_text = path.to_str().unwrap();
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.ui.language = "en".into();
+        app.run("file.new", json!({"pages":1,"facingPages":false,"primaryTextFrame":false})).unwrap();
+        app.run("liquid.pageRule", json!({"rule":"guideBased","pages":[1]})).unwrap();
+        assert_eq!(
+            app.run("guide.add", json!({"spread":0,"page":0,"orientation":"vertical","position":100.0,"spreadGuide":false})).unwrap(),
+            json!({"page":0,"index":0})
+        );
+        app.run("file.save", json!({"path":path_text})).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+        let saved = app.session.active().unwrap().clone();
+        assert_eq!(saved.selection, Selection::default());
+        assert!(!saved.is_dirty());
+        assert_eq!(saved.doc.spreads[0].pages[0].guides.len(), 1);
+        assert!(!saved.doc.spreads[0].pages[0].guides[0].liquid);
+        // Literal press oracle: only the saved guide's liquid flag changes.
+        let mut held = saved.doc.clone();
+        let d = Arc::make_mut(&mut held);
+        Arc::make_mut(&mut d.spreads[0]).pages[0].guides[0].liquid = true;
+        app.canvas_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        crate::canvas::go_to_page(&mut app, 0);
+        assert_eq!(crate::canvas::current_page(&app), Some(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.control_rx = Some(rx);
+        let mut ready = false;
+        let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            move |ui, app: &mut DesignApp| {
+                if !ready {
+                    ready = true;
+                    return;
+                }
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                if !app.fonts_ready {
+                    return;
+                }
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    liquid(app, ui);
+                });
+            },
+            app,
+        );
+        h.input_mut().max_texture_side = Some(8192);
+        h.run_steps(8);
+        let node = h.get_by_label("Vertical at 100.0");
+        assert_eq!(node.accesskit_node().role(), egui::accesskit::Role::CheckBox);
+        let local = node.accesskit_node().locate().0;
+        let rect = node.rect();
+        assert!(h.ctx.content_rect().contains_rect(rect));
+        assert!(!h.ctx.input(|i| i.pointer.any_down()));
+        step(&mut h, vec![egui::Event::PointerMoved(rect.center())]);
+        let id = h
+            .ctx
+            .interaction_snapshot(|s| s.hovered.iter().copied().find(|id| id.accesskit_id() == local))
+            .expect("PREREQUISITE: actual Liquid checkbox receives hover");
+        let origin = h.ctx.read_response(id).unwrap();
+        let p = origin.interact_rect.center();
+        assert!(origin.enabled() && origin.interact_rect.contains(rect.center()));
+        let blank = egui::pos2(h.ctx.content_rect().right() - 24.0, p.y);
+        assert!(h.ctx.content_rect().contains(blank) && p.distance(blank) > 32.0);
+        assert_eq!(h.ctx.layer_id_at(p), Some(origin.layer_id));
+        assert_eq!(h.ctx.layer_id_at(blank), Some(origin.layer_id));
+        assert!(!origin.interact_rect.expand(8.0).contains(blank));
+        assert!(
+            h.root()
+                .children_recursive()
+                .filter(|n| matches!(
+                    n.accesskit_node().role(),
+                    egui::accesskit::Role::CheckBox
+                        | egui::accesskit::Role::Button
+                        | egui::accesskit::Role::TextInput
+                        | egui::accesskit::Role::ScrollBar
+                        | egui::accesskit::Role::Label
+                ))
+                .filter(|n| n.accesskit_node().bounding_box().is_some())
+                .all(|n| !n.rect().expand(8.0).contains(blank)),
+            "PREREQUISITE: actual blank outside controls"
+        );
+        assert_eq!(h.state().session.active().unwrap().doc, saved.doc);
+        step(&mut h, vec![egui::Event::PointerMoved(p), pointer(p, true)]);
+        assert!(h.ctx.input(|i| i.pointer.primary_pressed() && i.pointer.primary_down() && !i.pointer.primary_released()));
+        assert_eq!(h.state().session.active().unwrap().doc, held);
+        assert!(h.state().session.active().unwrap().is_dirty());
+        step(&mut h, vec![egui::Event::PointerMoved(blank)]);
+        quiet_held(&h, blank);
+        assert_eq!(h.ctx.dragged_id(), Some(origin.id));
+        assert!(h.ctx.read_response(origin.id).unwrap().is_pointer_button_down_on());
+        assert_eq!(h.state().session.active().unwrap().doc, held);
+        assert_eq!(h.state().session.active().unwrap().history.undo.len(), saved.history.undo.len() + 1);
+        assert_eq!(h.state().session.active().unwrap().uid, saved.uid);
+        assert_eq!(h.state().session.active().unwrap().selection, Selection::default());
+
+        let (request, reply) = crate::ControlRequest::new("engine.execute", json!({"command":"file.revert","params":{}}));
+        tx.send(request).unwrap();
+        step(&mut h, vec![]);
+        let result = reply.try_recv().expect("actual queued Revert completes before Liquid layout");
+        assert_eq!(result["ok"], json!(true), "queued Revert must succeed: {result:?}");
+        assert_eq!(result["result"], json!({"path":path_text}));
+        quiet_held(&h, blank);
+        restored(&h, &saved);
+        step(&mut h, vec![]);
+        quiet_held(&h, blank);
+        restored(&h, &saved);
+        step(&mut h, vec![pointer(blank, false)]);
+        assert!(h.ctx.input(|i| i.pointer.primary_released() && !i.pointer.primary_down()));
+        restored(&h, &saved);
+        step(&mut h, vec![]);
+        assert!(!h.ctx.input(|i| i.pointer.any_down()));
+        restored(&h, &saved);
+    }
+}
+
+#[cfg(test)]
+mod liquid_panel_tests {
+    use egui_kittest::{Harness, kittest::Queryable};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn object_constraints_set_the_selected_objects_pins_and_resizing() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(260.0, 420.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let key = egui::Id::new("test_fonts");
+                if ui.data(|d| d.get_temp::<bool>(key)).is_none() {
+                    crate::theme::install_fonts(ui.ctx(), "");
+                    ui.data_mut(|d| d.insert_temp(key, true));
+                    return;
+                }
+                liquid(app, ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let l = |h: &Harness<'_, DesignApp>| h.state().session.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().liquid;
+        // With the rule off the constraints don't apply.
+        h.get_by_label("Right").click();
+        h.run_steps(2);
+        assert_eq!(l(&h), None);
+        h.state_mut().run("liquid.pageRule", json!({"rule": "objectBased"})).unwrap();
+        h.run_steps(2);
+        h.get_by_label("Right").click();
+        h.run_steps(2);
+        h.get_by_label("Width").click();
+        h.run_steps(2);
+        let v = l(&h).unwrap();
+        assert!(v.pin_right && !v.resize_width && v.resize_height, "{v:?}");
+        let _ = h.get_by_label("Auto-Fit");
     }
 }

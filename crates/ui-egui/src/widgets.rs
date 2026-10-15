@@ -364,6 +364,7 @@ pub fn link_label(ui: &mut Ui, text: &str, width: f32) -> Response {
     ui.painter().galley(pos, g, t.text);
     let y = r.center().y + 6.5;
     ui.painter().line_segment([pos2(r.min.x, y), pos2(r.min.x + w, y)], Stroke::new(1.0, if resp.hovered() { t.text_strong } else { t.text_dim }));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -819,8 +820,14 @@ fn checkbox_selection_normalized(
     if text != current_text {
         return false;
     }
-    let designcraft_doc::Selection { items, content, anchors, text: _, cells, key } = previous;
-    if items != &current.items || *content != current.content || anchors != &current.anchors || cells != &current.cells || key != &current.key {
+    let designcraft_doc::Selection { items, content, anchors, text: _, cells, key, page } = previous;
+    if items != &current.items
+        || *content != current.content
+        || anchors != &current.anchors
+        || cells != &current.cells
+        || key != &current.key
+        || page != &current.page
+    {
         return false;
     }
     let Some(table) = doc.story(text.story).and_then(|story| story.tables.get(&cell.table)) else { return false };

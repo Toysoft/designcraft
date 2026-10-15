@@ -1094,9 +1094,15 @@ fn pass_guides(cx: &ToolContext, req: &SnapRequest<'_>, axis: Axis, tol: f64) ->
     let flags = axis_flags(req, axis);
     let (moving_lo, moving_hi) = perp_ends(req.rect, axis);
     let mut best: Option<Best> = None;
-    for page in &sp.pages {
+    let first_abs = match req.spread {
+        SpreadRef::Doc(si) => Some(cx.doc.first_page_of_spread(si)),
+        _ => None,
+    };
+    for (pidx, page) in sp.pages.iter().enumerate() {
         let page_bounds = page.bounds();
-        for guide in &page.guides {
+        // Guides set on the applied parent page count as this page's guides.
+        let inherited = first_abs.map(|f| cx.doc.inherited_guides(f + pidx)).unwrap_or_default();
+        for guide in page.guides.iter().chain(inherited.iter()) {
             if !guide.visible_in(cx.doc) || !guide.position.is_finite() || guide.orientation != axis_orientation(axis) {
                 continue;
             }
@@ -1484,7 +1490,17 @@ mod tests {
     }
 
     fn ctx_on<'a>(doc: &'a Document, sel: &'a Selection, cache: &'a Cache, layout: &'a CanvasLayout) -> ToolContext<'a> {
-        ToolContext { doc, selection: sel, cache, layout, zoom: 1.0, layer: doc.default_layer(), snap: SnapView::FACTORY, unit: Unit::Points }
+        ToolContext {
+            doc,
+            selection: sel,
+            cache,
+            layout,
+            zoom: 1.0,
+            layer: doc.default_layer(),
+            snap: SnapView::FACTORY,
+            unit: Unit::Points,
+            stroke_in_front: false,
+        }
     }
 
     fn y_req(rect: Rect) -> SnapRequest<'static> {

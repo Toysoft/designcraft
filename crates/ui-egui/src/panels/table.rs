@@ -559,6 +559,7 @@ mod tests {
                 content: false,
                 anchors: Vec::new(),
                 key: None,
+                page: None,
             };
             expected.revision += 1;
             expected // Exact document, saved state and every Undo/Redo entry unchanged.
