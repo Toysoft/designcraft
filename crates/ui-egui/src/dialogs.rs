@@ -4305,6 +4305,10 @@ struct TocRow {
     entry_style: String,
     page_number: String,
     separator: String,
+    /// Character styles of the page number and the separator; "" is [None].
+    page_number_style: String,
+    separator_style: String,
+    sort: bool,
 }
 
 fn toc_separator_shown(s: &str) -> String {
@@ -4324,6 +4328,7 @@ pub fn open_toc(app: &mut DesignApp) {
     let Some(st) = app.session.active() else { return };
     let d = &st.doc;
     let styles: Vec<&str> = d.styles.paragraph.iter().map(|p| p.name.as_str()).filter(|n| *n != designcraft_doc::NO_PARA_STYLE).collect();
+    let char_styles: Vec<&str> = d.styles.character.iter().map(|c| c.name.as_str()).filter(|n| *n != designcraft_doc::NO_CHAR_STYLE).collect();
     let toc = d.toc.as_ref().filter(|t| d.story(t.story).is_some());
     let rows: Vec<TocRow> = toc
         .map(|t| {
@@ -4340,6 +4345,9 @@ pub fn open_toc(app: &mut DesignApp) {
                     }
                     .into(),
                     separator: toc_separator_shown(e.separator.as_deref().unwrap_or("\t")),
+                    page_number_style: e.page_number_style.clone().unwrap_or_default(),
+                    separator_style: e.separator_style.clone().unwrap_or_default(),
+                    sort: e.sort,
                 })
                 .collect()
         })
@@ -4350,6 +4358,7 @@ pub fn open_toc(app: &mut DesignApp) {
         "included": rows,
         "selected": 0,
         "styles": styles,
+        "charStyles": char_styles,
         "hasToc": toc.is_some(),
         "replace": toc.is_some(),
     });
@@ -4368,6 +4377,15 @@ fn toc_params(app: &DesignApp, d: &Dialog) -> Value {
             if !r.page_number.is_empty() {
                 e["pageNumber"] = json!(r.page_number);
             }
+            if !r.page_number_style.is_empty() {
+                e["pageNumberStyle"] = json!(r.page_number_style);
+            }
+            if !r.separator_style.is_empty() {
+                e["separatorStyle"] = json!(r.separator_style);
+            }
+            if r.sort {
+                e["sort"] = json!(true);
+            }
             e
         })
         .collect();
@@ -4382,7 +4400,8 @@ fn toc_params(app: &DesignApp, d: &Dialog) -> Value {
     p
 }
 
-/// A paragraph style menu whose first choice, stored as "", is the generated style `auto`.
+/// A style menu whose first choice, stored as "", is `auto` (the generated paragraph style, or
+/// [None] for a character style).
 fn toc_style_combo(ui: &mut egui::Ui, salt: &str, styles: &[String], auto: &str, cur: &mut String) -> bool {
     let shown = if cur.is_empty() { auto.to_string() } else { cur.clone() };
     let mut changed = false;
@@ -4403,11 +4422,12 @@ fn toc_style_combo(ui: &mut egui::Ui, salt: &str, styles: &[String], auto: &str,
 
 /// Layout › Table of Contents: the title and its style, the paragraph styles to include (Add /
 /// Remove between the two lists) and, for the selected one, its entry style, page number
-/// position, separator and level.
+/// position and separator with their character styles, alphabetical sorting and level.
 fn toc_dialog(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     let lang = app.ui.language.clone();
     let tr = |s: &str| crate::i18n::tr(&lang, s).to_string();
     let styles: Vec<String> = d.fields.get("styles").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let char_styles: Vec<String> = d.fields.get("charStyles").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     let mut rows = toc_rows(d);
     let mut sel = d.n("selected").map_or(0, |n| n.max(0.0) as usize);
     let mut other = d.s("other");
@@ -4467,7 +4487,8 @@ fn toc_dialog(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     if let Some(r) = rows.get_mut(sel) {
         ui.add_space(8.0);
         crate::rtl::label(ui, egui::RichText::new(format!("{} {}", tr("Style:"), r.style)).font(semibold(12.0)));
-        egui::Grid::new("toc_entry").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        let none = designcraft_doc::NO_CHAR_STYLE;
+        egui::Grid::new("toc_entry").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
             crate::rtl::label(ui, tr("Entry Style:"));
             let auto = format!("TOC Level {}", r.level.clamp(1, 9));
             toc_style_combo(ui, "entry", &styles, &auto, &mut r.entry_style);
@@ -4482,9 +4503,16 @@ fn toc_dialog(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
                     }
                 }
             });
+            crate::rtl::label(ui, tr("Style:"));
+            toc_style_combo(ui, "page_number", &char_styles, none, &mut r.page_number_style);
             ui.end_row();
             crate::rtl::label(ui, tr("Between Entry and Number:"));
             ui.add(egui::TextEdit::singleline(&mut r.separator).desired_width(80.0).horizontal_align(egui::Align::Min));
+            crate::rtl::label(ui, tr("Style:"));
+            toc_style_combo(ui, "separator", &char_styles, none, &mut r.separator_style);
+            ui.end_row();
+            crate::rtl::label(ui, "");
+            ui.checkbox(&mut r.sort, tr("Sort Entries in Alphabetical Order"));
             ui.end_row();
             crate::rtl::label(ui, tr("Level:"));
             egui::ComboBox::from_id_salt("toc_level").selected_text(r.level.to_string()).width(60.0).show_ui(ui, |ui| {
@@ -6239,6 +6267,43 @@ mod tests {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", &json!({"pages": 1})).unwrap();
         app
+    }
+
+    #[test]
+    fn toc_dialog_keeps_the_character_styles_and_sorting_of_its_entries() {
+        let mut app = test_app();
+        app.session.execute("style.paragraph.create", &json!({"name": "Head"})).unwrap();
+        app.session.execute("style.character.create", &json!({"name": "Number"})).unwrap();
+        app.session.execute("style.character.create", &json!({"name": "Dots"})).unwrap();
+        let sid =
+            app.session.execute("frame.create", &json!({"rect": [36, 36, 300, 200], "content": "text", "text": "Pears\nApples"})).unwrap()["story"]
+                .clone();
+        app.session.execute("text.select", &json!({"story": sid, "anchor": 0, "focus": 8})).unwrap();
+        app.session.execute("style.paragraph.apply", &json!({"name": "Head"})).unwrap();
+        app.session.execute("layout.pages.insert", &json!({"count": 1})).unwrap();
+        let entries = json!([{"style": "Head", "pageNumberStyle": "Number", "separatorStyle": "Dots", "sort": true}]);
+        app.session.execute("toc.generate", &json!({"page": 2, "entries": entries})).unwrap();
+        let before = app.session.active().unwrap().doc.toc.clone().unwrap();
+        // The dialog shows the options, and OK (Replace Existing) writes them back unchanged.
+        open_toc(&mut app);
+        let d = app.ui.dialog.as_ref().unwrap();
+        let row = &toc_rows(d)[0];
+        assert_eq!((row.page_number_style.as_str(), row.separator_style.as_str(), row.sort), ("Number", "Dots", true));
+        let chars: Vec<String> = serde_json::from_value(d.fields["charStyles"].clone()).unwrap();
+        assert_eq!(chars, ["Number", "Dots"], "[None] is the menu's first choice, not a style");
+        let p = toc_params(&app, d);
+        assert_eq!(
+            (&p["entries"][0]["pageNumberStyle"], &p["entries"][0]["separatorStyle"], &p["entries"][0]["sort"]),
+            (&json!("Number"), &json!("Dots"), &json!(true))
+        );
+        confirm(&mut app).expect("OK regenerates the table of contents");
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.toc.as_ref().unwrap().entries, before.entries);
+        // [None] and unsorted are left out of the params.
+        let mut d = Dialog::new(TOC, json!({"included": [{"style": "Head", "level": 1, "separator": "^t"}]}));
+        d.fields.insert("replace".into(), json!(true));
+        let p = toc_params(&app, &d);
+        assert!(p["entries"][0].get("pageNumberStyle").is_none() && p["entries"][0].get("sort").is_none(), "{p}");
     }
 
     #[test]

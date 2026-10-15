@@ -3112,6 +3112,17 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Presentation", ["Präsentation", "Présentation", "Presentación", "プレゼンテーション", "演示文稿"]),
     ("Extras", ["Extras", "Options supplémentaires", "Extras", "エクストラ", "附加"]),
     ("Column", ["Spalte", "Colonne", "Columna", "段", "栏"]),
+    // Table of Contents.
+    (
+        "Sort Entries in Alphabetical Order",
+        [
+            "Einträge alphabetisch sortieren",
+            "Trier les entrées par ordre alphabétique",
+            "Ordenar entradas alfabéticamente",
+            "項目をアルファベット順に並べ替え",
+            "按字母顺序排列条目",
+        ],
+    ),
 ];
 
 /// Interface direction; independent of document binding and paragraph direction.

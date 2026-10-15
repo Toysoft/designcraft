@@ -1061,6 +1061,7 @@ impl<'a> Ex<'a> {
     /// The document's table of contents as a TOC style; its story names it in `AppliedTOCStyle`.
     fn toc_style_el(&mut self, toc: &designcraft_doc::Toc) -> El {
         let para = |n: &str| names::style_self("ParagraphStyle", PARA_BUILTINS, n);
+        let chars = |n: Option<&str>| names::style_self("CharacterStyle", CHAR_BUILTINS, n.unwrap_or(designcraft_doc::NO_CHAR_STYLE));
         let mut el = El::new("TOCStyle")
             .attr("Self", TOC_STYLE_ID)
             .attr("Name", TOC_STYLE_NAME)
@@ -1086,7 +1087,9 @@ impl<'a> Ex<'a> {
                     .attr("Level", e.level)
                     .attr("PageNumberPosition", position)
                     .attr("Separator", names::toc_separator_out(e.separator.as_deref().unwrap_or("\t")))
-                    .attr("Sort", "false"),
+                    .attr("PageNumberStyle", chars(e.page_number_style.as_deref()))
+                    .attr("SeparatorStyle", chars(e.separator_style.as_deref()))
+                    .attr("Sort", if e.sort { "true" } else { "false" }),
             );
         }
         el

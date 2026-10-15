@@ -394,3 +394,30 @@ fn table_of_contents_definition_round_trips_through_idml_and_updates() {
     s.execute("toc.update", &json!({})).unwrap();
     assert_eq!(toc_text(&s), text);
 }
+
+#[test]
+fn table_of_contents_character_styles_and_sort_round_trip_through_idml() {
+    let mut s = Session::new();
+    s.execute("file.newSample", &json!({})).unwrap();
+    let page = s.doc().unwrap().doc.page_count() + 1;
+    s.execute("layout.pages.insert", &json!({"count": 1})).unwrap();
+    s.execute("style.character.create", &json!({"name": "TOC Number", "chars": {"fontStyle": "Bold"}})).unwrap();
+    s.execute("style.character.create", &json!({"name": "TOC Dots"})).unwrap();
+    s.execute(
+        "toc.generate",
+        &json!({"page": page, "entries": [
+            {"style": "Cover Title", "level": 1, "pageNumberStyle": "TOC Number", "separatorStyle": "TOC Dots", "sort": true},
+            {"style": "Headline", "level": 2},
+        ]}),
+    )
+    .unwrap();
+    let before = s.doc().unwrap().doc.toc.clone().unwrap();
+    let b64 = s.execute("file.exportIdml", &json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    s.execute("file.openIdml", &json!({"base64": b64, "name": "toc.idml"})).unwrap();
+    let after = s.doc().unwrap().doc.toc.clone().expect("the TOC definition is imported");
+    assert_eq!(after.entries, before.entries);
+    let e = &after.entries[0];
+    assert_eq!((e.page_number_style.as_deref(), e.separator_style.as_deref(), e.sort), (Some("TOC Number"), Some("TOC Dots"), true));
+    let e = &after.entries[1];
+    assert_eq!((e.page_number_style.as_deref(), e.separator_style.as_deref(), e.sort), (None, None, false));
+}

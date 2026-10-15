@@ -570,6 +570,16 @@ fn redirect_style_refs(d: &mut designcraft_doc::Document, para: bool, from: &str
             d.footnote_options.ref_char_style = to.to_string();
         }
     }
+    // The table of contents' character styles ([None] is stored as no style).
+    if !para && let Some(toc) = d.toc.as_mut() {
+        for e in &mut toc.entries {
+            for n in [&mut e.page_number_style, &mut e.separator_style] {
+                if n.as_deref() == Some(from) {
+                    *n = Some(to.to_string()).filter(|t| t != designcraft_doc::NO_CHAR_STYLE);
+                }
+            }
+        }
+    }
     for sid in d.stories.keys().copied().collect::<Vec<_>>() {
         let Some(story) = d.story_mut(sid) else { continue };
         story.for_each_text_mut(&mut |st| {

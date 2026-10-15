@@ -588,11 +588,30 @@ pub struct TocEntry {
     /// Text between the entry and its page number; `None` is a tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
+    /// Character style of the page number; `None` is [None].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_number_style: Option<String>,
+    /// Character style of the separator; `None` is [None].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_style: Option<String>,
+    /// Sort Entries in Alphabetical Order: this style's entries are listed alphabetically among
+    /// their siblings instead of in page order.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sort: bool,
 }
 
 impl TocEntry {
     pub fn new(style: impl Into<String>, level: u8) -> Self {
-        Self { style: style.into(), level, entry_style: None, page_number: TocPageNumber::After, separator: None }
+        Self {
+            style: style.into(),
+            level,
+            entry_style: None,
+            page_number: TocPageNumber::After,
+            separator: None,
+            page_number_style: None,
+            separator_style: None,
+            sort: false,
+        }
     }
 }
 

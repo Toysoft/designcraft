@@ -347,6 +347,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-15** · Table of Contents: each included style can set a character style for its page number and for the text between entry and number, and Sort Entries in Alphabetical Order lists its entries alphabetically among their siblings, each with the entries under it (#1069). Both survive Update Table of Contents, renaming or deleting the character style, and IDML (`PageNumberStyle`, `SeparatorStyle`, `Sort`). No readiness percentage change.
 - **2026-10-14** · The Type tool draws a new text frame over a locked empty frame, as InDesign does, instead of turning the locked frame into a text frame. No readiness percentage change.
 - **2026-10-14** · 100% black shows as pure black on screen by default, as InDesign's Appearance of Black does out of the box (Display All Blacks as Rich Black); Preferences › Appearance of Black › Display All Blacks Accurately still shows it as the dark grey it prints, and a saved choice is kept. No readiness percentage change.
 - **2026-10-14** · Pathfinder keeps the frontmost object, as InDesign does: a photo placed over shapes and intersected with them shows through the shapes (it was dropped, and the shapes kept their black fill); Add, Exclude Overlap and Minus Back take the front object's fill too, Subtract still keeps the back one. No readiness percentage change.

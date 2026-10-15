@@ -1277,6 +1277,10 @@ impl<'r> Importer<'r> {
             Some((ts, *self.story_ids.get(story.get("Self")?)?))
         })?;
         let known = |r: Option<&str>| r.map(|r| self.para_style_ref(r)).filter(|n| self.styles.para(n).is_some());
+        // Character styles the document has; [None] is stored as no style.
+        let known_chars = |r: Option<&str>| {
+            r.map(|r| self.char_style_ref(r)).filter(|n| n != designcraft_doc::NO_CHAR_STYLE && self.styles.char_style(n).is_some())
+        };
         let entries: Vec<TocEntry> = ts
             .elements()
             .filter(|e| e.local() == "TOCStyleEntry")
@@ -1293,7 +1297,10 @@ impl<'r> Importer<'r> {
                 };
                 let separator = e.get("Separator").map(crate::names::toc_separator_in).filter(|s| s != "\t" && s.chars().count() <= 64);
                 let entry_style = known(e.get("FormatStyle")).filter(|n| *n != format!("TOC Level {level}"));
-                Some(TocEntry { style, level, entry_style, page_number, separator })
+                let page_number_style = known_chars(e.get("PageNumberStyle"));
+                let separator_style = known_chars(e.get("SeparatorStyle"));
+                let sort = e.get("Sort").is_some_and(|v| v.trim() == "true");
+                Some(TocEntry { style, level, entry_style, page_number, separator, page_number_style, separator_style, sort })
             })
             .take(64)
             .collect();
