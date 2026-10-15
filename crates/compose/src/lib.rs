@@ -905,6 +905,10 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             Some(if pp.direction == designcraft_doc::TextDirection::RightToLeft { unicode_bidi::Level::rtl() } else { unicode_bidi::Level::ltr() }),
         );
         bidi::resolve_mirroring(&mut glyphs, &bidi_info);
+        // Right to left, tracking sits on the other side of the glyph (not modelled): keep it.
+        if bidi_info.has_rtl() {
+            glyphs.iter_mut().for_each(|g| g.trail = 0.0);
+        }
         apply_desired_spacing(&mut glyphs, &pp);
         let hyph_after = hyphenation_points(&story.text, &glyphs, &pp, &hyph_exceptions, &foreign_ranges(doc, story, prange.clone(), &base_chars));
         let base_size = base_chars.size;
@@ -1058,18 +1062,34 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             };
             let rest = &glyphs[g0..];
             let rest_h = &hyph_after[g0..];
-            let breaks: Vec<Break> = if pp.composer == Composer::SingleLine || has_tabs || rest.len() > 4000 {
-                // Where each line starts relative to the tab origin, as `layout_line` places it.
-                let tab = |j: usize, x: f64, i: usize| {
-                    let x0 = slots.get(j).map_or(col.x0, |s| s.0);
-                    let ind = pp.left_indent + if line_no + j == 0 { pp.first_line_indent } else { 0.0 };
-                    tab_advance(&pp.tabs, pp.left_indent, x0 + ind + x - col.x0, rest.get(i + 1..).unwrap_or_default()).0
-                };
+            // Where each line starts relative to the tab origin, as `layout_line` places it.
+            let tab = |j: usize, x: f64, i: usize| {
+                let x0 = slots.get(j).map_or(col.x0, |s| s.0);
+                let ind = pp.left_indent + if line_no + j == 0 { pp.first_line_indent } else { 0.0 };
+                tab_advance(&pp.tabs, pp.left_indent, x0 + ind + x - col.x0, rest.get(i + 1..).unwrap_or_default()).0
+            };
+            // Tabs only at the paragraph's start (an indent typed as tabs) go to known stops: the
+            // paragraph composer takes them at those widths. Other tabs make widths depend on
+            // where lines break, which the line-by-line composer handles.
+            let lead_tabs = if line_no == 0 && has_tabs { rest.iter().take_while(|g| g.ch == '\t').count() } else { 0 };
+            let tabbed = has_tabs && rest[lead_tabs..].iter().any(|g| g.ch == '\t');
+            let set: std::borrow::Cow<'_, [Glyph]> = if lead_tabs > 0 && !tabbed {
+                let mut v = rest.to_vec();
+                let mut x = 0.0;
+                for (i, g) in v.iter_mut().enumerate().take(lead_tabs) {
+                    g.adv = tab(0, x, i);
+                    x += g.adv;
+                }
+                v.into()
+            } else {
+                rest.into()
+            };
+            let breaks: Vec<Break> = if pp.composer == Composer::SingleLine || tabbed || rest.len() > 4000 {
                 breaker::greedy(rest, rest_h, &spacing, &width, &tab)
             } else if pp.balance_ragged && !spacing.justify {
-                breaker::balanced(rest, rest_h, &spacing, &width)
+                breaker::balanced(&set, rest_h, &spacing, &width)
             } else {
-                breaker::knuth_plass(rest, rest_h, &spacing, &width)
+                breaker::knuth_plass(&set, rest_h, &spacing, &width)
             };
             let mut moved = false;
             for (k, b) in breaks.iter().enumerate() {
@@ -2590,7 +2610,7 @@ fn layout_line(
             {
                 leaders.push((i, t.leader.clone()));
             }
-            line[i].adv = w;
+            line[i].adv = w.min((measure - x).max(0.0));
             // A default tab stop is a left tab.
             last_tab = Some((i, stop.as_ref().is_none_or(|t| t.align == TabAlign::Left)));
         } else if line[i].ch == story::RIGHT_INDENT_TAB {
@@ -2631,7 +2651,8 @@ fn layout_line(
         x0 -= hl;
         measure += hl + hr;
     }
-    let natural: f64 = line.iter().map(|g| g.adv).sum();
+    let trail = line.iter().rev().find(|g| g.adv > 0.0 && !g.is_space()).map_or(0.0, |g| g.trail);
+    let natural: f64 = line.iter().map(|g| g.adv).sum::<f64>() - trail;
     let mut extra = measure - natural;
     // Justification adjusts only the text after the last tab (InDesign keeps tab stops aligned);
     // a line whose last tab is a right, centre, character or right-indent tab is not justified.

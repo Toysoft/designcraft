@@ -72,6 +72,8 @@ pub struct Glyph {
     /// Part of the bullet or number the paragraph's list adds: not the line's own text, so it
     /// doesn't raise the Ascent first baseline.
     pub list_label: bool,
+    /// Tracking added after this glyph's cluster (InDesign drops it after a line's last glyph).
+    pub trail: f64,
 }
 
 impl Glyph {
@@ -959,6 +961,7 @@ fn control_glyph(face: &Arc<FontFace>, p: &CharProps, auto_leading: TypeEnv<'_>,
         lang: designcraft_doc::language_tag(&p.language),
         upright: false,
         list_label: false,
+        trail: 0.0,
     }
 }
 
@@ -1101,6 +1104,7 @@ fn shape_segment(
             lang,
             upright: up,
             list_label: false,
+            trail: if tracked { tracking } else { 0.0 },
         });
     }
 }

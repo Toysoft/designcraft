@@ -4081,6 +4081,7 @@ fn a_word_longer_than_the_line_breaks_at_the_column_edge() {
         // Natural advances, from one unbroken line.
         let natural: HashMap<usize, f64> =
             tracked_lines(&long, 1e5, ParaAttrs::default(), tracking)[0].glyphs.iter().map(|g| (g.byte, g.adv)).collect();
+        let plain: HashMap<usize, f64> = tracked_lines(&long, 1e5, ParaAttrs::default(), 0.0)[0].glyphs.iter().map(|g| (g.byte, g.adv)).collect();
         for composer in [Composer::Paragraph, Composer::SingleLine] {
             for align in [Align::Left, Align::LeftJustified] {
                 let para = ParaAttrs { composer: Some(composer), align: Some(align), hyphenate: Some(false), ..Default::default() };
@@ -4090,12 +4091,85 @@ fn a_word_longer_than_the_line_breaks_at_the_column_edge() {
                 for l in &lines {
                     let ink: Vec<_> = l.glyphs.iter().filter(|g| g.visible && g.adv > 0.0).collect();
                     let right = ink.iter().map(|g| g.x + g.adv.min(natural[&g.byte])).fold(l.x0, f64::max);
-                    assert!(l.end_x <= l.x1 + 0.02 && right <= l.x1 + 0.02, "{what}: line {:?} ends at {} past {}", l.range, l.end_x, l.x1);
+                    // The tracking after the line's last letter may hang past the edge, as in InDesign.
+                    let trail = ink.last().map_or(0.0, |g| natural[&g.byte] - plain[&g.byte]);
+                    assert!(
+                        l.end_x - trail <= l.x1 + 0.02 && right - trail <= l.x1 + 0.02,
+                        "{what}: line {:?} ends at {} past {}",
+                        l.range,
+                        l.end_x,
+                        l.x1
+                    );
                     for w in ink.windows(2) {
                         assert!(w[1].x >= w[0].x + natural[&w[0].byte] - 1e-6, "{what}: glyphs overlap at {}", w[1].byte);
                     }
                 }
             }
+        }
+    }
+}
+
+/// A paragraph that starts with a tab (an indent typed as a tab) is composed by the paragraph
+/// composer like one with a first-line indent of the tab's width; it used to fall back to the
+/// line-by-line composer, which can't squeeze a line below the minimum word space.
+#[test]
+fn a_leading_tab_breaks_like_a_first_line_indent() {
+    for width in [150.0, 170.0, 190.0, 210.0, 230.0] {
+        let para = ParaAttrs { align: Some(Align::LeftJustified), hyphenate: Some(false), ..Default::default() };
+        let tabbed = tracked_lines(&format!("\t{LOREM}"), width, para.clone(), 0.0);
+        let indented = tracked_lines(LOREM, width, ParaAttrs { first_line_indent: Some(36.0), ..para }, 0.0);
+        let words = |lines: &[Line], skip: usize| lines.iter().map(|l| l.range.end.saturating_sub(skip)).collect::<Vec<_>>();
+        assert_eq!(words(&tabbed, 1), words(&indented, 0), "width {width}");
+    }
+}
+
+/// A tab whose stop lies past the measure ends its line (it stays on it); the next tab starts the
+/// next line, as in InDesign. The word before the tabs used to move down with them.
+#[test]
+fn a_tab_past_the_measure_ends_the_line() {
+    // A word between the second (72) and third (108) default tab stop, in a 100 pt column.
+    let width = |n: usize| tracked_lines(&"n".repeat(n), 1e5, ParaAttrs::default(), 0.0)[0].end_x;
+    let n = (1..60).find(|&n| width(n) > 76.0).unwrap();
+    assert!(width(n) < 96.0);
+    let text = format!("{}\t\tb", "n".repeat(n));
+    for composer in [designcraft_doc::Composer::Paragraph, designcraft_doc::Composer::SingleLine] {
+        let lines = tracked_lines(&text, 100.0, ParaAttrs { composer: Some(composer), ..Default::default() }, 0.0);
+        assert_eq!(lines.len(), 2, "{composer:?}");
+        assert_eq!(lines[0].range, 0..n + 1, "{composer:?}: the word and the first tab");
+        let b = lines[1].glyphs.iter().find(|g| g.byte == n + 2).unwrap();
+        assert!((b.x - lines[1].x0 - 36.0).abs() < 0.01, "{composer:?}: b at {}", b.x - lines[1].x0);
+    }
+}
+
+/// Centred text is centred on its letters: the tracking after the last one doesn't count.
+#[test]
+fn centred_text_leaves_out_the_tracking_after_its_last_letter() {
+    let text = "nnnn";
+    let plain = &tracked_lines(text, 1e5, ParaAttrs::default(), 0.0)[0];
+    let ink = plain.end_x - plain.x0;
+    let lines = tracked_lines(text, 200.0, ParaAttrs { align: Some(Align::Center), ..Default::default() }, 500.0);
+    let l = &lines[0];
+    let first = l.glyphs.first().unwrap().x;
+    let last = l.glyphs.last().unwrap();
+    // The ink runs from the first letter to the end of the last one's own advance.
+    let right = last.x + plain.glyphs.last().unwrap().adv;
+    assert!(right - first > ink, "tracking spaces the letters");
+    assert!(((first + right) / 2.0 - (l.x0 + l.x1) / 2.0).abs() < 0.01, "centre {} vs {}", (first + right) / 2.0, (l.x0 + l.x1) / 2.0);
+}
+
+/// A line that fits once the tracking after its last letter is left out is not broken earlier;
+/// the paragraph composer saw a break at the glue after a word as overfull and dropped it.
+#[test]
+fn a_line_fits_without_the_tracking_after_its_last_letter() {
+    let text = "nnnn nnnn nnnn";
+    let tracking = 200.0;
+    let two = &tracked_lines("nnnn nnnn", 1e5, ParaAttrs::default(), tracking)[0];
+    let size = 12.0;
+    let measure = two.end_x - two.x0 - tracking / 1000.0 * size / 2.0;
+    for composer in [designcraft_doc::Composer::Paragraph, designcraft_doc::Composer::SingleLine] {
+        for align in [Align::Left, Align::Center] {
+            let lines = tracked_lines(text, measure, ParaAttrs { composer: Some(composer), align: Some(align), ..Default::default() }, tracking);
+            assert_eq!(lines.iter().map(|l| l.range.clone()).collect::<Vec<_>>(), vec![0..10, 10..14], "{composer:?} {align:?}");
         }
     }
 }
