@@ -3112,6 +3112,56 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Presentation", ["Präsentation", "Présentation", "Presentación", "プレゼンテーション", "演示文稿"]),
     ("Extras", ["Extras", "Options supplémentaires", "Extras", "エクストラ", "附加"]),
     ("Column", ["Spalte", "Colonne", "Columna", "段", "栏"]),
+    // Font menu
+    ("Filters:", ["Filter:", "Filtres :", "Filtros:", "フィルター:", "过滤器："]),
+    ("All Classes", ["Alle Klassen", "Toutes les classes", "Todas las clases", "すべての分類", "所有分类"]),
+    ("Serif", ["Serifenschrift", "Serif", "Con serifa", "セリフ", "衬线"]),
+    ("Slab Serif", ["Egyptienne", "Slab serif", "Serifa cuadrada", "スラブセリフ", "粗衬线"]),
+    ("Sans Serif", ["Serifenlos", "Sans serif", "Sin serifa", "サンセリフ", "无衬线"]),
+    ("Script", ["Schreibschrift", "Script", "Manuscrita", "スクリプト", "手写体"]),
+    ("Monospaced", ["Dicktengleich", "Chasse fixe", "Monoespaciada", "等幅", "等宽"]),
+    ("Decorative", ["Dekorativ", "Décorative", "Decorativa", "装飾", "装饰"]),
+    ("Symbol", ["Symbol", "Symbole", "Símbolo", "記号", "符号"]),
+    (
+        "Show Recently Added",
+        [
+            "Zuletzt hinzugefügte anzeigen",
+            "Afficher les polices ajoutées récemment",
+            "Mostrar añadidas recientemente",
+            "最近追加したフォントを表示",
+            "显示最近添加的字体",
+        ],
+    ),
+    (
+        "Small Sample Text Size",
+        ["Kleine Beispieltextgröße", "Petite taille de l'exemple", "Tamaño de muestra pequeño", "サンプルテキスト（小）", "小号示例文本"],
+    ),
+    (
+        "Medium Sample Text Size",
+        ["Mittlere Beispieltextgröße", "Taille moyenne de l'exemple", "Tamaño de muestra mediano", "サンプルテキスト（中）", "中号示例文本"],
+    ),
+    (
+        "Large Sample Text Size",
+        ["Große Beispieltextgröße", "Grande taille de l'exemple", "Tamaño de muestra grande", "サンプルテキスト（大）", "大号示例文本"],
+    ),
+    ("Selected Text", ["Ausgewählter Text", "Texte sélectionné", "Texto seleccionado", "選択したテキスト", "所选文本"]),
+    ("Sample", ["Beispiel", "Exemple", "Muestra", "サンプル", "示例"]),
+    ("Similar to {family}", ["Ähnlich wie {family}", "Semblables à {family}", "Similares a {family}", "{family} に類似", "与 {family} 相似"]),
+    (
+        "No fonts match",
+        ["Keine passenden Schriften", "Aucune police ne correspond", "Ninguna fuente coincide", "一致するフォントはありません", "没有匹配的字体"],
+    ),
+    (
+        "Show Similar Fonts",
+        ["Ähnliche Schriften anzeigen", "Afficher les polices semblables", "Mostrar fuentes similares", "類似フォントを表示", "显示相似字体"],
+    ),
+    ("Loading fonts…", ["Schriften werden geladen…", "Chargement des polices…", "Cargando fuentes…", "フォントを読み込み中…", "正在加载字体…"]),
+    ("Show Styles", ["Schnitte einblenden", "Afficher les styles", "Mostrar estilos", "スタイルを表示", "显示样式"]),
+    ("Hide Styles", ["Schnitte ausblenden", "Masquer les styles", "Ocultar estilos", "スタイルを隠す", "隐藏样式"]),
+    ("TrueType font", ["TrueType-Schrift", "Police TrueType", "Fuente TrueType", "TrueType フォント", "TrueType 字体"]),
+    ("OpenType font", ["OpenType-Schrift", "Police OpenType", "Fuente OpenType", "OpenType フォント", "OpenType 字体"]),
+    ("Variable font", ["Variable Schrift", "Police variable", "Fuente variable", "バリアブルフォント", "可变字体"]),
+    ("Color font", ["Farbschrift", "Police couleur", "Fuente de color", "カラーフォント", "彩色字体"]),
 ];
 
 /// Interface direction; independent of document binding and paragraph direction.

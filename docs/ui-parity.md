@@ -41,7 +41,7 @@ basics of editing fail for too many users on Windows and Linux.
 | Copy / cut / paste objects and text, Paste Into / in Place | ✓ | ✓ on macOS | ~ | **failing on Windows/Linux** (#351, #348, #312, #185, #164, #201, #212) |
 | Context menus (canvas, panels, rulers) | ✓ everywhere | 9 context-menu sites, ruler units by right-click | ~ | **not opening for several users** (#238, #187, #160) |
 | IME text input on the canvas | ✓ | ✗ | ✗ | #322 |
-| Font menu: search, preview, favourites, type-ahead | ✓ | ✓ | ~ | search field focus on macOS (#335, #86) |
+| Font menu: search, preview, favourites, type-ahead, filters (class, recently added), styles per family, sample text and size, recently used, similar fonts | ✓ | ✓ | ~ | search field focus on macOS (#335, #86); Adobe Fonts (Find More, activated) out of scope |
 | Keyboard shortcuts: InDesign defaults, editor, sets | ✓ | ✓ editor; defaults from 09-shortcuts.md | ✓ | |
 | Quick Apply | ✓ | ✓ | ✓ | |
 | Numeric fields: units, arithmetic, scrubbing | ✓ | 21 pt spinner fields with arithmetic | ✓ | |

@@ -34,8 +34,8 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let (db, scope) = (super::fonts(app), super::font_scope(app));
     ui.horizontal(|ui| {
         if let Some(f) = super::font_combo(app, ui, "glyph_family", &st.family, 140.0) {
-            st.style = db.styles(&f).into_iter().next().unwrap_or_else(|| "Regular".into());
-            st.family = f;
+            st.style = f.style.clone().or_else(|| db.styles(&f.family).into_iter().next()).unwrap_or_else(|| "Regular".into());
+            st.family = f.family;
         }
         egui::ComboBox::from_id_salt("glyph_style").selected_text(&st.style).width(80.0).show_ui(ui, |ui| {
             for s in db.styles(&st.family) {

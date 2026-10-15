@@ -1076,7 +1076,7 @@ fn character_section(app: &mut DesignApp, ui: &mut Ui) {
         t.text,
     );
     if let Some(f) = super::font_popup(app, &resp, &menu, &fam) {
-        super::apply_font_family(app, &f);
+        super::apply_font(app, &f);
     }
     ui.add_space(1.0);
     let styles = fonts.styles(&fam);

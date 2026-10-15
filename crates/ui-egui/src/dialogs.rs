@@ -3588,7 +3588,10 @@ fn basic_character_formats(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                     cf.set(d, "fontFamily", Value::Null);
                 }
                 if let Some(f) = crate::panels::font_menu_body(app, ui, &menu, &fam, 200.0) {
-                    cf.set(d, "fontFamily", json!(f));
+                    cf.set(d, "fontFamily", json!(f.family));
+                    if let Some(style) = f.style {
+                        cf.set(d, "fontStyle", json!(style));
+                    }
                 }
             });
         ui.end_row();
@@ -4788,7 +4791,9 @@ fn find_font(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     egui::Grid::new("ff_to").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Font Family:"));
         if let Some(f) = crate::panels::font_combo(app, ui, "toFamily", &d.s("toFamily"), 170.0) {
-            d.fields.insert("toFamily".into(), json!(f));
+            let style = crate::panels::pick_style(app, &f);
+            d.fields.insert("toFamily".into(), json!(f.family));
+            d.fields.insert("toStyle".into(), json!(style));
         }
         ui.end_row();
         let styles = db.styles(&d.s("toFamily"));
