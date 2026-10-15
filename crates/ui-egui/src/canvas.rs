@@ -1073,54 +1073,57 @@ fn draw_cell_selection(
     }
 }
 
-/// The colour painted under the selected text of composed frame `fi`: the text frame's own fill,
-/// else the topmost solid fill of an item painted below the frame that overlaps its bounds, else
-/// the paper. Gradient and graphic backgrounds fall through to whatever is beneath them.
-fn selection_background(doc: &Document, cs: &compose::ComposedStory, fi: usize) -> designcraft_color::Color {
+/// The average colour actually painted under the selection: the page is rendered off-screen at
+/// low resolution and sampled within the selection bounds, so any background — the frame's own
+/// fill, a gradient, an image, or items painted below the frame — inverts correctly. Falls back
+/// to the paper where the page cannot be rendered.
+fn sampled_background(app: &DesignApp, xf: &Xf, bbox: Rect) -> designcraft_color::Color {
     let paper = designcraft_color::Color::WHITE;
-    let Some(ft) = cs.frames.get(fi) else { return paper };
-    let Some(frame) = doc.item(ft.frame) else { return paper };
-    if let Some(c) = doc.resolve_color(&frame.fill.swatch, frame.fill.tint) {
-        return c;
+    let Some(st) = app.session.active() else { return paper };
+    let Some(page) = current_page(app) else { return paper };
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let Some(pr) = layout.page_rect(&st.doc, page) else { return paper };
+    let scale = 0.5;
+    let tl = xf.to_canvas(bbox.min);
+    let br = xf.to_canvas(bbox.max);
+    let mut renderer = designcraft_render::Renderer::new();
+    let Some(img) = renderer.render_page(&st.doc, &app.session.cache, page, scale, false, &designcraft_render::RenderOptions::default()) else {
+        return paper;
+    };
+    // Sample the selection bounds mapped into page pixels; transparent pixels show the paper.
+    let x0 = (((tl.x - pr.x0) * scale).floor().max(0.0) as u32).min(img.width.saturating_sub(1));
+    let y0 = (((tl.y - pr.y0) * scale).floor().max(0.0) as u32).min(img.height.saturating_sub(1));
+    let x1 = (((br.x - pr.x0) * scale).ceil().max(0.0) as u32).min(img.width);
+    let y1 = (((br.y - pr.y0) * scale).ceil().max(0.0) as u32).min(img.height);
+    if x1 <= x0 || y1 <= y0 {
+        return paper;
     }
-    let bounds = frame.inner_bounds();
-    // Master items paint under page items, so scan parent spreads first, then spread items in
-    // paint order, stopping at the frame; the last overlapping fill seen is the topmost one.
-    let mut below = None;
-    let mut hit = false;
-    for sp in doc.parents.iter().chain(doc.spreads.iter()) {
-        for top in &sp.items {
-            let mut found = false;
-            top.walk(&mut |i| {
-                if found {
-                    return;
-                }
-                if i.id == ft.frame {
-                    found = true;
-                } else if let Some(c) = doc.resolve_color(&i.fill.swatch, i.fill.tint) {
-                    let r = i.inner_bounds();
-                    if r.x0 < bounds.x1 && bounds.x0 < r.x1 && r.y0 < bounds.y1 && bounds.y0 < r.y1 {
-                        below = Some(c);
-                    }
-                }
-            });
-            if found {
-                hit = true;
-                break;
-            }
-        }
-        if hit {
-            break;
+    let (mut sr, mut sg, mut sb, mut n) = (0_u64, 0_u64, 0_u64, 0_u64);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y as u64 * img.width as u64 + x as u64) * 4) as usize;
+            let (r, g, b) = if img.pixels.len() >= i + 4 && img.pixels[i + 3] >= 128 {
+                (img.pixels[i], img.pixels[i + 1], img.pixels[i + 2])
+            } else {
+                (255, 255, 255)
+            };
+            sr += r as u64;
+            sg += g as u64;
+            sb += b as u64;
+            n += 1;
         }
     }
-    below.unwrap_or(paper)
+    if n == 0 {
+        return paper;
+    }
+    designcraft_color::Color::rgb8((sr / n) as u8, (sg / n) as u8, (sb / n) as u8)
 }
 
 /// InDesign draws selected text inverted: the highlight shows the inverse of the colour painted
-/// under the selected text (see `selection_background`), with the selected glyphs in the inverse
-/// of their colour — so white-on-black text selects as black-on-white and stays visible. The
-/// highlight and glyph outlines are rasterised with `vello_cpu` into a small screen-space texture
-/// over the selection.
+/// under the selected text (sampled from a low-resolution page render, see `sampled_background`),
+/// with the selected glyphs in the inverse of their colour — so white-on-black text selects as
+/// black-on-white and stays visible. The highlight and glyph outlines are rasterised with
+/// `vello_cpu` into a small screen-space texture over the selection.
 fn draw_inverse_highlight(
     app: &DesignApp,
     painter: &egui::Painter,
@@ -1163,11 +1166,12 @@ fn draw_inverse_highlight(
         _ => {
             let view = xf.affine(ppp as f64, bbox.min);
             let mut rc = vello_cpu::RenderContext::new_with(w as u16, h as u16, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
-            for (fi, m, quads, _) in runs {
-                // The highlight is the inverse of the colour under the selected text, so the
-                // glyphs (drawn below in their inverse colour) always contrast with it.
-                let under = selection_background(doc, cs, *fi);
-                let [ur, ug, ub, _] = under.to_rgba8(1.0);
+            // The highlight is the inverse of the colour actually painted under the selection
+            // (sampled from a low-resolution page render), so the glyphs — drawn below in their
+            // inverse colour — always contrast with it.
+            let under = sampled_background(app, xf, bbox);
+            let [ur, ug, ub, _] = under.to_rgba8(1.0);
+            for (_, m, quads, _) in runs {
                 rc.set_paint(peniko::Color::from_rgba8(255 - ur, 255 - ug, 255 - ub, 255));
                 rc.set_transform(view * *m);
                 for q in quads {
