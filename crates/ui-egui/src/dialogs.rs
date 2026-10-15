@@ -133,6 +133,66 @@ fn text_field(ui: &mut egui::Ui, d: &mut Dialog, key: &str, w: f32) {
     }
 }
 
+/// Extract once when opened. Cancel is read-only; confirmation adds exactly these colours.
+pub(crate) fn open_color_theme(app: &mut DesignApp, params: Value) {
+    match app.run("color.extractTheme", params) {
+        Ok(mut theme) => {
+            theme["name"] = json!("Color Theme");
+            app.ui.dialog = Some(Dialog::new("colorTheme", theme));
+        }
+        Err(message) => app.ui.dialog = Some(Dialog::new("alert", json!({"message": message}))),
+    }
+}
+
+fn color_theme(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Name:"));
+    text_field(ui, d, "name", 280.0);
+    ui.add_space(8.0);
+    if let Some(colors) = d.fields.get("colors").and_then(Value::as_array) {
+        ui.horizontal(|ui| {
+            for hex in colors.iter().filter_map(Value::as_str).take(5) {
+                ui.vertical(|ui| {
+                    if let Ok(color) = egui::Color32::from_hex(hex) {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(54.0, 40.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 2.0, color);
+                    }
+                    ui.label(hex);
+                });
+            }
+        });
+    }
+    if let Some(status) = d.fields.get("status").and_then(Value::as_str) {
+        crate::rtl::label(ui, status);
+    }
+}
+
+#[cfg(test)]
+mod color_theme_tests {
+    use super::*;
+
+    #[test]
+    fn color_theme_cancel_is_read_only_and_confirm_adds_the_preview() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let theme = json!({"name":"Fashion", "colors":["#102030", "#f0a020"]});
+        app.ui.dialog = Some(Dialog::new("colorTheme", theme.clone()));
+        cancel(&mut app);
+        assert_eq!(app.session.active().unwrap().doc, before);
+        app.ui.dialog = Some(Dialog::new("colorTheme", theme));
+        confirm(&mut app).unwrap();
+        let doc = &app.session.active().unwrap().doc;
+        assert_eq!(doc.color_groups.last().unwrap().name, "Fashion");
+        assert_eq!(doc.color_groups.last().unwrap().swatches.len(), 2);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc, before);
+        app.ui.dialog = Some(Dialog::new("colorTheme", json!({"name":" ","colors":["#102030"]})));
+        assert!(confirm(&mut app).is_err());
+        assert_eq!(app.ui.dialog.as_ref().unwrap().id, "colorTheme");
+        assert_eq!(app.session.active().unwrap().doc, before);
+    }
+}
+
 /// Edit › Keyboard Shortcuts: every command and its shortcut; click a shortcut, then press the
 /// new keys (Esc cancels, Backspace clears).
 /// Edit › Spelling › User Dictionary: added words and hyphenation exceptions (applied at once).
@@ -1498,6 +1558,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "createGuides" => crate::i18n::tr(&app.ui.language, "Create Guides"),
         "marginsAndColumns" => crate::i18n::tr(&app.ui.language, "Margins and Columns"),
         "textFrameOptions" => crate::i18n::tr(&app.ui.language, "Text Frame Options"),
+        "colorTheme" => crate::i18n::tr(&app.ui.language, "Color Theme"),
         "documentSetup" => crate::i18n::tr(&app.ui.language, "Document Setup"),
         "findChange" => crate::i18n::tr(&app.ui.language, "Find/Change"),
         "paragraphStyleOptions" => crate::i18n::tr(&app.ui.language, "Paragraph Style Options"),
@@ -2189,6 +2250,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                     seed_text_frame_options(app, &mut d);
                     text_frame_options_dialog(app, ui, &mut d);
                 }
+                "colorTheme" => color_theme(app, ui, &mut d),
                 "documentSetup" => document_setup(app, ui, &mut d),
                 "pdfExport" => pdf_export(app, ui, &mut d),
                 "alert" => {
@@ -2203,6 +2265,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             });
         ui.add_space(12.0);
         let ok_label = match d.id.as_str() {
+            "colorTheme" => "Add to Swatches",
             "closeDocument" => "  Save  ",
             "updateLink" => "  Update  ",
             _ => "  OK  ",
@@ -2274,6 +2337,15 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
         app.cancel_pdf_import();
     }
     match d.id.as_str() {
+        "colorTheme" => {
+            let result = app.run("swatch.addColorTheme", json!({"name": d.s("name"), "colors": d.fields.get("colors")}));
+            if let Err(error) = &result {
+                let mut d = d;
+                d.fields.insert("status".into(), json!(error));
+                app.ui.dialog = Some(d);
+            }
+            result
+        }
         "createGuides" | "marginsAndColumns" => {
             // The preview goes; the change is made once, as one undo step.
             if d.fields.contains_key(PREVIEWED) {

@@ -23,6 +23,30 @@ fn ctx<'a>(d: &'a Document, s: &'a Selection, c: &'a Cache, l: &'a CanvasLayout)
 }
 
 #[test]
+fn color_theme_tool_requests_a_palette_without_editing_the_image() {
+    let mut d = Document::new(&NewDocument::default());
+    let id = add_rect(&mut d, Rect::new(100.0, 100.0, 200.0, 200.0));
+    d.item_mut(id).unwrap().content = designcraft_doc::Content::Graphic(designcraft_doc::Graphic {
+        asset: designcraft_doc::AssetId(1),
+        size: (100.0, 100.0),
+        xf: designcraft_geom::Affine::IDENTITY,
+        auto_fit: Default::default(),
+        fit_align: 4,
+        crop: [0.0; 4],
+    });
+    let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let cx = ctx(&d, &s, &c, &l);
+    let mut tool = create("colorTheme");
+    assert_eq!(tool.id(), "colorTheme");
+    assert_eq!(
+        tool.pointer(&cx, &PointerEvent::new(PointerKind::Down, 150.0 + off.x, 150.0 + off.y)),
+        vec![Action::Dialog("colorTheme".into(), serde_json::json!({"id":id.0}))]
+    );
+    assert!(tool.pointer(&cx, &PointerEvent::new(PointerKind::Up, 150.0 + off.x, 150.0 + off.y)).is_empty());
+}
+
+#[test]
 fn frame_tool_drag_emits_begin_preview_commit() {
     let d = Document::new(&NewDocument::default());
     let (s, c, l) = (Selection::default(), Cache::new(), CanvasLayout::new(&d, false));

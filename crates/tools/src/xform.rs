@@ -290,6 +290,28 @@ fn image_under(cx: &ToolContext, p: Point) -> Option<(SpreadRef, Point)> {
 #[derive(Default)]
 pub struct EyedropperTool;
 
+/// The palette tool only requests a preview. Adding the swatches is a separate command.
+pub struct ColorThemeTool;
+
+impl Tool for ColorThemeTool {
+    fn id(&self) -> &'static str {
+        "colorTheme"
+    }
+    fn pointer(&mut self, cx: &ToolContext, ev: &PointerEvent) -> Vec<Action> {
+        if ev.kind != PointerKind::Down {
+            return vec![];
+        }
+        let Some((_, id)) = cx.hit(ev.pos) else { return vec![] };
+        if cx.doc.item(id).and_then(|it| it.graphic()).is_none() {
+            return vec![];
+        }
+        vec![Action::Dialog("colorTheme".into(), json!({"id": id.0}))]
+    }
+    fn cursor(&self, _cx: &ToolContext, _p: Point, _m: Mods) -> Cursor {
+        Cursor::Eyedropper
+    }
+}
+
 impl Tool for EyedropperTool {
     fn id(&self) -> &'static str {
         "eyedropper"

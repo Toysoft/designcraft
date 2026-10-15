@@ -343,6 +343,8 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 ## Progress log
 
+- **2026-10-15** · Color Theme: the toolbar tool previews up to five colours from a placed raster and adds them as one undoable swatch group. Local deterministic extraction; transparent padding is ignored. No readiness percentage change.
+
 - **2026-10-13** · Switching between document and parent pages refreshes the canvas immediately, preventing black parent pages and stale document objects when the zoom stays the same. Ordinary edits retain partial repainting. No readiness percentage change.
 
 Newest first.

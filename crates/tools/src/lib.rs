@@ -442,6 +442,7 @@ pub fn create(id: &str) -> Box<dyn Tool> {
         "scale" => Box::new(xform::XformTool::new("scale")),
         "shear" => Box::new(xform::XformTool::new("shear")),
         "eyedropper" => Box::new(xform::EyedropperTool),
+        "colorTheme" => Box::new(xform::ColorThemeTool),
         "hand" => Box::new(nav::HandTool::default()),
         "placeGun" => Box::new(nav::PlaceGun::default()),
         "zoom" => Box::new(nav::ZoomTool::default()),
