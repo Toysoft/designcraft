@@ -230,6 +230,9 @@ pub struct Renderer {
     /// Items the last ink pass drew (tests).
     #[cfg(test)]
     cmyk_pass_items: usize,
+    /// How many anchored objects deep the current drawing is (anchored text frames can hold
+    /// anchored objects of their own).
+    anchor_depth: usize,
     pub threads: u16,
     pub stats: FrameStats,
 }
@@ -283,6 +286,7 @@ impl Renderer {
             cmyk_pass_pixels: 0,
             #[cfg(test)]
             cmyk_pass_items: 0,
+            anchor_depth: 0,
             threads: default_threads(),
             stats: FrameStats::default(),
         }
@@ -1369,6 +1373,57 @@ mod tests {
         assert!(dark > 50, "text pixels: {dark}");
         let _ = fid;
         assert!(r.stats.glyphs >= 15);
+    }
+
+    /// A 200 × 100 pt text frame anchored in a story, showing a story of its own. Returns the
+    /// document, the host story and the anchored story.
+    fn anchored_text_frame_doc(inner: &str) -> (Document, designcraft_doc::StoryId, designcraft_doc::StoryId) {
+        let mut d = Document::new(&NewDocument::default());
+        let lid = d.default_layer();
+        let (_, host) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(36.0, 36.0, 576.0, 300.0), lid, "", ParaFormat::default()).unwrap();
+        let sid = designcraft_doc::StoryId(d.alloc());
+        d.stories.insert(sid, Arc::new(designcraft_doc::Story::with_text(sid, inner, ParaFormat::default())));
+        let id = designcraft_doc::ItemId(d.alloc());
+        let mut it = Item::new(id, lid, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 200.0, 100.0)));
+        it.content = Content::Text(designcraft_doc::TextFrame { story: sid, options: Default::default() });
+        d.story_mut(host).unwrap().insert_object(0, designcraft_doc::AnchoredObject::new(it, Default::default()));
+        (d, host, sid)
+    }
+
+    #[test]
+    fn anchored_text_frames_draw_their_text() {
+        let dark = |d: &Document, host: designcraft_doc::StoryId| {
+            let cache = Cache::new();
+            let mut r = Renderer::new();
+            r.threads = 0;
+            let img = r.render_page(d, &cache, 0, 1.0, false, &RenderOptions::default()).unwrap();
+            // The frame sits on the host's first line: its bottom on the baseline.
+            let cs = cache.get(d, host, None);
+            let o = cs.frames[0].objects[0].origin;
+            let (x0, y0) = (o.x.round() as u32, o.y.round() as u32);
+            (x0..x0 + 200).flat_map(|x| (y0..y0 + 100).map(move |y| (x, y))).filter(|&(x, y)| img.pixel(x, y)[0] < 100).count()
+        };
+        let (d, host, _) = anchored_text_frame_doc("Inside the anchored frame");
+        d.check().unwrap();
+        let (empty, empty_host, _) = anchored_text_frame_doc("");
+        assert_eq!(dark(&empty, empty_host), 0);
+        let n = dark(&d, host);
+        assert!(n > 50, "{n}");
+    }
+
+    #[test]
+    fn anchored_text_frames_showing_themselves_draw_and_end() {
+        // Not a valid document: the anchored story holds the frame that shows it (same id).
+        let (mut d, host, sid) = anchored_text_frame_doc("Again");
+        let obj = d.story(host).unwrap().objects[0].clone();
+        d.story_mut(sid).unwrap().insert_object(0, (*obj).clone());
+        d.story_mut(sid).unwrap().insert_object(0, (*obj).clone());
+        assert!(d.check().is_err());
+        let cache = Cache::new();
+        let mut r = Renderer::new();
+        r.threads = 0;
+        assert!(r.render_page(&d, &cache, 0, 1.0, false, &RenderOptions::default()).is_some());
+        assert_eq!(r.anchor_depth, 0);
     }
 
     /// An inside-aligned stroke is the stroke of the path inset by half its weight: a band from the

@@ -4889,3 +4889,99 @@ fn an_empty_last_paragraph_isnt_overset() {
     let (d, sid, _) = doc_with("One\nTwo\n\n", Rect::new(0.0, 0.0, 200.0, 35.0), ParaAttrs::default());
     assert!(compose_story(&d, sid, &ComposeOptions::default()).is_overset(), "an empty paragraph before the last one is text");
 }
+
+/// A frame on page 1 whose story holds an anchored text frame (`w` × `h`, inset 0) showing a
+/// story of its own. Returns the document, the host story, the anchored story and the anchored
+/// frame's id.
+fn anchored_text_frame_doc(inner: &str, w: f64, h: f64) -> (Document, StoryId, StoryId, ItemId) {
+    let (mut d, host, _) = doc_with("Before after", Rect::new(36.0, 36.0, 336.0, 436.0), ParaAttrs::default());
+    let sid = StoryId(d.alloc());
+    d.stories.insert(sid, Arc::new(designcraft_doc::Story::with_text(sid, inner, ParaFormat::default())));
+    let id = ItemId(d.alloc());
+    let mut it = designcraft_doc::Item::new(
+        id,
+        d.default_layer(),
+        designcraft_doc::Shape::Rectangle,
+        designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, w, h)),
+    );
+    it.content = designcraft_doc::Content::Text(designcraft_doc::TextFrame { story: sid, options: Default::default() });
+    d.story_mut(host).unwrap().insert_object(7, designcraft_doc::AnchoredObject::new(it, Default::default()));
+    d.check().unwrap();
+    (d, host, sid, id)
+}
+
+#[test]
+fn a_story_in_an_anchored_text_frame_composes_in_that_frame() {
+    let (d, host, sid, id) = anchored_text_frame_doc("Inner text in the frame", 200.0, 60.0);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert_eq!(cs.frames.len(), 1);
+    let ft = cs.frame(id).expect("composed in the anchored frame");
+    assert!(!cs.is_overset());
+    assert_eq!(ft.lines.len(), 1);
+    // The frame's page is its host frame's.
+    assert_eq!(frame_specs(&d, sid)[0].page, Some(0));
+    assert!(ft.lines[0].x1 <= 200.0 + 1e-9);
+    // The host makes room for it on its line.
+    let hc = compose_story(&d, host, &ComposeOptions::default());
+    assert_eq!(hc.frames[0].objects.len(), 1);
+    assert!(hc.frames[0].lines[0].ascent >= 60.0 - 1e-9);
+}
+
+#[test]
+fn an_anchored_story_recomposes_when_its_text_or_frame_changes() {
+    let (mut d, host, sid, id) = anchored_text_frame_doc("Short", 200.0, 60.0);
+    let cache = Cache::new();
+    let a = cache.get(&d, sid, None);
+    assert!(Arc::ptr_eq(&a, &cache.get(&d, sid, None)), "cached");
+    // Its own text.
+    d.story_mut(sid).unwrap().insert(5, " and a much longer text that needs more than one line here");
+    let b = cache.get(&d, sid, None);
+    assert!(b.frame(id).unwrap().lines.len() > 1);
+    // The frame, which lives in the host story: narrower makes more lines.
+    let o = &mut d.story_mut(host).unwrap().objects[0];
+    Arc::make_mut(o).item.path = designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 100.0, 60.0));
+    let c = cache.get(&d, sid, None);
+    assert!(c.frame(id).unwrap().lines.len() > b.frame(id).unwrap().lines.len());
+}
+
+#[test]
+fn anchored_text_frames_compose_two_levels_deep() {
+    let (mut d, _, mid, _) = anchored_text_frame_doc("", 250.0, 80.0);
+    let deep = StoryId(d.alloc());
+    d.stories.insert(deep, Arc::new(designcraft_doc::Story::with_text(deep, "Two levels down", ParaFormat::default())));
+    let id = ItemId(d.alloc());
+    let mut it = designcraft_doc::Item::new(
+        id,
+        d.default_layer(),
+        designcraft_doc::Shape::Rectangle,
+        designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 150.0, 40.0)),
+    );
+    it.content = designcraft_doc::Content::Text(designcraft_doc::TextFrame { story: deep, options: Default::default() });
+    d.story_mut(mid).unwrap().insert_object(0, designcraft_doc::AnchoredObject::new(it, Default::default()));
+    d.check().unwrap();
+    let cache = Cache::new();
+    let cs = cache.get(&d, deep, None);
+    assert!(!cs.is_overset());
+    assert_eq!(cs.frame(id).unwrap().lines.len(), 1);
+    assert_eq!(frame_specs(&d, deep)[0].page_name.as_deref(), Some("1"), "page of the outermost frame");
+}
+
+#[test]
+fn anchored_text_frames_showing_each_other_do_not_recurse_forever() {
+    // Not a valid document (check() rejects it), but composing must still end.
+    let (mut d, host, sid, _) = anchored_text_frame_doc("Inner", 200.0, 60.0);
+    let back = d.story(host).unwrap().objects[0].clone();
+    let mut back = (*back).clone();
+    if let designcraft_doc::Content::Text(t) = &mut back.item.content {
+        t.story = sid;
+    }
+    d.story_mut(sid).unwrap().insert_object(0, back);
+    // The host loses its frames: both stories are only in each other's anchored frames.
+    d.story_mut(host).unwrap().frames.clear();
+    assert!(d.check().is_err());
+    let cache = Cache::new();
+    for s in [host, sid] {
+        let _ = cache.get(&d, s, None);
+        let _ = frame_specs(&d, s);
+    }
+}

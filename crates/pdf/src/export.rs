@@ -151,6 +151,7 @@ fn export_pdf_with_report_inner(doc: &Document, cache: &Cache, opts: &PdfOptions
         tag_story: None,
         text_area: None,
         para_tags: HashMap::new(),
+        anchor_depth: 0,
     };
     if ex.rgb_only {
         ex.warn("PDF/A: CMYK colours were converted to RGB (no CMYK output intent profile is available yet)");
@@ -339,6 +340,7 @@ fn export_booklet_inner(doc: &Document, cache: &Cache, opts: &BookletOptions) ->
         tag_story: None,
         text_area: None,
         para_tags: HashMap::new(),
+        anchor_depth: 0,
     };
     let pairs = booklet_pairs(n, opts.kind);
     // Sheet size from the largest page.
@@ -487,6 +489,8 @@ pub(crate) struct Exporter<'a> {
     pub(crate) text_area: Option<Rect>,
     /// Marked content of each (story, paragraph index).
     pub(crate) para_tags: HashMap<(designcraft_doc::StoryId, usize), Vec<Identifier>>,
+    /// How many anchored objects deep the current item is.
+    anchor_depth: usize,
 }
 
 enum TagEntry {
@@ -959,9 +963,21 @@ impl Exporter<'_> {
                     if local != Affine::IDENTITY {
                         s.push_transform(&tf(local));
                     }
+                    // An anchored text frame's story is tagged as a story of its own.
+                    let outer = self.tag_story;
+                    if outer.is_some_and(|o| o != tfr.story) {
+                        if let std::collections::hash_map::Entry::Vacant(e) = self.story_tags.entry(tfr.story) {
+                            e.insert(Vec::new());
+                            self.tags.push(TagEntry::Story(tfr.story));
+                        }
+                        self.tag_story = Some(tfr.story);
+                    }
+                    // An anchored text frame's text spans its own box; its host's text then spans the host's again.
+                    let outer_area = self.text_area;
                     self.text_area = (local.determinant().abs() > 1e-12).then(|| local.inverse().transform_rect_bbox(it.inner_bounds()));
                     self.frame_text(s, &cs, ft, text);
-                    self.text_area = None;
+                    self.text_area = outer_area;
+                    self.tag_story = outer;
                     if local != Affine::IDENTITY {
                         s.pop();
                     }
@@ -985,17 +1001,20 @@ impl Exporter<'_> {
         for _ in 0..pushes {
             s.pop();
         }
-        // Anchored objects in the frame's text.
+        // Anchored objects in the frame's text (anchored text frames nest only so deep).
         if let Content::Text(tfr) = &it.content
+            && self.anchor_depth < designcraft_doc::MAX_ANCHOR_DEPTH
             && let Some(st) = doc.story(tfr.story).filter(|st| !st.objects.is_empty())
         {
             let cs = self.cache.get(doc, tfr.story, page);
             if let Some(ft) = cs.frame(it.id) {
+                self.anchor_depth += 1;
                 for o in &ft.objects {
                     if let Some(obj) = st.objects.get(o.index) {
                         self.item(s, &obj.item, xf * Affine::translate(o.origin.to_vec2()), page);
                     }
                 }
+                self.anchor_depth -= 1;
             }
         }
     }
@@ -1640,6 +1659,7 @@ mod image_content_cache_tests {
             tag_story: None,
             text_area: None,
             para_tags: HashMap::new(),
+            anchor_depth: 0,
         }
     }
     #[test]

@@ -440,6 +440,9 @@ pub struct ComposeOptions {
 /// Build the frame specs of a story from the document (geometry, wrap, page names, grid).
 pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
     let Some(st) = doc.story(sid) else { return vec![] };
+    if st.frames.is_empty() {
+        return embedded_spec(doc, sid).into_iter().collect();
+    }
     let mut out = Vec::with_capacity(st.frames.len());
     for &fid in &st.frames {
         let Some(loc) = doc.find(fid) else { continue };
@@ -454,20 +457,7 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
         {
             wrap_exclusions(doc, &sp.items, designcraft_geom::Affine::IDENTITY, item, inv, &mut exclusions, 0);
         }
-        let (page_name, page, left_page) = match (loc.spread, spread) {
-            (designcraft_doc::SpreadRef::Doc(si), Some(sp)) => {
-                let c = item.bounds().center();
-                let pi = sp.page_at_x(c.x).unwrap_or(0);
-                let abs = doc.first_page_of_spread(si) + pi;
-                (Some(doc.page_name(abs)), Some(abs), sp.pages.get(pi).is_some_and(|p| p.side == designcraft_doc::PageSide::Left))
-            }
-            (designcraft_doc::SpreadRef::Parent(pi), Some(sp)) => {
-                let prefix = sp.parent.as_ref().map(|p| p.prefix.clone()).unwrap_or_else(|| "A".into());
-                let _ = pi;
-                (Some(prefix), None, false)
-            }
-            _ => (None, None, false),
-        };
+        let (page_name, page, left_page) = page_info(doc, &loc, item);
         let section_marker = page.map(|abs| section_marker(doc, abs));
         // The page under the frame and its margins, in inner space (bounding boxes).
         let page_rect = match (loc.spread, spread) {
@@ -529,6 +519,68 @@ pub fn frame_specs(doc: &Document, sid: StoryId) -> Vec<FrameSpec> {
         });
     }
     out
+}
+
+/// The page name, absolute page and left-page flag of a frame on a spread.
+fn page_info(doc: &Document, loc: &designcraft_doc::ItemLoc, item: &designcraft_doc::Item) -> (Option<String>, Option<usize>, bool) {
+    match (loc.spread, doc.spread(loc.spread)) {
+        (designcraft_doc::SpreadRef::Doc(si), Some(sp)) => {
+            let c = item.bounds().center();
+            let pi = sp.page_at_x(c.x).unwrap_or(0);
+            let abs = doc.first_page_of_spread(si) + pi;
+            (Some(doc.page_name(abs)), Some(abs), sp.pages.get(pi).is_some_and(|p| p.side == designcraft_doc::PageSide::Left))
+        }
+        (designcraft_doc::SpreadRef::Parent(_), Some(sp)) => {
+            let prefix = sp.parent.as_ref().map(|p| p.prefix.clone()).unwrap_or_else(|| "A".into());
+            (Some(prefix), None, false)
+        }
+        _ => (None, None, false),
+    }
+}
+
+/// The frame of a story shown by an anchored text frame: the anchored item's text area, without
+/// wrap or baseline grid, on the page of the first frame of the outermost host story. None for
+/// type on a path.
+fn embedded_spec(doc: &Document, sid: StoryId) -> Option<FrameSpec> {
+    let (host, _, item) = doc.anchored_text_frame(sid)?;
+    let tf = item.text_frame()?;
+    if tf.options.path.is_some() {
+        return None;
+    }
+    let mut info = (None, None, false);
+    let mut h = host;
+    for _ in 0..designcraft_doc::MAX_ANCHOR_DEPTH {
+        let Some(hs) = doc.story(h) else { break };
+        if let Some(&fid) = hs.frames.first() {
+            if let Some(loc) = doc.find(fid)
+                && let Some(it) = doc.item_at(&loc)
+            {
+                info = page_info(doc, &loc, it);
+            }
+            break;
+        }
+        match doc.anchored_text_frame(h) {
+            Some((up, ..)) => h = up,
+            None => break,
+        }
+    }
+    let area = item.text_area();
+    let vertical = doc.frame_vertical(item);
+    let area = if vertical { Rect::new(0.0, 0.0, area.height(), area.width()) } else { area };
+    let (page_name, page, left_page) = info;
+    Some(FrameSpec {
+        id: item.id,
+        area,
+        opts: tf.options.clone(),
+        vertical,
+        exclusions: vec![],
+        page_name,
+        section_marker: page.map(|abs| section_marker(doc, abs)),
+        page,
+        grid: None,
+        left_page,
+        page_rect: None,
+    })
 }
 
 /// Compose a story of `doc` through its frames.

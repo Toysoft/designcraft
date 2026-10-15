@@ -2750,3 +2750,149 @@ mod liquid_page_rules {
         }
     }
 }
+
+/// An anchored text frame (120 × 40 pt) showing story `story`, with `extra` attributes.
+fn anchored_text_frame_el(self_id: &str, story: &str, extra: &str) -> String {
+    format!(
+        r#"<TextFrame Self="{self_id}" ParentStory="{story}" PreviousTextFrame="n" NextTextFrame="n" {extra} ItemTransform="1 0 0 1 10 5">
+          <Properties><PathGeometry><GeometryPathType PathOpen="false"><PathPointArray>
+            <PathPointType Anchor="-10 -45"/><PathPointType Anchor="-10 -5"/><PathPointType Anchor="110 -5"/><PathPointType Anchor="110 -45"/>
+          </PathPointArray></GeometryPathType></PathGeometry></Properties>
+          <TextFramePreference TextColumnCount="1"><Properties><InsetSpacing type="list"><ListItem type="unit">0</ListItem><ListItem type="unit">0</ListItem><ListItem type="unit">0</ListItem><ListItem type="unit">0</ListItem></InsetSpacing></Properties></TextFramePreference>
+          <AnchoredObjectSetting AnchoredPosition="InlinePosition" AnchorYoffset="-5"/>
+        </TextFrame>"#
+    )
+}
+
+/// A story part: `before`, then `inner` (anchored items), then `after`.
+fn story_part(self_id: &str, before: &str, inner: &str, after: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging" DOMVersion="16.0">
+  <Story Self="{self_id}">
+    <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/Text%3aBody">
+      <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]">
+        <Content>{before}</Content>{inner}<Content>{after}</Content>
+      </CharacterStyleRange>
+    </ParagraphStyleRange>
+  </Story>
+</idPkg:Story>"#
+    )
+}
+
+/// The fixture with its story `s1` replaced and stories listed after it in the designmap.
+fn fixture_with_stories(s1: &str, more: &[(&str, String)]) -> Vec<u8> {
+    let list: String = more.iter().map(|(id, _)| format!("<idPkg:Story src=\"Stories/Story_{id}.xml\"/>\n")).collect();
+    let designmap = DESIGNMAP.replace("<idPkg:Story src=\"Stories/Story_s1.xml\"/>", &format!("<idPkg:Story src=\"Stories/Story_s1.xml\"/>\n{list}"));
+    let names: Vec<String> = more.iter().map(|(id, _)| format!("Stories/Story_{id}.xml")).collect();
+    let mut files: Vec<(&str, &str)> = vec![
+        ("designmap.xml", &designmap),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", STYLES),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", s1),
+    ];
+    files.extend(names.iter().zip(more).map(|(n, (_, xml))| (n.as_str(), xml.as_str())));
+    zip_files(&files)
+}
+
+/// The story an anchored text frame in `host` shows (its first anchored object).
+fn anchored_story(d: &Document, host: designcraft_doc::StoryId) -> designcraft_doc::StoryId {
+    d.story(host).unwrap().objects[0].item.text_frame().expect("an anchored text frame").story
+}
+
+#[test]
+fn imports_anchored_text_frames_two_levels_deep() {
+    // s1 (on the spread) shows s2, which shows s3; both are listed after s1.
+    let s1 = story_part("s1", "Before ", &anchored_text_frame_el("a1", "s2", ""), " after");
+    let s2 = story_part("s2", "Middle ", &anchored_text_frame_el("a2", "s3", ""), "");
+    let s3 = story_part("s3", "Deepest words", "", "");
+    let d = import_idml(&fixture_with_stories(&s1, &[("s2", s2), ("s3", s3)])).unwrap();
+    d.check().unwrap();
+    let host = d.stories.values().find(|s| s.text.starts_with("Before")).unwrap();
+    assert_eq!(host.text, "Before \u{E00E} after");
+    assert!(!host.frames.is_empty());
+    let o = &host.objects[0];
+    assert_eq!(o.size(), (120.0, 40.0));
+    assert_eq!(o.position, designcraft_doc::AnchorPosition::Inline { y_offset: -5.0 });
+    let mid = anchored_story(&d, host.id);
+    let st = d.story(mid).unwrap();
+    assert_eq!(st.text, "Middle \u{E00E}");
+    assert!(st.frames.is_empty());
+    let deep = anchored_story(&d, mid);
+    assert_eq!(d.story(deep).unwrap().text, "Deepest words");
+    assert_eq!(d.anchored_text_frame(deep).map(|(h, ..)| h), Some(mid));
+    // It composes in its anchored frame.
+    let cs = designcraft_compose::Cache::new().get(&d, deep, None);
+    let frame = d.story(mid).unwrap().objects[0].item.id;
+    assert!(cs.frame(frame).is_some_and(|f| !f.lines.is_empty()) && !cs.is_overset());
+}
+
+#[test]
+fn hostile_anchored_text_frames_import_without_failing() {
+    let report = |s1: &str, more: &[(&str, String)]| import_idml_report(&fixture_with_stories(s1, more), &|_| None).unwrap();
+    let host = |d: &Document| d.stories.values().find(|s| s.text.starts_with("Before")).unwrap().id;
+    // A frame showing the story it is in (which is on the spread): an empty frame.
+    let r = report(&story_part("s1", "Before ", &anchored_text_frame_el("a1", "s1", ""), ""), &[]);
+    r.document.check().unwrap();
+    let st = r.document.story(host(&r.document)).unwrap();
+    assert!(matches!(st.objects[0].item.content, designcraft_doc::Content::Unassigned));
+    assert!(r.warnings.iter().any(|w| w.contains("anchored text frame")), "{:?}", r.warnings);
+    // Missing or unknown story: an empty story of its own.
+    for frame in [anchored_text_frame_el("a1", "nope", ""), anchored_text_frame_el("a1", "s2", "").replace(r#"ParentStory="s2" "#, "")] {
+        let r = report(&story_part("s1", "Before ", &frame, ""), &[]);
+        r.document.check().unwrap();
+        let shown = anchored_story(&r.document, host(&r.document));
+        assert!(r.document.story(shown).unwrap().text.is_empty());
+    }
+    // A frame threaded to another frame can't be anchored: skipped.
+    let threaded = anchored_text_frame_el("a1", "s2", "").replace(r#"NextTextFrame="n""#, r#"NextTextFrame="t1""#);
+    let r = report(&story_part("s1", "Before ", &threaded, ""), &[("s2", story_part("s2", "x", "", ""))]);
+    r.document.check().unwrap();
+    assert!(r.document.story(host(&r.document)).unwrap().objects.is_empty());
+    // Stories showing each other, and one story in two anchored frames.
+    let s1 = story_part("s1", "Before ", &format!("{}{}", anchored_text_frame_el("a1", "s2", ""), anchored_text_frame_el("a9", "s2", "")), "");
+    let s2 = story_part("s2", "Two ", &anchored_text_frame_el("a2", "s3", ""), "");
+    let s3 = story_part("s3", "Three ", &anchored_text_frame_el("a3", "s2", ""), "");
+    let r = report(&s1, &[("s2", s2), ("s3", s3)]);
+    r.document.check().unwrap();
+    let st = r.document.story(host(&r.document)).unwrap();
+    assert!(st.objects[0].item.is_text_frame() && matches!(st.objects[1].item.content, designcraft_doc::Content::Unassigned));
+    let two = anchored_story(&r.document, st.id);
+    let three = anchored_story(&r.document, two);
+    assert!(matches!(r.document.story(three).unwrap().objects[0].item.content, designcraft_doc::Content::Unassigned));
+}
+
+#[test]
+fn round_trips_anchored_text_frames() {
+    use designcraft_doc::{AnchorPosition, AnchoredObject, Content, TextFrame};
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (_, host) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(40.0, 40.0, 400.0, 400.0), lid, "Host .", ParaFormat::default()).unwrap();
+    let anchor = |d: &mut Document, into: designcraft_doc::StoryId, at: usize, text: &str, w: f64| {
+        let sid = designcraft_doc::StoryId(d.alloc());
+        d.stories.insert(sid, std::sync::Arc::new(designcraft_doc::Story::with_text(sid, text, ParaFormat::default())));
+        let mut it =
+            designcraft_doc::Item::new(designcraft_doc::ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(Rect::new(0.0, 0.0, w, 50.0)));
+        it.content = Content::Text(TextFrame { story: sid, options: Default::default() });
+        d.story_mut(into).unwrap().insert_object(at, AnchoredObject::new(it, AnchorPosition::Inline { y_offset: -3.0 }));
+        sid
+    };
+    let inner = anchor(&mut d, host, 5, "Inner ", 200.0);
+    anchor(&mut d, inner, 6, "Deeper", 120.0);
+    d.check().unwrap();
+    let back = import_idml(&export_idml(&d)).unwrap();
+    back.check().unwrap();
+    let h = back.stories.values().find(|s| s.text.starts_with("Host")).unwrap();
+    assert_eq!(h.text, d.story(host).unwrap().text);
+    assert_eq!(h.objects[0].position, AnchorPosition::Inline { y_offset: -3.0 });
+    assert!((h.objects[0].size().0 - 200.0).abs() < 1e-6);
+    let i = anchored_story(&back, h.id);
+    assert_eq!(back.story(i).unwrap().text, "Inner \u{E00E}");
+    assert!(back.story(i).unwrap().frames.is_empty());
+    let deeper = anchored_story(&back, i);
+    assert_eq!(back.story(deeper).unwrap().text, "Deeper");
+    assert!((back.story(i).unwrap().objects[0].size().0 - 120.0).abs() < 1e-6);
+}

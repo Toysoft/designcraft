@@ -85,11 +85,17 @@ pub fn import_idml_report(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u
     let mut im = Importer::new(read_link);
     im.japanese_composer = japanese_composer;
     im.run(&root, &top)?;
-    let document = im.finish(&root).map_err(|e| match e {
+    let mut document = im.finish(&root).map_err(|e| match e {
         // Without its spread parts there is nothing to open: say which parts were missing.
         IdmlError::Invalid(msg) if !warnings.is_empty() => IdmlError::Invalid(format!("{msg} ({})", warnings.join("; "))),
         e => e,
     })?;
+    // Anchored text frames whose story is missing, also threaded on a page, already shown by
+    // another anchored frame or (through them) showing itself are left empty.
+    let emptied = document.fix_anchored_text_frames(false);
+    if emptied > 0 {
+        warnings.push(format!("{emptied} anchored text frame(s) could not show their story and were left empty"));
+    }
     document.check().map_err(|e| IdmlError::Invalid(e.to_string()))?;
     Ok(Imported { document, warnings })
 }
@@ -600,12 +606,14 @@ impl<'r> Importer<'r> {
         if let Some(ix) = top.iter().find(|e| e.local() == "Index") {
             self.index_topics_of(ix, &IndexTopic::default());
         }
-        // Stories (ids first so frames can reference them).
-        for e in top.iter().filter(|e| e.local() == "Story") {
-            let id = StoryId(self.alloc());
+        // Stories: every id first (frames, anchored ones in earlier stories too, reference them).
+        let stories: Vec<(StoryId, &El)> = top.iter().filter(|e| e.local() == "Story").map(|e| (StoryId(self.alloc()), e)).collect();
+        for (id, e) in &stories {
             if let Some(s) = e.get("Self") {
-                self.story_ids.insert(s.to_string(), id);
+                self.story_ids.insert(s.to_string(), *id);
             }
+        }
+        for (id, e) in stories {
             let story = self.story(id, e);
             self.stories.insert(id, story);
         }
@@ -2056,11 +2064,12 @@ impl<'r> Importer<'r> {
                         rcf.over.position = None;
                         b.push(&designcraft_doc::FOOTNOTE_REF.to_string(), &rcf);
                     }
-                    // Not supported yet: skip their content entirely.
-                    "Rectangle" | "Oval" | "Polygon" | "GraphicLine" | "Group" => {
-                        // An anchored object (text frames inside stories aren't supported yet).
-                        let has_text = c.find_all("TextFrame").next().is_some();
-                        if !has_text && let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY) {
+                    "Rectangle" | "Oval" | "Polygon" | "GraphicLine" | "Group" | "TextFrame" => {
+                        // An anchored object. A text frame in it shows a story of its own; one
+                        // threaded to other frames can't be anchored (skipped).
+                        if !has_threaded_text_frame(c)
+                            && let Some(item) = self.item(c, designcraft_geom::Affine::IDENTITY)
+                        {
                             use designcraft_doc::anchored::AnchorAlign as A;
                             let set = c.find("AnchoredObjectSetting");
                             let get = |k: &str| set.and_then(|s| s.num(k)).unwrap_or(0.0);
@@ -2102,7 +2111,7 @@ impl<'r> Importer<'r> {
                             b.push(&designcraft_doc::OBJECT_MARK.to_string(), cf);
                         }
                     }
-                    "Properties" | "Note" | "TextFrame" | "StoryPreference" | "InCopyExportOption" | "TextVariableInstance" => {}
+                    "Properties" | "Note" | "StoryPreference" | "InCopyExportOption" | "TextVariableInstance" => {}
                     _ => self.walk_story(c, b, pf, pchars, cf, brk),
                 },
                 Node::Pi(t, v) if t == "ACE" => {
@@ -2823,6 +2832,18 @@ impl StoryBuilder {
             _ => self.runs.push(CharRun { len: s.len(), format: f.clone() }),
         }
     }
+}
+
+/// Is `e`, or a page item in it, a text frame threaded to other frames?
+fn has_threaded_text_frame(e: &El) -> bool {
+    let mut stack = vec![e];
+    while let Some(x) = stack.pop() {
+        if x.local() == "TextFrame" && [x.get("PreviousTextFrame"), x.get("NextTextFrame")].into_iter().flatten().any(|v| v != "n") {
+            return true;
+        }
+        stack.extend(x.elements().filter(|c| matches!(c.local(), "Rectangle" | "Oval" | "Polygon" | "GraphicLine" | "Group" | "TextFrame")));
+    }
+    false
 }
 
 fn ace_char(v: &str) -> Option<char> {

@@ -439,15 +439,18 @@ impl Renderer {
                 self.draw_text(ctx, f, &n.text, nft, xf * Affine::translate(n.origin.to_vec2()));
             }
         }
-        // Anchored objects ride on their lines.
+        // Anchored objects ride on their lines (anchored text frames nest only so deep).
         if !ft.objects.is_empty()
+            && self.anchor_depth < designcraft_doc::MAX_ANCHOR_DEPTH
             && let Some(st) = doc.story(cs.story)
         {
+            self.anchor_depth += 1;
             for o in &ft.objects {
                 if let Some(obj) = st.objects.get(o.index) {
                     self.draw_item(ctx, f, &obj.item, xf * Affine::translate(o.origin.to_vec2()), None);
                 }
             }
+            self.anchor_depth -= 1;
         }
     }
 }

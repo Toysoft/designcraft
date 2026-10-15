@@ -638,3 +638,55 @@ fn empty_and_populated_export_metadata_preserve_key_presence() {
     }
     assert!(s.contains("Synthetic title") && s.contains("Test author"));
 }
+
+/// Anchor, at the end of `host`, a 300 pt wide text frame `h` high showing a new story with
+/// `text`; returns that story.
+fn anchor_text_frame(d: &mut Document, host: designcraft_doc::StoryId, text: &str, h: f64) -> designcraft_doc::StoryId {
+    let sid = designcraft_doc::StoryId(d.alloc());
+    d.stories.insert(sid, std::sync::Arc::new(designcraft_doc::Story::with_text(sid, text, ParaFormat::default())));
+    let mut it = Item::new(
+        ItemId(d.alloc()),
+        d.default_layer(),
+        designcraft_doc::Shape::Rectangle,
+        designcraft_geom::shapes::rectangle(Rect::new(0.0, 0.0, 300.0, h)),
+    );
+    it.content = designcraft_doc::Content::Text(designcraft_doc::TextFrame { story: sid, options: Default::default() });
+    let st = d.story_mut(host).unwrap();
+    let n = st.len();
+    st.insert_object(
+        n,
+        designcraft_doc::AnchoredObject::new(
+            it,
+            designcraft_doc::AnchorPosition::AboveLine { align: Default::default(), space_before: 0.0, space_after: 0.0 },
+        ),
+    );
+    sid
+}
+
+#[test]
+fn anchored_text_frames_export_their_text_tagged_as_their_own_stories() {
+    let mut d = doc_with_text("Host words");
+    let host = d.spreads[0].items[0].text_frame().unwrap().story;
+    let inner = anchor_text_frame(&mut d, host, "Inner words", 120.0);
+    anchor_text_frame(&mut d, inner, "Deeper words", 40.0);
+    d.check().unwrap();
+    let bytes = export_pdf(&d, &Cache::new(), &PdfOptions { tagged: true, ..Default::default() }).unwrap();
+    let text = extract_text(&bytes);
+    assert!(text[0].contains("Host") && text[0].contains("Inner") && text[0].contains("Deeper"), "{text:?}");
+    // One paragraph element per story (not the anchored text inside the host's paragraph).
+    let s = uncompressed(&d, PdfOptions { tagged: true, ..Default::default() });
+    assert_eq!(s.matches("/S/P/").count() + s.matches("/S/P>>").count() + s.matches("/S/P\n").count(), 3, "{}", s.matches("/S/P").count());
+}
+
+#[test]
+fn anchored_text_frames_showing_themselves_export_and_end() {
+    // Not a valid document: the anchored story holds the frame that shows it (same id).
+    let mut d = doc_with_text("Host words");
+    let host = d.spreads[0].items[0].text_frame().unwrap().story;
+    let inner = anchor_text_frame(&mut d, host, "Again", 40.0);
+    let mut obj = (*d.story(host).unwrap().objects[0]).clone();
+    obj.position = designcraft_doc::AnchorPosition::default();
+    d.story_mut(inner).unwrap().insert_object(0, obj);
+    assert!(d.check().is_err());
+    assert!(export_pdf(&d, &Cache::new(), &PdfOptions { tagged: true, ..Default::default() }).is_ok());
+}
