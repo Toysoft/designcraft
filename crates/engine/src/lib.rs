@@ -213,6 +213,8 @@ pub struct Prefs {
     pub show_note_anchors: bool,
     /// Preferences › File Handling: minutes between document recovery saves.
     pub recovery_minutes: f64,
+    /// File › New › Document › Save Document Preset: saved document presets, by name (`title`).
+    pub document_presets: Vec<designcraft_doc::build::NewDocument>,
     /// Preferences › File Handling › Create Links When Placing Text Files: placed text files are
     /// linked (Links panel) unless `file.place` says otherwise.
     pub link_text_files: bool,
@@ -242,6 +244,7 @@ pub fn default_autocorrect() -> Vec<(String, String)> {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
+            document_presets: Vec::new(),
             show_hidden_characters: false,
             typographers_quotes: true,
             polygon_sides: 6,
@@ -316,6 +319,11 @@ impl Default for Session {
 }
 
 impl Session {
+    /// The name `file.new` gives the next document without a title (New Document shows it).
+    pub fn next_untitled_title(&self) -> String {
+        format!("Untitled-{}", self.untitled.saturating_add(1))
+    }
+
     pub fn new() -> Self {
         guard::install_panic_hook();
         Session {

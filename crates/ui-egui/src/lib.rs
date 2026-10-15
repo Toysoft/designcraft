@@ -18,6 +18,7 @@ pub mod i18n;
 pub mod icons;
 pub mod menus;
 mod modal_drag;
+mod new_document;
 mod panel_docking;
 pub mod panels;
 mod prefs;
@@ -257,6 +258,8 @@ pub struct UiState {
     pub workspace: String,
     /// Window › Workspace › New Workspace: saved panel arrangements.
     pub custom_workspaces: Vec<SavedWorkspace>,
+    /// File › New › Document › Recent: the settings of the last documents made, newest first.
+    pub recent_new_documents: Vec<designcraft_doc::build::NewDocument>,
     /// Transform reference point (0..8, row-major; 0 = top-left).
     pub ref_point: u8,
     /// Align To target (`selection`, `keyObject`, `margins`, `page`, `spread`).
@@ -368,6 +371,7 @@ impl Default for UiState {
             units: Unit::Picas,
             workspace: "Essentials".into(),
             custom_workspaces: Vec::new(),
+            recent_new_documents: Vec::new(),
             ref_point: 0,
             align_to: "selection".into(),
             text_style_tab: 0,

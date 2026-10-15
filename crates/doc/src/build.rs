@@ -97,6 +97,8 @@ impl NewDocument {
             height: p.height,
             units: p.units,
             facing_pages: !web,
+            // As in InDesign: mobile presets start with a primary text frame.
+            primary_text_frame: p.intent == Intent::Mobile,
             margins: if p.units == Unit::Millimeters { Margins::uniform(12.7 * MM) } else { Margins::uniform(36.0) },
             ..Default::default()
         })
