@@ -203,7 +203,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if icons::button(ui, "trash", 20.0, false, crate::i18n::tr(&app.ui.language, "Delete selected pages")).clicked() {
-                let _ = app.run("layout.pages.delete", json!({"pages": [cur]}));
+                let _ = crate::dialogs::delete_pages(app, vec![cur]);
             }
             // Create new page; a page dropped on it is duplicated at the end of the document.
             let plus = icons::button(ui, "plus", 20.0, dragging, crate::i18n::tr(&app.ui.language, "Create new page"));
@@ -293,12 +293,12 @@ fn page_menu(app: &mut DesignApp, ui: &mut egui::Ui, doc: &designcraft_doc::Docu
         ui.close();
     }
     if item(ui, "Delete Page") {
-        let _ = app.run("layout.pages.delete", json!({"pages": [abs]}));
+        let _ = crate::dialogs::delete_pages(app, vec![abs]);
         ui.close();
     }
     if pages_in_spread > 1 && item(ui, "Delete Spread") {
         let first = doc.first_page_of_spread(si);
-        let _ = app.run("layout.pages.delete", json!({"pages": (first..first.saturating_add(pages_in_spread)).collect::<Vec<_>>()}));
+        let _ = crate::dialogs::delete_pages(app, (first..first.saturating_add(pages_in_spread)).collect());
         ui.close();
     }
     ui.separator();
@@ -436,6 +436,62 @@ mod tests {
         h.get_by_label("Delete Page").click();
         h.run_steps(3);
         assert_eq!(h.state().session.doc().unwrap().doc.page_count(), 4, "only the clicked page");
+    }
+
+    /// As in InDesign: deleting a page with objects asks first; an empty page goes at once, and
+    /// "Don't show again" stops the question.
+    #[test]
+    fn deleting_a_page_with_objects_asks_first() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 5, "facingPages": true})).unwrap();
+        let doc = app.session.doc().unwrap().doc.clone();
+        let (si, pi) = doc.page_loc(2).unwrap();
+        let x = doc.spreads[si].pages[pi].x;
+        app.run("frame.create", json!({"spread": si, "rect": [x + 36.0, 36.0, x + 200.0, 200.0]})).unwrap();
+        let count = |h: &Harness<'_, DesignApp>| h.state().session.doc().unwrap().doc.page_count();
+        let mut h = menu_harness(app, 2, si);
+        h.get_by_label("Delete Page").click();
+        h.run_steps(3);
+        assert_eq!(count(&h), 5, "nothing deleted yet");
+        let d = h.state().ui.dialog.clone().unwrap();
+        assert_eq!((d.id.as_str(), d.fields["pages"].clone()), ("deletePages", json!([2])));
+        // Cancel keeps the page.
+        crate::dialogs::cancel(h.state_mut());
+        assert_eq!(count(&h), 5);
+        // The whole spread: one question for both pages.
+        h.get_by_label("Delete Spread").click();
+        h.run_steps(3);
+        assert_eq!(h.state().ui.dialog.as_ref().unwrap().fields["pages"], json!([1, 2]));
+        crate::dialogs::cancel(h.state_mut());
+        // OK deletes it.
+        h.get_by_label("Delete Page").click();
+        h.run_steps(3);
+        crate::dialogs::confirm(h.state_mut()).unwrap();
+        assert_eq!(count(&h), 4);
+        assert!(!h.state().ui.skip_delete_pages_warning);
+        // An empty page goes without a question.
+        let app = h.state_mut();
+        crate::dialogs::delete_pages(app, vec![0]).unwrap();
+        assert!(app.ui.dialog.is_none());
+        assert_eq!(app.session.doc().unwrap().doc.page_count(), 3);
+        // "Don't show again".
+        let doc = app.session.doc().unwrap().doc.clone();
+        let (si, pi) = doc.page_loc(1).unwrap();
+        let x = doc.spreads[si].pages[pi].x;
+        app.run("frame.create", json!({"spread": si, "rect": [x + 36.0, 36.0, x + 200.0, 200.0]})).unwrap();
+        app.run("frame.create", json!({"spread": si, "rect": [x + 36.0, 300.0, x + 200.0, 400.0]})).unwrap();
+        crate::dialogs::delete_pages(app, vec![1]).unwrap();
+        app.ui.dialog.as_mut().unwrap().fields.insert("dontShowAgain".into(), json!(true));
+        crate::dialogs::confirm(app).unwrap();
+        assert!(app.ui.skip_delete_pages_warning);
+        assert_eq!(app.session.doc().unwrap().doc.page_count(), 2);
+        let doc = app.session.doc().unwrap().doc.clone();
+        let (si, pi) = doc.page_loc(0).unwrap();
+        let x = doc.spreads[si].pages[pi].x;
+        app.run("frame.create", json!({"spread": si, "rect": [x + 36.0, 36.0, x + 200.0, 200.0]})).unwrap();
+        crate::dialogs::delete_pages(app, vec![0]).unwrap();
+        assert!(app.ui.dialog.is_none(), "no more questions");
+        assert_eq!(app.session.doc().unwrap().doc.page_count(), 1);
     }
 
     #[test]

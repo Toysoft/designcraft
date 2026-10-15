@@ -1512,6 +1512,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         "userDictionary" => crate::i18n::tr(&app.ui.language, "User Dictionary"),
         "newWorkspace" => crate::i18n::tr(&app.ui.language, "New Workspace"),
         "closeDocument" => crate::i18n::tr(&app.ui.language, "Unsaved Changes"),
+        "deletePages" => crate::i18n::tr(&app.ui.language, "Warning"),
         "updateLink" => crate::i18n::tr(&app.ui.language, "Update Link"),
         "menus" => crate::i18n::tr(&app.ui.language, "Menu Customization"),
         "importOptions" => crate::i18n::tr(&app.ui.language, "Import Options"),
@@ -1537,7 +1538,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         let available = (ctx.content_rect().size() - frame_margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
         let preferred_width: f32 = match d.id.as_str() {
             "alert" => 440.0,
-            "closeDocument" | "updateLink" => 380.0,
+            "closeDocument" | "updateLink" | "deletePages" => 380.0,
             "newDocument" if crate::i18n::is_rtl(&app.ui.language) => 380.0,
             _ => 640.0,
         };
@@ -2023,6 +2024,22 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                         .replace("{}", &d.s("title"));
                     crate::rtl::label(ui, text);
                 }
+                "deletePages" => {
+                    let several = d.fields.get("pages").and_then(Value::as_array).is_some_and(|p| p.len() > 1);
+                    crate::rtl::label(
+                        ui,
+                        crate::i18n::tr(
+                            &app.ui.language,
+                            if several {
+                                "The affected pages contain objects. Delete the pages anyway?"
+                            } else {
+                                "The affected page contains objects. Delete the page anyway?"
+                            },
+                        ),
+                    );
+                    ui.add_space(8.0);
+                    check(ui, &mut d, "dontShowAgain", crate::i18n::tr(&app.ui.language, "Don't show again"));
+                }
                 "updateLink" => {
                     let text = crate::i18n::tr(
                         &app.ui.language,
@@ -2242,6 +2259,17 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
         Some(false) => cancel(app),
         None => {}
     }
+}
+
+/// Delete absolute pages `pages` as the Pages panel and Layout › Pages › Delete Page do: when
+/// they hold objects, InDesign's warning asks first, unless it was told not to.
+pub fn delete_pages(app: &mut DesignApp, pages: Vec<usize>) -> Result<Value, String> {
+    let has_items = app.session.active().is_some_and(|st| pages.iter().any(|&abs| st.doc.page_has_items(abs)));
+    if has_items && !app.ui.skip_delete_pages_warning {
+        app.ui.dialog = Some(Dialog::new("deletePages", json!({"pages": pages})));
+        return Ok(Value::Null);
+    }
+    app.run("layout.pages.delete", json!({"pages": pages}))
 }
 
 /// Close the open dialog without applying it (Cancel, Esc, the control channel): a previewing
@@ -2636,6 +2664,12 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             app.run("document.preferences", doc)
         }
         "newWorkspace" => app.run("window.newWorkspace", json!({"name": d.s("name")})),
+        "deletePages" => {
+            if d.b("dontShowAgain") {
+                app.ui.skip_delete_pages_warning = true;
+            }
+            app.run("layout.pages.delete", json!({"pages": d.fields.get("pages").cloned().unwrap_or_else(|| json!([]))}))
+        }
         "updateLink" => crate::panels::properties::run_update_links(app, d.fields.get("target").cloned().unwrap_or_else(|| json!({}))),
         "closeDocument" => {
             // The document may have moved in the tab row (or gone) while the dialog was open.

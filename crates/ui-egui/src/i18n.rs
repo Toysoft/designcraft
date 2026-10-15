@@ -58,6 +58,28 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    ("Warning", ["Warnung", "Avertissement", "Advertencia", "警告", "警告"]),
+    ("Don't show again", ["Nicht mehr anzeigen", "Ne plus afficher", "No volver a mostrar", "今後表示しない", "不再显示"]),
+    (
+        "The affected page contains objects. Delete the page anyway?",
+        [
+            "Die betroffene Seite enthält Objekte. Seite trotzdem löschen?",
+            "La page concernée contient des objets. Supprimer quand même la page ?",
+            "La página afectada contiene objetos. ¿Desea eliminarla de todos modos?",
+            "対象のページにはオブジェクトが含まれています。ページを削除しますか？",
+            "受影响的页面包含对象。仍要删除该页面吗？",
+        ],
+    ),
+    (
+        "The affected pages contain objects. Delete the pages anyway?",
+        [
+            "Die betroffenen Seiten enthalten Objekte. Seiten trotzdem löschen?",
+            "Les pages concernées contiennent des objets. Supprimer quand même les pages ?",
+            "Las páginas afectadas contienen objetos. ¿Desea eliminarlas de todos modos?",
+            "対象のページにはオブジェクトが含まれています。ページを削除しますか？",
+            "受影响的页面包含对象。仍要删除这些页面吗？",
+        ],
+    ),
     (
         "Bulleted & Numbered Lists",
         [

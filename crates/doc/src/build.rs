@@ -442,6 +442,14 @@ impl Document {
     }
 
     /// Delete absolute pages (items whose centre is on a deleted page are deleted too).
+    /// Whether absolute page `abs` holds page items: the ones Delete Pages removes with it
+    /// (an item belongs to the page its centre is over).
+    pub fn page_has_items(&self, abs: usize) -> bool {
+        let Some((si, pi)) = self.page_loc(abs) else { return false };
+        let Some(sp) = self.spreads.get(si) else { return false };
+        sp.items.iter().any(|it| sp.page_at_x(it.bounds().center().x) == Some(pi))
+    }
+
     pub fn delete_pages(&mut self, pages: &[usize]) -> Result<()> {
         if pages.len() >= self.page_count() {
             return Err(DocError::Invalid("a document needs at least one page".into()));

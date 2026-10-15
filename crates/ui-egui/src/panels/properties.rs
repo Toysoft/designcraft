@@ -350,7 +350,7 @@ fn document_sections(app: &mut DesignApp, ui: &mut Ui) {
         let _ = app.run("layout.pages.insert", json!({"after": cur, "count": 1}));
     }
     if del {
-        let _ = app.run("layout.pages.delete", json!({"pages": [cur]}));
+        let _ = crate::dialogs::delete_pages(app, vec![cur]);
     }
     ui.add_space(3.0);
     if outline_button(ui, crate::i18n::tr(&app.ui.language, "Edit Page"), fw).clicked() {

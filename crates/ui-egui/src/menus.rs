@@ -1123,7 +1123,7 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             let Some(st) = app.session.active() else { return Some(Err("no document open".into())) };
             let page = crate::canvas::current_page(app).unwrap_or(0);
             let r = if id == "app.deletePage" {
-                app.run("layout.pages.delete", json!({"pages": [page]}))
+                crate::dialogs::delete_pages(app, vec![page])
             } else {
                 let spread = st.doc.page_loc(page).map_or(0, |l| l.0);
                 app.run("layout.pages.duplicateSpread", json!({"spread": spread}))
