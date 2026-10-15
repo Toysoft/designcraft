@@ -937,6 +937,33 @@ fn cjk_character_attributes_import_from_independent_xml_and_round_trip() {
 }
 
 #[test]
+fn composers_import_by_kind_and_round_trip() {
+    use designcraft_doc::Composer as C;
+    let para = |composer: &str, text: &str| {
+        format!(
+            r#"<ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]" Composer="{composer}"><CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]"><Content>{text}</Content><Br /></CharacterStyleRange></ParagraphStyleRange>"#
+        )
+    };
+    let cases = [
+        ("HL Composer", C::Paragraph),
+        ("HL Single Optyca", C::SingleLine),
+        ("HL Composer Optyca", C::Paragraph),
+        ("HL Composer J", C::Japanese),
+        ("$ID/HL Single J", C::JapaneseSingleLine),
+    ];
+    let body: String = cases.iter().enumerate().map(|(i, (name, _))| para(name, &format!("p{i}"))).collect();
+    let story =
+        format!(r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">{body}</Story></idPkg:Story>"#);
+    let doc = import_idml(&fixture_with_story(&story)).unwrap();
+    let back = import_idml(&export_idml(&doc)).unwrap();
+    for d in [&doc, &back] {
+        let st = d.stories.values().find(|s| s.text.contains("p0")).unwrap();
+        let got: Vec<_> = st.paras.iter().take(cases.len()).map(|p| p.para.composer).collect();
+        assert_eq!(got, cases.iter().map(|(_, c)| Some(*c)).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn text_stroke_alignment_imports_as_stroke_behind_fill_and_round_trips() {
     let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
       <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
@@ -2411,36 +2438,77 @@ fn too_many_entries_are_refused() {
     assert!(err.to_string().contains("entries"), "{err}");
 }
 
-/// InDesign writes `LeadingModel="LeadingModelAkiBelow"` on [No paragraph style] of every
-/// document, but only its Japanese composers use the leading model: with the Paragraph Composer,
-/// a 24 pt paragraph after a 32 pt one sits a Roman 28.8 pt below it (Montilla Design's Flex Layout
-/// file: frames fitted to that came out overset).
+/// A package whose [No paragraph style] carries the space-below leading model
+/// (`LeadingModelAkiBelow`, written on every IDML) and applies `composer` in the
+/// `<Properties><Composer>` form, with a 32 pt paragraph above a 24 pt one.
+fn aki_below_doc(composer: &str) -> Document {
+    let styles = STYLES.replace(
+        r#"Name="$ID/[No paragraph style]" PointSize="12">
+      <Properties>"#,
+        &format!(
+            r#"Name="$ID/[No paragraph style]" PointSize="12" LeadingModel="LeadingModelAkiBelow">
+      <Properties><Composer type="string">{composer}</Composer>"#
+        ),
+    );
+    let story = r#"<idPkg:Story xmlns:idPkg="http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"><Story Self="s1">
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" PointSize="32"><Content>Big</Content><Br/></CharacterStyleRange>
+      </ParagraphStyleRange>
+      <ParagraphStyleRange AppliedParagraphStyle="ParagraphStyle/$ID/[No paragraph style]">
+        <CharacterStyleRange AppliedCharacterStyle="CharacterStyle/$ID/[No character style]" PointSize="24"><Content>Small</Content></CharacterStyleRange>
+      </ParagraphStyleRange></Story></idPkg:Story>"#;
+    let pkg = zip_files(&[
+        ("designmap.xml", DESIGNMAP),
+        ("Resources/Graphic.xml", GRAPHIC),
+        ("Resources/Styles.xml", &styles),
+        ("Resources/Preferences.xml", PREFS),
+        ("MasterSpreads/MasterSpread_m1.xml", MASTER),
+        ("Spreads/Spread_sp1.xml", SPREAD),
+        ("Stories/Story_s1.xml", story),
+    ]);
+    import_idml(&pkg).unwrap()
+}
+
+/// The distance from the first baseline of [`aki_below_doc`]'s story to the second.
+fn second_line_gap(d: &Document) -> f64 {
+    let sid = d.stories.values().find(|s| s.text.contains("Big")).unwrap().id;
+    let cs = designcraft_compose::compose_story(d, sid, &Default::default());
+    let baselines: Vec<f64> = cs.frames.iter().flat_map(|f| &f.lines).map(|l| l.baseline).collect();
+    assert_eq!(baselines.len(), 2, "{baselines:?}");
+    baselines[1] - baselines[0]
+}
+
+/// The leading model on [No paragraph style] of every IDML takes effect only under the Japanese
+/// composers: with the others, a 24 pt paragraph after a 32 pt one sits a Roman 28.8 pt (its auto
+/// leading) below it.
 #[test]
 fn the_default_cjk_leading_model_applies_only_with_a_japanese_composer() {
-    let styles = |composer: &str| {
-        STYLES.replace(
-            r#"Name="$ID/[No paragraph style]" PointSize="12">"#,
-            &format!(r#"Name="$ID/[No paragraph style]" PointSize="12" LeadingModel="LeadingModelAkiBelow" Composer="{composer}">"#),
-        )
-    };
-    let model = |composer: &str| {
-        let s = styles(composer);
-        let pkg = zip_files(&[
-            ("designmap.xml", DESIGNMAP),
-            ("Resources/Graphic.xml", GRAPHIC),
-            ("Resources/Styles.xml", &s),
-            ("Resources/Preferences.xml", PREFS),
-            ("MasterSpreads/MasterSpread_m1.xml", MASTER),
-            ("Spreads/Spread_sp1.xml", SPREAD),
-            ("Stories/Story_s1.xml", STORY),
-        ]);
-        let d = import_idml(&pkg).unwrap();
-        d.styles.para(designcraft_doc::NO_PARA_STYLE).unwrap().chars.leading_model
-    };
-    assert_eq!(model("HL Composer"), None, "the Paragraph Composer leads baseline to baseline");
-    assert_eq!(model("HL Single"), None);
-    assert_eq!(model("$ID/HL Composer J"), Some(designcraft_doc::cjk::LeadingModel::AkiBelow));
-    assert_eq!(model("$ID/HL Single J"), Some(designcraft_doc::cjk::LeadingModel::AkiBelow));
+    for composer in ["$ID/HL Composer", "$ID/HL Single", "$ID/HL Composer Optyca"] {
+        let d = aki_below_doc(composer);
+        let root = d.styles.para(designcraft_doc::NO_PARA_STYLE).unwrap();
+        assert_eq!(root.chars.leading_model, Some(designcraft_doc::cjk::LeadingModel::AkiBelow), "the import keeps the file's model");
+        let gap = second_line_gap(&d);
+        assert!((gap - 28.8).abs() < 0.01, "{composer}: {gap}");
+    }
+    for composer in ["$ID/HL Composer J", "$ID/HL Single J"] {
+        let gap = second_line_gap(&aki_below_doc(composer));
+        assert!(gap > 28.8 + 1.0, "{composer}: the upper line's leading sits below it, not the lower line's ({gap})");
+    }
+}
+
+/// A Japanese-composer document keeps its composer and leading model through export and
+/// reimport, and lays out the same.
+#[test]
+fn a_japanese_composer_and_its_leading_model_round_trip() {
+    use designcraft_doc::Composer as C;
+    let d = aki_below_doc("$ID/HL Composer J");
+    let back = import_idml(&export_idml(&d)).unwrap();
+    for doc in [&d, &back] {
+        let root = doc.styles.para(designcraft_doc::NO_PARA_STYLE).unwrap();
+        assert_eq!(root.para.composer, Some(C::Japanese));
+        assert_eq!(root.chars.leading_model, Some(designcraft_doc::cjk::LeadingModel::AkiBelow));
+    }
+    assert!((second_line_gap(&d) - second_line_gap(&back)).abs() < 0.01);
 }
 
 mod liquid_page_rules {
