@@ -4,7 +4,8 @@
 //! vello_cpu only supports filter layers in single-threaded contexts, so on the multithreaded
 //! pipeline each effect is rendered into an offscreen single-threaded context cropped to its
 //! reach and composited back as an image ([`Renderer::with_filters`]); single-threaded contexts
-//! draw directly. A very wide blur goes offscreen in both, at a lower resolution.
+//! draw directly. A very wide blur goes offscreen in both, at a lower resolution; the object
+//! itself and the clip to its shape stay at full resolution.
 //!
 //! - Drop shadow / outer glow: the object's silhouette (everything it paints: fill, image, text,
 //!   stroke) in a `DropShadowOnly` layer under the object. `size` sets the blur (σ = size / 2),
@@ -113,7 +114,7 @@ impl Renderer {
             // The offset moves the geometry, not the filter: vello drops layer content that lies
             // entirely outside the viewport before filtering.
             let r = (reach + off).inflate(grow, grow);
-            self.with_filters(ctx, f, r, sigma, |me, c, fr| {
+            self.with_filters(ctx, f, r, sigma, None, |me, c, fr| {
                 let moved = Frame { view: fr.view * Affine::translate(off), ..*fr };
                 c.set_transform(moved.view);
                 c.push_layer(None, None, None, None, Some(filter));
@@ -138,13 +139,15 @@ impl Renderer {
         // The object, feathered or not.
         if e.feather > 0.0 && it.path.is_closed() {
             let w = e.feather;
-            self.with_filters(ctx, f, reach, w / 4.0, |me, c, fr| {
-                c.set_transform(fr.view * xf);
-                c.push_clip_layer(bp);
-                me.draw_body(c, fr, it, bp, xf, page);
-                // Keep the body where the blurred inset silhouette is.
-                c.set_transform(Affine::IDENTITY);
-                c.push_layer(None, Some(BlendMode::new(Mix::Normal, Compose::DestIn)), None, None, None);
+            // The body and its clip stay at device resolution; only the blurred mask may be drawn
+            // offscreen at a lower one.
+            ctx.set_transform(f.view * xf);
+            ctx.push_clip_layer(bp);
+            self.draw_body(ctx, f, it, bp, xf, page);
+            // Keep the body where the blurred inset silhouette is.
+            ctx.set_transform(Affine::IDENTITY);
+            ctx.push_layer(None, Some(BlendMode::new(Mix::Normal, Compose::DestIn)), None, None, None);
+            self.with_filters(ctx, f, reach, w / 4.0, None, |_, c, fr| {
                 c.set_transform(fr.view);
                 c.push_layer(None, None, None, None, Some(blur(w / 4.0)));
                 c.set_transform(fr.view * xf);
@@ -157,9 +160,9 @@ impl Renderer {
                 c.stroke_path(bp);
                 c.pop_layer();
                 c.pop_layer();
-                c.pop_layer();
-                c.pop_layer();
             });
+            ctx.pop_layer();
+            ctx.pop_layer();
         } else {
             self.draw_body(ctx, f, it, bp, xf, page);
         }
@@ -217,9 +220,7 @@ impl Renderer {
             let (sigma, choke) = split(g.size, g.choke);
             let paint = color_of(&c, g.opacity.clamp(0.0, 1.0));
             if g.center {
-                self.with_blended_filters(ctx, f, reach, sigma, Mix::Screen, |_, c, fr| {
-                    c.set_transform(fr.view * xf);
-                    c.push_clip_layer(bp);
+                self.with_blended_filters(ctx, f, reach, sigma, Mix::Screen, (bp, xf), |_, c, fr| {
                     c.set_transform(fr.view);
                     c.push_layer(None, None, None, None, Some(blur(sigma)));
                     c.set_transform(fr.view * xf);
@@ -232,7 +233,6 @@ impl Renderer {
                     c.set_paint(peniko::Color::BLACK);
                     c.set_stroke(kurbo::Stroke::new((g.size - choke).max(0.5) * 2.0).with_join(kurbo::Join::Round));
                     c.stroke_path(bp);
-                    c.pop_layer();
                     c.pop_layer();
                     c.pop_layer();
                 });
@@ -249,9 +249,7 @@ impl Renderer {
             let sigma = st.size.max(0.0) / 2.0;
             let paint = color_of(&c, st.opacity.clamp(0.0, 1.0));
             let invert = st.invert;
-            self.with_blended_filters(ctx, f, reach, sigma, Mix::Multiply, |_, c, fr| {
-                c.set_transform(fr.view * xf);
-                c.push_clip_layer(bp);
+            self.with_blended_filters(ctx, f, reach, sigma, Mix::Multiply, (bp, xf), |_, c, fr| {
                 c.set_transform(fr.view);
                 c.push_layer(None, None, None, None, Some(blur(sigma)));
                 if invert {
@@ -268,7 +266,6 @@ impl Renderer {
                 c.push_layer(None, Some(BlendMode::new(Mix::Normal, Compose::Xor)), None, None, None);
                 c.set_transform(fr.view * Affine::translate(-off) * xf);
                 c.fill_path(bp);
-                c.pop_layer();
                 c.pop_layer();
                 c.pop_layer();
                 c.pop_layer();
@@ -305,9 +302,7 @@ impl Renderer {
         paint: peniko::Color,
         mix: Mix,
     ) {
-        self.with_blended_filters(ctx, f, reach, sigma, mix, |_, c, fr| {
-            c.set_transform(fr.view * xf);
-            c.push_clip_layer(bp);
+        self.with_blended_filters(ctx, f, reach, sigma, mix, (bp, xf), |_, c, fr| {
             c.set_transform(fr.view);
             c.push_layer(None, None, None, None, Some(blur(sigma)));
             // Everything outside the offset shape, so the colour bleeds in from the edges.
@@ -326,12 +321,13 @@ impl Renderer {
                 c.stroke_path(&shape);
             }
             c.pop_layer();
-            c.pop_layer();
         });
     }
 
-    /// The effect's blend must see the object's backdrop, outside its clipping and offscreen
+    /// [`Renderer::with_filters`] clipped to `clip` (a path and its spread transform), blended with
+    /// `mix`. The effect's blend must see the object's backdrop, outside its clipping and offscreen
     /// filter layers. Putting it inside the clip blends with transparent pixels instead.
+    #[allow(clippy::too_many_arguments)]
     fn with_blended_filters(
         &mut self,
         ctx: &mut RenderContext,
@@ -339,13 +335,14 @@ impl Renderer {
         reach: Rect,
         sigma: f64,
         mix: Mix,
+        clip: (&BezPath, Affine),
         draw: impl FnOnce(&mut Self, &mut RenderContext, &Frame),
     ) {
         if mix != Mix::Normal {
             ctx.set_transform(Affine::IDENTITY);
             ctx.push_layer(None, Some(BlendMode::new(mix, Compose::SrcOver)), None, None, None);
         }
-        self.with_filters(ctx, f, reach, sigma, draw);
+        self.with_filters(ctx, f, reach, sigma, Some(clip), draw);
         if mix != Mix::Normal {
             ctx.pop_layer();
         }
@@ -354,32 +351,56 @@ impl Renderer {
     /// Run `draw`, which pushes filter layers. Single-threaded contexts draw directly. On a
     /// multithreaded context, or for a blur wider than [`MAX_BLUR_SPREAD`], the layer is drawn into
     /// an offscreen single-threaded context covering `reach` (spread space) plus the blur's spread,
-    /// then composited back.
+    /// then composited back. `clip` (a path and its spread transform) clips what `draw` paints;
+    /// at a lower resolution it clips the composited image on `ctx`, so its edge stays sharp.
     pub(crate) fn with_filters(
         &mut self,
         ctx: &mut RenderContext,
         f: &Frame,
         reach: Rect,
         sigma: f64,
+        clip: Option<(&BezPath, Affine)>,
         draw: impl FnOnce(&mut Self, &mut RenderContext, &Frame),
     ) {
         // 3σ of the Gaussian in pixels, plus a pixel of antialiasing.
         let spread = sigma.max(0.0) * 3.0 / f.px + 2.0;
         if !f.mt && spread <= MAX_BLUR_SPREAD {
-            return draw(self, ctx, f);
+            push_clip(ctx, f, clip);
+            draw(self, ctx, f);
+            pop_clip(ctx, clip);
+            return;
         }
         let Some(o) = offscreen(f.view.transform_rect_bbox(reach), spread, ctx.width(), ctx.height()) else { return };
         let mut off = RenderContext::new_with(o.width, o.height, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
         let view = Affine::scale(1.0 / o.scale) * Affine::translate((-o.x0, -o.y0)) * f.view;
         let shifted = Frame { mt: false, view, px: f.px * o.scale, ..*f };
+        // Clip where the result is at full resolution: offscreen unless that is reduced.
+        let (inner, outer) = if o.scale > 1.0 { (None, clip) } else { (clip, None) };
+        push_clip(&mut off, &shifted, inner);
         draw(self, &mut off, &shifted);
+        pop_clip(&mut off, inner);
         off.flush();
         let mut pm = vello_cpu::Pixmap::new(o.width, o.height);
         off.render(&mut pm, &mut self.resources);
+        push_clip(ctx, f, outer);
         ctx.set_transform(Affine::translate((o.x0, o.y0)) * Affine::scale(o.scale));
         ctx.set_paint(vello_cpu::Image { image: vello_cpu::ImageSource::Pixmap(std::sync::Arc::new(pm)), sampler: peniko::ImageSampler::default() });
         ctx.fill_rect(&Rect::new(0.0, 0.0, f64::from(o.width), f64::from(o.height)));
+        pop_clip(ctx, outer);
         ctx.set_transform(Affine::IDENTITY);
+    }
+}
+
+fn push_clip(ctx: &mut RenderContext, f: &Frame, clip: Option<(&BezPath, Affine)>) {
+    if let Some((bp, xf)) = clip {
+        ctx.set_transform(f.view * xf);
+        ctx.push_clip_layer(bp);
+    }
+}
+
+fn pop_clip(ctx: &mut RenderContext, clip: Option<(&BezPath, Affine)>) {
+    if clip.is_some() {
+        ctx.pop_layer();
     }
 }
 
