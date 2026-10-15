@@ -1454,6 +1454,7 @@ struct FeatureSegment {
     len: usize,
     font: (String, String),
     applied: Vec<String>,
+    ligatures: bool,
 }
 
 /// The OpenType features of the fonts in the selection, with how much of the selection each one is
@@ -1477,13 +1478,13 @@ fn open_type_features(s: &mut Session, _p: &Value) -> Result<Value> {
             let Some(para) = story.paras.get(story.para_at(pos)) else { continue };
             let (_, base) = st.doc.styles.resolve_para(para);
             let cp = st.doc.styles.resolve_char(&base, &cf);
-            segments.push(FeatureSegment { len, font: (cp.font_family, cp.font_style), applied: cp.otf_features });
+            segments.push(FeatureSegment { len, font: (cp.font_family, cp.font_style), applied: cp.otf_features, ligatures: cp.ligatures });
         }
     }
     if segments.is_empty() {
         let (_, base) = st.doc.styles.resolve_para_style(designcraft_doc::story::BASIC_PARAGRAPH);
         let cp = st.doc.styles.resolve_char(&base, &designcraft_doc::story::CharFormat::default());
-        segments.push(FeatureSegment { len: 1, font: (cp.font_family, cp.font_style), applied: cp.otf_features });
+        segments.push(FeatureSegment { len: 1, font: (cp.font_family, cp.font_style), applied: cp.otf_features, ligatures: cp.ligatures });
     }
     let db = designcraft_fonts::FontDb::global();
     let mut fonts: std::collections::BTreeMap<(String, String), designcraft_fonts::FontFeatures> = std::collections::BTreeMap::new();
@@ -1500,7 +1501,10 @@ fn open_type_features(s: &mut Session, _p: &Value) -> Result<Value> {
     let measure = |tag: &str| {
         let (mut applied, mut available) = (0, 0);
         for seg in &segments {
-            if designcraft_doc::otf::is_on(&seg.applied, tag) {
+            // Standard ligatures are the `ligatures` attribute, which shaping reads, unless the
+            // feature list turns `liga` off.
+            let on = designcraft_doc::otf::is_on(&seg.applied, tag) && (tag != "liga" || seg.ligatures);
+            if on {
                 applied += seg.len;
             }
             if fonts.get(&seg.font).is_some_and(|f| f.tags.contains(tag)) {
@@ -2827,6 +2831,23 @@ mod open_type_features_tests {
         s.execute("text.select", &json!({"story": story, "anchor": 0, "focus": 11})).unwrap();
         let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
         assert_eq!(feature(&v, "lnum")["applied"], "none", "{v}");
+    }
+
+    #[test]
+    fn standard_ligatures_follow_the_ligatures_attribute() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 400, 200], "content": "text", "text": "office"})).unwrap();
+        s.execute("text.select", &json!({"story": r["story"], "anchor": 0, "focus": 6})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"ligatures": false}})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "liga")["applied"], "none", "Character › Ligatures off: {v}");
+        s.execute("type.char", &json!({"attrs": {"ligatures": true}})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "liga")["applied"], "all", "{v}");
+        s.execute("type.feature", &json!({"features": {"liga": false}})).unwrap();
+        let v = s.execute("type.openTypeFeatures", &json!({})).unwrap();
+        assert_eq!(feature(&v, "liga")["applied"], "none", "-liga in the feature list: {v}");
     }
 }
 
