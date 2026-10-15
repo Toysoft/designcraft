@@ -336,7 +336,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     let doc = st.doc.clone();
     let layout = CanvasLayout::new(&doc, st.editing_parents);
     let painter = ui.painter_at(screen);
-    let preview = matches!(app.ui.screen_mode, ScreenMode::Preview | ScreenMode::Presentation);
+    let preview = canvas_preview(app);
     let bg = if app.ui.screen_mode == ScreenMode::Presentation { Color32::BLACK } else { t.pasteboard };
     painter.rect_filled(screen, 0.0, bg);
     // Page shadow: a hard 1.5 pt black offset on the right and bottom (InDesign 2026).
@@ -520,24 +520,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
         let w = (target.size.0 as f64 * ppp).round().max(1.0) as u32;
         let h = (target.size.1 as f64 * ppp).round().max(1.0) as u32;
         let view = Affine::scale(ppp) * Affine::scale(xf.zoom) * Affine::translate((-target.origin.x, -target.origin.y));
-        let opts = designcraft_render::RenderOptions {
-            printing_only: preview,
-            greek_below_px: 3.0 * ppp,
-            highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
-            highlight_hj: !preview && app.session.prefs.highlight_hj,
-            condition_indicators: !preview,
-            note_indicators: !preview && app.session.prefs.show_note_anchors,
-            change_markup: !preview && app.session.prefs.show_added_text,
-            tag_markers: !preview && app.ui.tag_markers,
-            plate: app.ui.separation,
-            highlight_keeps: !preview && app.session.prefs.highlight_keeps,
-            highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
-            quality: app.ui.display_quality,
-            rich_black: app.ui.rich_black,
-            overprint_preview: app.ui.overprint_preview,
-            blend_space_view: !app.ui.proof_colors,
-            ..Default::default()
-        };
+        let opts = render_options(app, preview, ppp);
         Some((st.doc.clone(), placed, w, h, view, opts))
     };
     // Synchronous path: document edits (keep editing crisp), first frame, or no worker.
@@ -641,24 +624,7 @@ fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: 
         * Affine::scale(ppp)
         * Affine::scale(sh.zoom)
         * Affine::translate((-sh.origin.x, -sh.origin.y));
-    let opts = designcraft_render::RenderOptions {
-        printing_only: preview,
-        greek_below_px: 3.0 * ppp,
-        highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
-        highlight_hj: !preview && app.session.prefs.highlight_hj,
-        condition_indicators: !preview,
-        note_indicators: !preview && app.session.prefs.show_note_anchors,
-        change_markup: !preview && app.session.prefs.show_added_text,
-        tag_markers: !preview && app.ui.tag_markers,
-        plate: app.ui.separation,
-        highlight_keeps: !preview && app.session.prefs.highlight_keeps,
-        highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
-        quality: app.ui.display_quality,
-        rich_black: app.ui.rich_black,
-        overprint_preview: app.ui.overprint_preview,
-        blend_space_view: !app.ui.proof_colors,
-        ..Default::default()
-    };
+    let opts = render_options(app, preview, ppp);
     let img = app.canvas.patcher.render(&new, &app.session.cache, &placed, (x1 - x0) as u32, (y1 - y0) as u32, view, &opts);
     let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels);
     if let Some(tex) = app.canvas.texture.as_mut() {
@@ -678,14 +644,46 @@ fn render_worker_spawn(ctx: &egui::Context) -> Option<crate::render_worker::Work
     crate::render_worker::Worker::spawn(ctx.clone())
 }
 
-fn upload(app: &mut DesignApp, ctx: &egui::Context, mut img: designcraft_render::Rendered) {
+/// Preview and Presentation show the page as printed.
+fn canvas_preview(app: &DesignApp) -> bool {
+    matches!(app.ui.screen_mode, ScreenMode::Preview | ScreenMode::Presentation)
+}
+
+/// What the canvas draws of the document in the current view settings.
+fn render_options(app: &DesignApp, preview: bool, ppp: f64) -> designcraft_render::RenderOptions {
+    designcraft_render::RenderOptions {
+        printing_only: preview,
+        greek_below_px: 3.0 * ppp,
+        highlight_missing_fonts: !preview && app.session.prefs.highlight_substituted_fonts,
+        highlight_hj: !preview && app.session.prefs.highlight_hj,
+        condition_indicators: !preview,
+        note_indicators: !preview && app.session.prefs.show_note_anchors,
+        change_markup: !preview && app.session.prefs.show_added_text,
+        tag_markers: !preview && app.ui.tag_markers,
+        plate: app.ui.separation,
+        highlight_keeps: !preview && app.session.prefs.highlight_keeps,
+        highlight_custom_tracking: !preview && app.session.prefs.highlight_custom_tracking,
+        quality: app.ui.display_quality,
+        rich_black: app.ui.rich_black,
+        overprint_preview: app.ui.overprint_preview,
+        blend_space_view: !app.ui.proof_colors,
+        ..Default::default()
+    }
+}
+
+/// The colour views (proof colours, ink limit) applied to a rendered canvas image.
+fn view_colors(app: &DesignApp, img: &mut designcraft_render::Rendered) {
     if app.ui.proof_colors {
-        designcraft_render::proof_view(&mut img, &app.ui.proof_setup);
+        designcraft_render::proof_view(img, &app.ui.proof_setup);
     }
     // Plates render from source colours; the ink limit is estimated from the composite.
     if app.ui.separation.is_none() && app.ui.ink_limit.is_some() {
-        designcraft_render::separation_view(&mut img, None, app.ui.ink_limit);
+        designcraft_render::separation_view(img, None, app.ui.ink_limit);
     }
+}
+
+fn upload(app: &mut DesignApp, ctx: &egui::Context, mut img: designcraft_render::Rendered) {
+    view_colors(app, &mut img);
     let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels);
     let ci = crate::widgets::fit_texture(ci, ctx.input(|i| i.max_texture_side));
     match &mut app.canvas.texture {
@@ -1079,10 +1077,13 @@ fn draw_text_selection(
 ) {
     let cs = app.session.cache.get(doc, ts.story, None);
     // Text an input method is composing at the caret is marked like it is in every Mac text
-    // field: a yellow box behind the glyphs.
+    // field: highlighted in yellow (`draw_composition_mark`).
     let composing = app.session.composition().filter(|c| c.0 == ts.story && c.1 == ts.cell && ts.is_caret()).map(|c| c.2);
     let range = composing.clone().unwrap_or_else(|| ts.range());
-    let tint = if composing.is_some() { COMPOSING_FILL.gamma_multiply(0.7) } else { Color32::from_rgba_unmultiplied(80, 140, 255, 110) };
+    let tint = Color32::from_rgba_unmultiplied(80, 140, 255, 110);
+    // The composition mark's screen polygons, and the frame edges drawn over it.
+    let mut marks: Vec<Vec<Pos2>> = Vec::new();
+    let mut edges: Vec<egui::Shape> = Vec::new();
     // Selected table cells: tint every selected cell.
     if let Some(sel) = cells.filter(|c| c.story == ts.story) {
         let selected = doc.story(sel.story).and_then(|s| s.tables.get(&sel.table)).map(|t| t.selected_owners(sel.range)).unwrap_or_default();
@@ -1114,7 +1115,7 @@ fn draw_text_selection(
         let m = a * doc.text_xf(it);
         // Show the frame edge while typing.
         for poly in path_screen(it, xf, a) {
-            painter.add(egui::Shape::line(poly, Stroke::new(1.0, layer_color(doc, it).gamma_multiply(0.6))));
+            edges.push(egui::Shape::line(poly, Stroke::new(1.0, layer_color(doc, it).gamma_multiply(0.6))));
         }
         if range.is_empty() {
             continue;
@@ -1126,7 +1127,11 @@ fn draw_text_selection(
                 if s >= e {
                     continue;
                 }
-                for q in compose::highlight_quads(l, s, e, false) {
+                let quads = match composing {
+                    Some(_) => composition_box(&cs, l, s, e, ft.vertical).map(rect_quad).into_iter().collect(),
+                    None => compose::highlight_quads(l, s, e, false),
+                };
+                for q in quads {
                     let (x0, x1) = (q[0].x.min(q[1].x), q[0].x.max(q[1].x));
                     let (y0, y1) = (q[0].y.min(q[2].y), q[0].y.max(q[2].y));
                     // Short slices, each turned with the path.
@@ -1135,7 +1140,11 @@ fn draw_text_selection(
                         let (a, b) = (x0 + (x1 - x0) * k as f64 / n as f64, x0 + (x1 - x0) * (k + 1) as f64 / n as f64);
                         let poly =
                             [Point::new(a, y0), Point::new(b, y0), Point::new(b, y1), Point::new(a, y1)].map(|p| xf.to_screen(m * map.to_path(p)));
-                        painter.add(egui::Shape::convex_polygon(poly.to_vec(), tint, Stroke::NONE));
+                        if composing.is_some() {
+                            marks.push(poly.to_vec());
+                        } else {
+                            painter.add(egui::Shape::convex_polygon(poly.to_vec(), tint, Stroke::NONE));
+                        }
                     }
                 }
             }
@@ -1147,6 +1156,12 @@ fn draw_text_selection(
             let s = range.start.max(l.range.start);
             let e = range.end.min(l.range.end);
             if s > e || (s == e && !(l.range.end < range.end && e == l.range.end)) {
+                continue;
+            }
+            if composing.is_some() {
+                if let Some(r) = composition_box(&cs, l, s, e, ft.vertical) {
+                    marks.push(rect_quad(r).iter().map(|p| xf.to_screen(m * *p)).collect());
+                }
                 continue;
             }
             let past = e == l.range.end && range.end > l.range.end;
@@ -1171,7 +1186,11 @@ fn draw_text_selection(
         }
     }
     if !runs.is_empty() {
-        draw_inverse_highlight(app, painter, xf, doc, &cs, ts.story, &runs, composing.is_some());
+        draw_inverse_highlight(app, painter, xf, doc, &cs, ts.story, &runs);
+    }
+    draw_composition_mark(app, painter, xf, doc, layout, &marks);
+    for e in edges {
+        painter.add(e);
     }
     if ts.is_caret()
         && let Some((fi, x, bl, asc, desc)) = compose::caret(&cs, ts.focus)
@@ -1230,7 +1249,7 @@ fn draw_cell_selection(
     let m = a * doc.text_xf(it) * designcraft_geom::Affine::translate(origin.to_vec2());
     let composing = app.session.composition().filter(|c| c.0 == ts.story && c.1 == ts.cell && ts.is_caret()).map(|c| c.2);
     let range = composing.clone().unwrap_or_else(|| ts.range());
-    let tint = if composing.is_some() { COMPOSING_FILL.gamma_multiply(0.6) } else { Color32::from_rgba_unmultiplied(80, 140, 255, 110) };
+    let mut marks: Vec<Vec<Pos2>> = Vec::new();
     if !range.is_empty()
         && let Some(cft) = text.frames.first()
     {
@@ -1240,13 +1259,20 @@ fn draw_cell_selection(
             if s > e || (s == e && !(l.range.end < range.end && e == l.range.end)) {
                 continue;
             }
+            if composing.is_some() {
+                if let Some(r) = composition_box(&text, l, s, e, cft.vertical) {
+                    marks.push(rect_quad(r).iter().map(|p| xf.to_screen(m * *p)).collect());
+                }
+                continue;
+            }
             let past = e == l.range.end && range.end > l.range.end;
             for q in compose::highlight_quads(l, s, e, past) {
                 let poly = q.map(|p| xf.to_screen(m * p));
-                painter.add(egui::Shape::convex_polygon(poly.to_vec(), tint, Stroke::NONE));
+                painter.add(egui::Shape::convex_polygon(poly.to_vec(), Color32::from_rgba_unmultiplied(80, 140, 255, 110), Stroke::NONE));
             }
         }
     }
+    draw_composition_mark(app, painter, xf, doc, layout, &marks);
     if ts.is_caret()
         && let Some((_, x, bl, asc, desc)) = match cell.footnote_id() {
             Some(id) => compose::note_caret(cs, id, ts.focus),
@@ -1264,15 +1290,142 @@ fn draw_cell_selection(
     }
 }
 
-/// The box behind text an input method is composing.
-const COMPOSING_FILL: Color32 = Color32::from_rgb(255, 247, 153);
+/// The highlighter the composition mark is painted with: white paper under it turns this yellow.
+const COMPOSING_MARK: [u8; 3] = [255, 247, 153];
+
+/// Where a glyph's outline goes on its line (text-frame coordinates), as the renderer draws it.
+fn glyph_xf(l: &compose::Line, g: &compose::PlacedGlyph, style: &compose::RunStyle, vertical: bool) -> Affine {
+    let skew = if style.skew != 0.0 { Affine::new([1.0, 0.0, -style.skew.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
+    let a = Affine::translate((g.x, l.baseline + g.y)) * skew * Affine::scale_non_uniform(g.sx, g.sy);
+    match g.vertical_xf(l.baseline).filter(|_| vertical) {
+        Some(turn) => turn * a,
+        None => a,
+    }
+}
+
+/// The box marking text bytes `s..e` an input method is composing on line `l` (text-frame
+/// coordinates). It takes in every glyph of each shaped cluster those bytes are part of (a
+/// conjunct with its virama, a base with its marks, a ligature, a reordered vowel sign) and
+/// their ink, so whatever the script, all that the composition changed is inside it.
+fn composition_box(cs: &compose::ComposedStory, l: &compose::Line, s: usize, e: usize, vertical: bool) -> Option<DRect> {
+    use designcraft_geom::Shape;
+    // The clusters the composition touches: a glyph's cluster is `byte..byte + len`.
+    let touched = l.glyphs.iter().filter(|g| g.len > 0 && g.byte < e && g.byte.saturating_add(g.len) > s);
+    let (cs0, ce) = touched.fold((s, e), |(a, b), g| (a.min(g.byte), b.max(g.byte.saturating_add(g.len))));
+    let mut r: Option<DRect> = None;
+    let mut add = |b: DRect| {
+        if b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite() && b.x0 <= b.x1 && b.y0 <= b.y1 {
+            r = Some(r.map_or(b, |r| r.union(b)));
+        }
+    };
+    for q in compose::highlight_quads(l, cs0, ce, false) {
+        let (x0, x1) = q.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, p| (a.0.min(p.x), a.1.max(p.x)));
+        let (y0, y1) = q.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, p| (a.0.min(p.y), a.1.max(p.y)));
+        add(DRect::new(x0, y0, x1, y1));
+    }
+    // Glyphs a shaper split off a cluster (marks, virama, matras) carry its start byte.
+    let db = designcraft_fonts::FontDb::global();
+    for g in l.glyphs.iter().filter(|g| g.visible && g.byte >= cs0 && g.byte < ce) {
+        let Some(style) = cs.styles.get(g.style as usize) else { continue };
+        let ink = (glyph_xf(l, g, style, vertical) * &*db.outline(&g.face, g.gid)).bounding_box();
+        let sw = if style.stroke != designcraft_color::swatch::NONE { style.stroke_weight.max(0.0) } else { 0.0 };
+        add(ink.inflate(sw, sw));
+    }
+    r
+}
+
+fn rect_quad(r: DRect) -> [Point; 4] {
+    [Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x1, r.y1), Point::new(r.x0, r.y1)]
+}
+
+/// Marks text an input method is composing the way a highlighter pen would: the page under
+/// `marks` (screen polygons) is rendered again and multiplied by yellow. Nothing is painted
+/// over the text, so every glyph, stroke, rule and object there stays visible through the mark,
+/// in any script.
+fn draw_composition_mark(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document, layout: &CanvasLayout, marks: &[Vec<Pos2>]) {
+    use designcraft_render::vello_cpu::{self, kurbo, peniko};
+    if marks.is_empty() {
+        return;
+    }
+    let ctx = painter.ctx();
+    let ppp = ctx.pixels_per_point();
+    let mut bbox = Rect::NOTHING;
+    for p in marks.iter().flatten() {
+        bbox.extend_with(*p);
+    }
+    let bbox = bbox.intersect(painter.clip_rect());
+    if !bbox.is_positive() {
+        return;
+    }
+    // Snap to device pixels so the texture maps 1:1.
+    let bbox = Rect::from_min_max(
+        pos2((bbox.min.x * ppp).floor() / ppp, (bbox.min.y * ppp).floor() / ppp),
+        pos2((bbox.max.x * ppp).ceil() / ppp, (bbox.max.y * ppp).ceil() / ppp),
+    );
+    let (w, h) = (((bbox.width() * ppp).round() as u32).clamp(1, 4096), ((bbox.height() * ppp).round() as u32).clamp(1, 4096));
+    let Some(st) = app.session.active() else { return };
+    let preview = canvas_preview(app);
+    let corners: Vec<u32> = marks.iter().flatten().flat_map(|p| [p.x.to_bits(), p.y.to_bits()]).collect();
+    let key = egui::Id::new(("composition_mark", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, w, h)).with((
+        bbox.min.x.to_bits(),
+        bbox.min.y.to_bits(),
+        xf.zoom.to_bits(),
+        corners,
+        preview,
+        app.ui.proof_colors,
+    ));
+    let cache_id = egui::Id::new("composition_mark_tex");
+    let cached: Option<(egui::Id, egui::TextureHandle)> = ctx.data(|d| d.get_temp(cache_id));
+    let tex = match cached {
+        Some((k, t)) if k == key => t,
+        _ => {
+            let view = xf.affine(ppp as f64, bbox.min);
+            let placed: Vec<designcraft_render::Placed> =
+                layout.slots.iter().map(|s| designcraft_render::Placed { spread: s.spread, xf: s.xf }).collect();
+            let opts = render_options(app, preview, ppp as f64);
+            let mut page = designcraft_render::Renderer::new().render(doc, &app.session.cache, &placed, w, h, view, &opts);
+            view_colors(app, &mut page);
+            // How much of each pixel the mark covers.
+            let mut rc = vello_cpu::RenderContext::new_with(w as u16, h as u16, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
+            rc.set_paint(peniko::Color::from_rgba8(255, 255, 255, 255));
+            for poly in marks {
+                let mut bp = kurbo::BezPath::new();
+                for (i, p) in poly.iter().enumerate() {
+                    let q = kurbo::Point::new(((p.x - bbox.min.x) * ppp) as f64, ((p.y - bbox.min.y) * ppp) as f64);
+                    if i == 0 { bp.move_to(q) } else { bp.line_to(q) }
+                }
+                bp.close_path();
+                rc.fill_path(&bp);
+            }
+            rc.flush();
+            let mut cover = vello_cpu::Pixmap::new(w as u16, h as u16);
+            let mut res = vello_cpu::Resources::new();
+            rc.render(&mut cover, &mut res);
+            let mut px = page.pixels;
+            if px.len() != cover.data_as_u8_slice().len() {
+                return;
+            }
+            for ([r, g, b, a], [_, _, _, k]) in px.as_chunks_mut::<4>().0.iter_mut().zip(cover.data_as_u8_slice().as_chunks::<4>().0) {
+                let (alpha, k) = (u32::from(*a), u32::from(*k));
+                for (ch, ink) in [r, g, b].into_iter().zip(COMPOSING_MARK) {
+                    // The page over white paper (pixels are premultiplied), times the highlighter.
+                    let on_paper = (u32::from(*ch) + 255).saturating_sub(alpha).min(255);
+                    *ch = (on_paper * u32::from(ink) / 255 * k / 255) as u8;
+                }
+                *a = k as u8;
+            }
+            let ci = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &px);
+            let t = crate::widgets::load_texture(ctx, "composition_mark", ci, egui::TextureOptions::NEAREST);
+            ctx.data_mut(|d| d.insert_temp(cache_id, (key, t.clone())));
+            t
+        }
+    };
+    painter.image(tex.id(), bbox, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+}
 
 /// InDesign draws selected text inverted: a black highlight with the selected glyphs in the
 /// inverse of their colour (white for black text). The highlight and glyph outlines are
 /// rasterised with `vello_cpu` into a small screen-space texture over the selection.
-/// `composing`: the text is an input method's, still being composed: a yellow box with the
-/// glyphs in their own colour.
-#[allow(clippy::too_many_arguments)]
 fn draw_inverse_highlight(
     app: &DesignApp,
     painter: &egui::Painter,
@@ -1281,7 +1434,6 @@ fn draw_inverse_highlight(
     cs: &compose::ComposedStory,
     story: designcraft_doc::StoryId,
     runs: &[(usize, Affine, Vec<[Point; 4]>, Vec<(usize, usize)>)],
-    composing: bool,
 ) {
     use designcraft_render::vello_cpu::{self, kurbo, peniko};
     let ctx = painter.ctx();
@@ -1308,7 +1460,7 @@ fn draw_inverse_highlight(
     let Some(st) = app.session.active() else { return };
     let key = egui::Id::new(("inverse_sel", st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, story.0))
         .with((runs.iter().map(|r| r.2.len() + r.3.len() * 7919).sum::<usize>(), w, h))
-        .with((bbox.min.x.to_bits(), bbox.min.y.to_bits(), xf.zoom.to_bits(), st.selection.text.map(|t| (t.anchor, t.focus)), composing));
+        .with((bbox.min.x.to_bits(), bbox.min.y.to_bits(), xf.zoom.to_bits(), st.selection.text.map(|t| (t.anchor, t.focus))));
     let cache_id = egui::Id::new("inverse_sel_tex");
     let cached: Option<(egui::Id, egui::TextureHandle)> = ctx.data(|d| d.get_temp(cache_id));
     let tex = match cached {
@@ -1316,8 +1468,7 @@ fn draw_inverse_highlight(
         _ => {
             let view = xf.affine(ppp as f64, bbox.min);
             let mut rc = vello_cpu::RenderContext::new_with(w as u16, h as u16, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
-            let [br, bg, bb, _] = if composing { COMPOSING_FILL.to_array() } else { [0, 0, 0, 255] };
-            rc.set_paint(peniko::Color::from_rgba8(br, bg, bb, 255));
+            rc.set_paint(peniko::Color::from_rgba8(0, 0, 0, 255));
             for (_, m, quads, _) in runs {
                 rc.set_transform(view * *m);
                 for q in quads {
@@ -1338,17 +1489,10 @@ fn draw_inverse_highlight(
                     let Some(g) = l.glyphs.get(gi) else { continue };
                     let Some(style) = cs.styles.get(g.style as usize) else { continue };
                     let Some(c) = doc.resolve_color(&style.fill, style.fill_tint) else { continue };
-                    let [r, gg, b, a] = c.to_rgba8(1.0);
-                    if composing {
-                        rc.set_paint(peniko::Color::from_rgba8(r, gg, b, a));
-                    } else {
-                        rc.set_paint(peniko::Color::from_rgba8(255 - r, 255 - gg, 255 - b, 255));
-                    }
+                    let [r, gg, b, _] = c.to_rgba8(1.0);
+                    rc.set_paint(peniko::Color::from_rgba8(255 - r, 255 - gg, 255 - b, 255));
                     let outline = db.outline(&g.face, g.gid);
-                    let skew =
-                        if style.skew != 0.0 { Affine::new([1.0, 0.0, -style.skew.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
-                    let ga = Affine::translate((g.x, l.baseline + g.y)) * skew * Affine::scale_non_uniform(g.sx, g.sy);
-                    rc.set_transform(view * *m * ga);
+                    rc.set_transform(view * *m * glyph_xf(l, g, style, false));
                     rc.fill_path(&outline);
                 }
             }
@@ -2231,6 +2375,46 @@ mod tests {
         // Too slow: a single click.
         let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(0.0, 0.0), 0.1, dist);
         assert_eq!(press(Some(up), 0.0, 1.0), 1);
+    }
+
+    /// A story `text` with the caret at byte `at`, composing `ime` there in the given format.
+    /// Returns the composition's box on the first line and the line's glyphs.
+    fn composed(text: &str, at: usize, attrs: serde_json::Value, ime: &str) -> (DRect, Vec<compose::PlacedGlyph>) {
+        let mut s = designcraft_engine::Session::new();
+        s.execute("file.new", &serde_json::json!({})).unwrap();
+        let r = s.execute("frame.create", &serde_json::json!({"rect": [72, 72, 572, 372], "content": "text", "text": text})).unwrap();
+        let sid = r["story"].as_u64().unwrap();
+        s.set_tool("type");
+        s.execute("text.select", &serde_json::json!({"story": sid, "anchor": 0, "focus": text.len()})).unwrap();
+        s.execute("type.char", &attrs).unwrap();
+        s.execute("text.select", &serde_json::json!({"story": sid, "anchor": at})).unwrap();
+        s.execute("text.compose", &serde_json::json!({"text": ime})).unwrap();
+        let range = s.composition().unwrap().2;
+        let doc = &s.doc().unwrap().doc;
+        let cs = s.cache.get(doc, designcraft_doc::StoryId(sid), None);
+        let ft = &cs.frames[0];
+        let l = &ft.lines[0];
+        (composition_box(&cs, l, range.start, range.end, ft.vertical).unwrap(), l.glyphs.clone())
+    }
+
+    /// A composed combining mark shapes into one cluster with the letter before it (as a
+    /// virama joins Devanagari consonants): the mark covers the whole cluster, not just the
+    /// mark's bytes, whatever glyphs the shaper made of it.
+    #[test]
+    fn the_composition_mark_covers_every_cluster_it_touches() {
+        let (r, glyphs) = composed("xe", 2, serde_json::json!({"size": 100}), "\u{301}");
+        let e = glyphs.iter().find(|g| g.byte == 1).unwrap();
+        assert!(r.x0 <= e.x + 0.01 && r.x1 >= e.x + e.adv - 0.01, "{r:?} misses the e at {}..{}", e.x, e.x + e.adv);
+        let x = glyphs.iter().find(|g| g.byte == 0).unwrap();
+        assert!(r.x0 >= x.x + x.adv - 0.01, "{r:?} covers the x before the cluster");
+    }
+
+    /// A slanted accent is drawn past its advance: the mark covers its ink.
+    #[test]
+    fn the_composition_mark_covers_the_composed_ink() {
+        let (r, glyphs) = composed("fa", 1, serde_json::json!({"size": 100, "skew": 20}), "\u{b4}");
+        let acute = glyphs.iter().find(|g| g.byte == 1).unwrap();
+        assert!(r.x1 > acute.x + acute.adv + 5.0, "{r:?} stops at the accent's advance {}", acute.x + acute.adv);
     }
 
     fn harness(app: DesignApp) -> Harness<'static, DesignApp> {
