@@ -6123,7 +6123,8 @@ mod tests {
                 assert_eq!(page.margins.top, 10.0);
                 assert_eq!(page.margins.outside, 40.0);
             }
-            assert!(doc.spreads.iter().all(|s| s.items.is_empty()), "undocumented fields stay excluded");
+            // `primaryTextFrame` is documented since #776, so the dialog passes it on (`status` isn't).
+            assert!(doc.spreads.iter().any(|s| !s.items.is_empty()), "documented fields reach the command");
             assert!(app.ui.dialog.is_none());
         }
     }

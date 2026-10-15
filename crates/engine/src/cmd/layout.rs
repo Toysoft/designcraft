@@ -165,7 +165,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Duplicate Spread",
             ["Layout", "Pages"],
             None,
-            "{spread, atEnd?: bool (Duplicate Spread at End of Document; the Pages panel's New Page button takes a dropped page there), to?: page index the copied pages move to, in the same undo step (the Pages panel's Alt-drag)} → {page: the copy's first page (0-based)} — the spread's pages (size, margins, columns, guides, liquid rule) and items",
+            "{spread, atEnd?: bool (Duplicate Spread at End of Document; the Pages panel's New Page button takes a dropped page there), to?: page index the copied pages move to in the same undo step (the Pages panel's Alt-drag)} → {page: the copy's first page (0-based)} — the spread's pages (size, margins, columns, guides, liquid rule) and items",
             has_doc,
             |s, p| {
                 let si = p.get("spread").and_then(Value::as_u64).unwrap_or(0) as usize;

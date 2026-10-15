@@ -36,6 +36,7 @@ mod notes;
 mod object;
 mod overrides;
 mod package;
+pub mod params;
 mod path_type;
 mod paths;
 mod pdflayers;

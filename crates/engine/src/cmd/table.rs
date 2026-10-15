@@ -30,7 +30,7 @@ fn style_specs() -> Vec<CommandSpec> {
             "New Cell Style…",
             [],
             None,
-            "{name, fromSelection?: bool (the target cell's look), fill?, tint?, insets?: n|[t,l,b,r], vj?: top|center|bottom|justify, stroke?: {weight, color, tint?}, paragraphStyle?} → {name}",
+            "{name, fromSelection?: bool (the target cell's look), fill?, tint?, insets?: n|[t,l,b,r], vj?: top|center|bottom|justify, stroke?: {weight, color, tint?}, paragraphStyle?, basedOn?: cell style name, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} → {name}",
             has_doc,
             |s, p| cell_style_create(s, p)
         ),
@@ -39,7 +39,7 @@ fn style_specs() -> Vec<CommandSpec> {
             "Apply Cell Style",
             [],
             None,
-            "{name, story?, table?} — the target cells (the whole table when the cursor is in it)",
+            "{name, story?, table?, rows?: [a,b] | row?, cols?: [a,b] | col?} — the target cells (the whole table when the cursor is in it)",
             in_table,
             cell_style_apply
         ),
@@ -57,11 +57,19 @@ fn style_specs() -> Vec<CommandSpec> {
             "New Table Style…",
             [],
             None,
-            "{name, header?, body?, footer?, leftColumn?, rightColumn?: cell style names, border?: {weight, color}, altRows?: {first, firstColor, next, nextColor}, spaceBefore?, spaceAfter?} → {name}",
+            "{name, basedOn?: table style name, header?, body?, footer?, leftColumn?, rightColumn?: cell style names, border?: {weight, color}, altRows?: {first, firstColor, next, nextColor}, spaceBefore?, spaceAfter?} → {name}",
             has_doc,
             table_style_create
         ),
-        cmd!("style.table.apply", "Apply Table Style", [], None, "{name, story?, table?}", in_table, table_style_apply),
+        cmd!(
+            "style.table.apply",
+            "Apply Table Style",
+            [],
+            None,
+            "{name, story?, table?, rows?: [a,b] | row?, cols?: [a,b] | col?}",
+            in_table,
+            table_style_apply
+        ),
         cmd!(
             "style.table.edit",
             "Table Style Options…",
@@ -81,7 +89,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Create Table",
             [],
             Some("Cmd+Alt+Shift+T"),
-            "{rows?: body rows (4), cols? (4), headerRows? (0), footerRows? (0), width?} — at the text insertion point",
+            "{rows?: body rows (4), cols? | columns? (4), headerRows? (0), footerRows? (0), width?} — at the text insertion point",
             has_text,
             insert
         ),
@@ -90,7 +98,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Convert Text to Table",
             ["Table"],
             None,
-            "{columnSeparator?: tab|comma} — selected paragraphs become rows",
+            "{columnSeparator?: tab|comma, width?: table width (default: the column)} — selected paragraphs become rows",
             has_text,
             convert_from_text
         ),
@@ -99,20 +107,100 @@ fn table_specs() -> Vec<CommandSpec> {
             "Convert Table to Text",
             ["Table"],
             None,
-            "{} — cells separated by tabs, rows by paragraphs",
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — cells separated by tabs, rows by paragraphs",
             in_table,
             convert_to_text
         ),
-        cmd!("table.insertRow", "Insert Row", [], None, "{where?: above|below, count? (1)}", in_table, |s, p| insert_row(s, p, None)),
-        cmd!("table.insertRowAbove", "Insert Row Above", ["Table", "Insert"], None, "{count?}", in_table, |s, p| insert_row(s, p, Some(true))),
-        cmd!("table.insertRowBelow", "Insert Row Below", ["Table", "Insert"], None, "{count?}", in_table, |s, p| insert_row(s, p, Some(false))),
-        cmd!("table.insertColumn", "Insert Column", [], None, "{where?: left|right, count? (1), width?}", in_table, |s, p| insert_col(s, p, None)),
-        cmd!("table.insertColumnLeft", "Insert Column Left", ["Table", "Insert"], None, "{count?}", in_table, |s, p| insert_col(s, p, Some(true))),
-        cmd!("table.insertColumnRight", "Insert Column Right", ["Table", "Insert"], None, "{count?}", in_table, |s, p| insert_col(s, p, Some(false))),
-        cmd!("table.deleteRow", "Delete Row", ["Table", "Delete"], None, "{} — the rows of the target cells", in_table, delete_rows),
-        cmd!("table.deleteColumn", "Delete Column", ["Table", "Delete"], None, "{} — the columns of the target cells", in_table, delete_cols),
-        cmd!("table.delete", "Delete Table", ["Table", "Delete"], None, "{}", in_table, delete_table),
-        cmd!("table.merge", "Merge Cells", ["Table"], None, "{} — merge the target cell range", in_table, merge),
+        cmd!(
+            "table.insertRow",
+            "Insert Row",
+            [],
+            None,
+            "{where?: above|below, count? (1), story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_row(s, p, None)
+        ),
+        cmd!(
+            "table.insertRowAbove",
+            "Insert Row Above",
+            ["Table", "Insert"],
+            None,
+            "{count?, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_row(s, p, Some(true))
+        ),
+        cmd!(
+            "table.insertRowBelow",
+            "Insert Row Below",
+            ["Table", "Insert"],
+            None,
+            "{count?, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_row(s, p, Some(false))
+        ),
+        cmd!(
+            "table.insertColumn",
+            "Insert Column",
+            [],
+            None,
+            "{where?: left|right, count? (1), width?, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_col(s, p, None)
+        ),
+        cmd!(
+            "table.insertColumnLeft",
+            "Insert Column Left",
+            ["Table", "Insert"],
+            None,
+            "{count?, width?, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_col(s, p, Some(true))
+        ),
+        cmd!(
+            "table.insertColumnRight",
+            "Insert Column Right",
+            ["Table", "Insert"],
+            None,
+            "{count?, width?, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            |s, p| insert_col(s, p, Some(false))
+        ),
+        cmd!(
+            "table.deleteRow",
+            "Delete Row",
+            ["Table", "Delete"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — the rows of the target cells",
+            in_table,
+            delete_rows
+        ),
+        cmd!(
+            "table.deleteColumn",
+            "Delete Column",
+            ["Table", "Delete"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — the columns of the target cells",
+            in_table,
+            delete_cols
+        ),
+        cmd!(
+            "table.delete",
+            "Delete Table",
+            ["Table", "Delete"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            delete_table
+        ),
+        cmd!(
+            "table.merge",
+            "Merge Cells",
+            ["Table"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — merge the target cell range",
+            in_table,
+            merge
+        ),
         cmd!(
             "table.dropCells",
             "Drag Rows or Columns",
@@ -127,7 +215,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Convert Cell to Graphic Cell",
             ["Table", "Convert Cell Type"],
             None,
-            "{path | base64+name, fit?: proportional|fill (default proportional)} — an image in the target cell (its text is kept but hidden)",
+            "{path? | base64?, name?: with base64, fit?: proportional|fill (default proportional), story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — an image in the target cell (its text is kept but hidden)",
             in_table,
             place_graphic
         ),
@@ -136,7 +224,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Convert Cell to Text Cell",
             ["Table", "Convert Cell Type"],
             None,
-            "{} — drop the target cells' graphics",
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — drop the target cells' graphics",
             in_table,
             |s, p| {
                 let g = target(s, p, "table.textCell")?;
@@ -155,29 +243,43 @@ fn table_specs() -> Vec<CommandSpec> {
             "Move Row",
             [],
             None,
-            "{from?, to} (0-based; from defaults to the target row) — like dragging a row",
+            "{from?, to, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} (0-based; from defaults to the target row) — like dragging a row",
             in_table,
             |s, p| move_rc(s, p, true)
         ),
-        cmd!("table.moveColumn", "Move Column", [], None, "{from?, to} (0-based; from defaults to the target column)", in_table, |s, p| move_rc(
-            s, p, false
-        )),
+        cmd!(
+            "table.moveColumn",
+            "Move Column",
+            [],
+            None,
+            "{from?, to, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} (0-based; from defaults to the target column)",
+            in_table,
+            |s, p| move_rc(s, p, false)
+        ),
         cmd!(
             "table.sortRows",
             "Sort",
             ["Table"],
             None,
-            "{column?: 0-based (default: the target cell's), descending?: bool} — body rows by that column's text (numbers numerically)",
+            "{column?: 0-based (default: the target cell's), descending?: bool, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — body rows by that column's text (numbers numerically)",
             in_table,
             sort_rows
         ),
-        cmd!("table.unmerge", "Unmerge Cells", ["Table"], None, "{}", in_table, unmerge),
+        cmd!(
+            "table.unmerge",
+            "Unmerge Cells",
+            ["Table"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            unmerge
+        ),
         cmd!(
             "table.splitHorizontally",
             "Split Cell Horizontally",
             ["Table"],
             None,
-            "{} — each target cell becomes two, one above the other",
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — each target cell becomes two, one above the other",
             in_table,
             |s, p| split(s, p, true)
         ),
@@ -186,7 +288,7 @@ fn table_specs() -> Vec<CommandSpec> {
             "Split Cell Vertically",
             ["Table"],
             None,
-            "{} — each target cell becomes two, side by side",
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)} — each target cell becomes two, side by side",
             in_table,
             |s, p| split(s, p, false)
         ),
@@ -195,19 +297,43 @@ fn table_specs() -> Vec<CommandSpec> {
             "Cell Options",
             [],
             None,
-            "{fill?: swatch, tint?, insets?: n | [t,l,b,r], vj?: top|center|bottom|justify, text?, stroke?: {weight?, color?, tint?, type?: solid|dashed|dotted, edges?: all|outer|inner|top|left|bottom|right}}",
+            "{fill?: swatch, tint?, insets?: n | [t,l,b,r], vj? | verticalJustification?: top|center|bottom|justify, text?, stroke?: {weight?, color?, tint?, type?: solid|dashed|dotted, edges?: all|outer|inner|top|left|bottom|right}, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
             in_table,
             set_cell
         ),
-        cmd!("table.setRowHeight", "Row Height", [], None, "{height, mode?: atLeast|exactly}", in_table, set_row_height),
-        cmd!("table.setColumnWidth", "Column Width", [], None, "{width}", in_table, set_col_width),
-        cmd!("table.distributeColumns", "Distribute Columns Evenly", ["Table"], None, "{}", in_table, distribute_cols),
+        cmd!(
+            "table.setRowHeight",
+            "Row Height",
+            [],
+            None,
+            "{height, mode?: atLeast|exactly, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            set_row_height
+        ),
+        cmd!(
+            "table.setColumnWidth",
+            "Column Width",
+            [],
+            None,
+            "{width, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            set_col_width
+        ),
+        cmd!(
+            "table.distributeColumns",
+            "Distribute Columns Evenly",
+            ["Table"],
+            None,
+            "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
+            in_table,
+            distribute_cols
+        ),
         cmd!(
             "table.distributeRows",
             "Distribute Rows Evenly",
             ["Table"],
             None,
-            "{story?, table?, rows?: [a,b]} — equal fixed heights preserving the selected rows' composed total height; may overset cell text; unmerge row-spanning cells first",
+            "{story?, table?, rows?: [a,b] | row?, cols?: [a,b] | col?} — equal fixed heights preserving the selected rows' composed total height; may overset cell text; unmerge row-spanning cells first",
             in_table,
             distribute_rows
         ),
@@ -216,23 +342,23 @@ fn table_specs() -> Vec<CommandSpec> {
             "Table Options",
             [],
             None,
-            "{direction?: leftToRight|rightToLeft, border?: {weight?, color?, tint?, type?}, spaceBefore?, spaceAfter?, headerRows?, footerRows?, repeatHeader?, repeatFooter?, altRows?: {first, firstColor, firstTint, next, nextColor, nextTint, skipFirst, skipLast} | null, altCols?: … | null}",
+            "{direction?: leftToRight|rightToLeft, border?: {weight?, color?, tint?, type?}, spaceBefore?, spaceAfter?, headerRows?, footerRows?, repeatHeader?, repeatFooter?, altRows?: {first, firstColor, firstTint, next, nextColor, nextTint, skipFirst, skipLast} | null, altCols?: … | null, story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}",
             in_table,
             options
         ),
-        cmd!(noundo "table.select", "Select Cells", [], None, "{story?, table?, rows?: [a,b], cols?: [a,b], what?: cell|row|column|table}", in_table_or_ids, select),
-        cmd!(noundo "table.selectTable", "Select Table", ["Table", "Select"], None, "{}", in_table, |s, p| {
+        cmd!(noundo "table.select", "Select Cells", [], None, "{story?, table?, rows?: [a,b] | row?, cols?: [a,b] | col?, what?: cell|row|column|table}", in_table_or_ids, select),
+        cmd!(noundo "table.selectTable", "Select Table", ["Table", "Select"], None, "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}", in_table, |s, p| {
             select(s, &super::with_param(p, "what", json!("table")))
         }),
-        cmd!(noundo "table.selectRow", "Select Row", ["Table", "Select"], None, "{}", in_table, |s, p| {
+        cmd!(noundo "table.selectRow", "Select Row", ["Table", "Select"], None, "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}", in_table, |s, p| {
             select(s, &super::with_param(p, "what", json!("row")))
         }),
-        cmd!(noundo "table.selectColumn", "Select Column", ["Table", "Select"], None, "{}", in_table, |s, p| {
+        cmd!(noundo "table.selectColumn", "Select Column", ["Table", "Select"], None, "{story?, table?, rows?: [a, b] | row?, cols?: [a, b] | col? (the target cells; default: the selection)}", in_table, |s, p| {
             select(s, &super::with_param(p, "what", json!("column")))
         }),
         cmd!(noundo "table.nextCell", "Next Cell", [], None, "{}", in_cell, |s, _| step_cell(s, true)),
         cmd!(noundo "table.prevCell", "Previous Cell", [], None, "{}", in_cell, |s, _| step_cell(s, false)),
-        cmd!(query "table.get", "Get Table", [], None, "{story?, table?} → rows, columns, cells (text, spans, fill), options", in_table_or_ids, get),
+        cmd!(query "table.get", "Get Table", [], None, "{story?, table?, rows?: [a,b] | row?, cols?: [a,b] | col?} → rows, columns, cells (text, spans, fill), options", in_table_or_ids, get),
     ]
 }
 

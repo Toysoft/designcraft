@@ -31,7 +31,7 @@ so only enable it while you use it. Transport: `apps/designcraft/src/control_ser
 
 | Method | Params | What it does |
 |---|---|---|
-| `engine.execute` / `ui.menu.invoke` | `{command, params}` | Run any engine or UI command (see `engine.commands`). `ui.menu.invoke` without `params` acts like choosing the menu item: a command labelled "…" that takes parameters opens its dialog |
+| `engine.execute` / `ui.menu.invoke` | `{command, params}` | Run any engine or UI command (see `engine.commands`). `ui.menu.invoke` without `params` acts like choosing the menu item: a command labelled "…" that takes parameters opens its dialog. A key the command's params description doesn't name is an error (`unknown parameter …`), not ignored |
 | `engine.commands` | — | Every command: id, label, menu path, shortcut, params doc, enabled |
 | `document.inspect` | — | Pages, spreads, items, stories (overset), styles, swatches, selection |
 | `ui.inspect` | — | Tool, UI state, view (zoom/origin), canvas rect, perf |

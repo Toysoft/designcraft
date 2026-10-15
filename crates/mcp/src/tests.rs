@@ -510,3 +510,41 @@ fn explicit_typing_rejects_stale_selection_and_closed_document() {
     b.session.execute("file.close", &json!({})).unwrap();
     assert!(b.call("ui.text", json!({"text":"X"})).is_err());
 }
+
+/// #776: a key a command (or a tool) doesn't take is an invalid-params error, not ignored.
+#[test]
+fn unknown_params_are_invalid_params() {
+    let mut s = server();
+    let code_and_message = |v: &Value| (v["error"]["code"].as_i64(), v["error"]["message"].as_str().unwrap_or("").to_string());
+    let f = ok(&mut s, "execute", json!({"command": "frame.create", "params": {"rect": [36, 36, 300, 200], "content": "text", "text": "Hello"}}));
+    let v = rpc(
+        &mut s,
+        1,
+        "tools/call",
+        json!({"name": "execute", "arguments": {"command": "text.select", "params": {"story": f["story"], "start": 0, "end": 5}}}),
+    );
+    let (code, msg) = code_and_message(&v);
+    assert_eq!(code, Some(-32602), "{v}");
+    assert!(msg.contains("unknown parameter `end`; the command takes: story, anchor, focus"), "{msg}");
+    let v = rpc(&mut s, 2, "tools/call", json!({"name": "execute", "arguments": {"command": "style.list", "params": {"bogus": 1}}}));
+    let (code, msg) = code_and_message(&v);
+    assert_eq!(code, Some(-32602), "{v}");
+    assert!(msg.contains("unknown parameter `bogus`; the command takes no parameters"), "{msg}");
+    // A batch is checked step by step before any step runs: the frame isn't created.
+    let before = ok(&mut s, "inspect_document", json!({}));
+    for args in [
+        json!({"commands": [{"command": "frame.create", "params": {"rect": [0, 0, 50, 50]}}, {"command": "file.new", "params": {"widht": 300}}]}),
+        json!({"script": "frame.create {\"rect\": [0, 0, 50, 50]}\nfile.new {\"widht\": 300}"}),
+    ] {
+        let v = rpc(&mut s, 3, "tools/call", json!({"name": "batch", "arguments": args}));
+        let (code, msg) = code_and_message(&v);
+        assert_eq!(code, Some(-32602), "{v}");
+        assert!(msg.contains("step 1") && msg.contains("did you mean `width`?"), "{msg}");
+    }
+    assert_eq!(ok(&mut s, "inspect_document", json!({})), before);
+    // An argument the tool doesn't take.
+    let v = rpc(&mut s, 4, "tools/call", json!({"name": "execute", "arguments": {"command": "style.list", "parms": {}}}));
+    assert_eq!(code_and_message(&v), (Some(-32602), "unknown argument `parms` for `execute`".to_string()));
+    // The right keys still run.
+    ok(&mut s, "execute", json!({"command": "text.select", "params": {"story": f["story"], "anchor": 0, "focus": 5}}));
+}

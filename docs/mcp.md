@@ -165,7 +165,7 @@ Use `execute` with `object.fit` to fit a selected graphic frame (or pass `ids`):
 | Tool | What it does |
 |---|---|
 | `list_commands` | Every command (id, label, menu path, shortcut, params, enabled), with `filter` / `enabledOnly` |
-| `execute` | Run any command: `{command, params}` |
+| `execute` | Run any command: `{command, params}`. A params key the command doesn't take is a JSON-RPC `-32602` (invalid params) error naming it, as is an argument a tool doesn't take; `batch` checks every step before running the first |
 | `batch` | Run `commands: [{command, params}]` (or `script` text, one `command.id {json}` per line) in order, stopping at the first error (reports `failedIndex`); `"$N.path"` parameters use earlier results ([agents.md](agents.md)) |
 | `inspect_document` | Pages, spreads, items (ids, bounds, fill, story), stories (overset), layers, styles, swatches, selection |
 | `get_story` | Text, frames, paragraphs, lines, overset of a story (`story` or text `frame`) |

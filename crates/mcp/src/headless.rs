@@ -106,6 +106,8 @@ impl Headless {
     }
 
     fn exec(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        // A key the command's description doesn't name is an error, not a default (#776).
+        designcraft_engine::check_params(id, params).map_err(|e| e.to_string())?;
         let r = self.session.execute(id, params).map_err(|e| {
             let ui_only = ["app.", "view.", "window."].iter().any(|p| id.starts_with(p));
             if ui_only && designcraft_engine::find_command(id).is_none() { format!("`{id}` is a UI command; {NEEDS_APP}") } else { e.to_string() }

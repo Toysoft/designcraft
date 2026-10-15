@@ -51,7 +51,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Data Fields",
             [],
             None,
-            "{csv? | rows? | path? | bytes?, name?} → [{name, kind, uses}]; no params reads the linked source and does not attach one",
+            "{csv? | rows? | path? | bytes? | base64?, name?, delimiter?, sheet?} → [{name, kind, uses}]; no params reads the linked source and does not attach one",
             has_doc,
             fields_cmd
         ),
@@ -81,7 +81,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create Merged Document…",
             [],
             None,
-            "{csv? | rows? | path? | bytes?, name?, records?, one?, range?, perPage?, arrange?, insets?, columnSpacing?, rowSpacing?, fitting?, center?, linkImages?, limit?} → {records, pages, missingImages, oversetStories, warnings}",
+            "{csv? | rows? | path? | bytes? | base64?, name?, delimiter?, sheet?, records?, one?, range?, perPage?, arrange?, insets?, columnSpacing?, rowSpacing?, fitting?, center?, linkImages?, limit?, spread?: removed (passing it is an error)} → {records, pages, missingImages, oversetStories, warnings}",
             has_doc,
             merge_cmd
         ),

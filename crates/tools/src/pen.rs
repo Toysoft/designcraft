@@ -151,7 +151,7 @@ impl PenTool {
         match self.path {
             None if self.anchors.len() >= 2 => {
                 let anchors: Vec<Value> = self.anchors.iter().map(anchor_json).collect();
-                vec![Action::Exec("path.create".into(), json!({"spread": spread_json(sr), "anchors": anchors, "closed": false, "notifyPen": true}))]
+                vec![Action::Exec("path.create".into(), json!({"spread": spread_json(sr), "anchors": anchors, "closed": false}))]
             }
             Some(id) => {
                 let mut p = json!({"id": id, "anchor": anchor_json(last)});

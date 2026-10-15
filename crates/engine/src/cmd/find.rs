@@ -30,7 +30,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Change All (Object)",
             [],
             None,
-            "{…find.objects criteria, change: {fill?, stroke?, strokeWeight?, opacity?}} → {changed}",
+            "{…the criteria of find.objects, change: {fill?, stroke?, strokeWeight?, opacity?}} → {changed}",
             has_doc,
             |s, p| {
                 s.reset_find_scope();
@@ -60,7 +60,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(query "find.find", "Find", ["Edit", "Find/Change"], None,
-            "{find, grep?: bool, caseSensitive?: bool, wholeWord?: bool, scope?: document|story|selection, story?} → matches [{story, start, end, text}]",
+            "{find, grep?: bool, caseSensitive?: bool, wholeWord?: bool, scope?: document|story|selection, story?, change?, first?, attrs?: find.change's fields (Find/Change sends the same set to all three; ignored here)} → matches [{story, start, end, text}]",
             has_doc, find),
         cmd!(
             "find.change",
@@ -71,7 +71,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             change
         ),
-        cmd!(noundo "find.next", "Find Next", ["Edit"], Some("Cmd+Alt+F"), "{find, grep?, caseSensitive?, wholeWord?, scope?: document|story|selection, story?} — Selection starts at its original beginning; later calls advance within the scope", has_doc, find_next),
+        cmd!(noundo "find.next", "Find Next", ["Edit"], Some("Cmd+Alt+F"), "{find, grep?, caseSensitive?, wholeWord?, scope?: document|story|selection, story?, change?, first?, attrs?: find.change's fields (ignored here)} — Selection starts at its original beginning; later calls advance within the scope", has_doc, find_next),
     ]
 }
 

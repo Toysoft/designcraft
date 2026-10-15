@@ -84,7 +84,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Story Column Direction",
             ["Type", "Story Column Direction"],
             None,
-            "{story?, direction: leftToRight|rightToLeft} — column progression, independent of paragraph direction",
+            "{story?, frame?: a text frame of the story, direction: leftToRight|rightToLeft} — column progression, independent of paragraph direction",
             has_doc,
             |s, p| {
                 let sid = story_of(s, p).ok_or_else(|| bad("story.setDirection", "no story"))?;
@@ -145,7 +145,7 @@ pub fn specs() -> Vec<CommandSpec> {
             v["lines"] = json!(cs.line_count());
             Ok(v)
         }),
-        cmd!("type.fillWithPlaceholder", "Fill with Placeholder Text", ["Type"], None, "{frame?}", has_text_or_frames, fill_placeholder),
+        cmd!("type.fillWithPlaceholder", "Fill with Placeholder Text", ["Type"], None, "{frame?, story?}", has_text_or_frames, fill_placeholder),
         cmd!(
             "type.char",
             "Character Formatting",

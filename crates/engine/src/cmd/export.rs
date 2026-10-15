@@ -1122,7 +1122,7 @@ mod print_group_tests {
     fn print_transparency_groups_blend_in_cmyk() {
         let mut s = page_with(&logo());
         let text = |s: &mut Session| {
-            let r = s.execute("file.exportPdf", &json!({"compress": false})).unwrap();
+            let r = s.execute("file.exportPdf", &json!({"compressImages": false})).unwrap();
             String::from_utf8_lossy(&base64_decode(r["base64"].as_str().unwrap())).into_owned()
         };
         let t = text(&mut s);

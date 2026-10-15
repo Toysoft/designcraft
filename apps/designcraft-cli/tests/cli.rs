@@ -67,6 +67,22 @@ fn run_cmd_references_and_describe() {
     assert!(v.as_array().unwrap().iter().all(|c| c.to_string().contains("footnote")));
 }
 
+/// #776: a key the command doesn't take fails the run (`--cmd`) or the step (`script`) instead of
+/// being ignored.
+#[test]
+fn unknown_params_fail() {
+    let out = cli().args(["run", "--cmd", r#"style.list={"bogus":1}"#]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown parameter `bogus`; the command takes no parameters"));
+    let mut child = cli().args(["script", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"document.inspect\nfile.new {\"widht\": 300}\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["failedIndex"], 1);
+    assert!(v.to_string().contains("did you mean `width`?"), "{v}");
+}
+
 /// `designcraft-cli --help` printed usage to stderr and exited 1; asking for help is not an
 /// error (#243). It now goes to stdout and succeeds, while an unknown command keeps the same
 /// usage on stderr and fails.

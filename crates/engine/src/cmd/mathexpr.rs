@@ -40,7 +40,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Insert Math Expression…",
             ["Type"],
             None,
-            "{latex, size?: points (12), x?, y?, spread?} — at the text insertion point (inline), else as a frame; or {id, latex} to edit one",
+            "{latex, size?: points (12), x?, y?, spread?} or {id, latex, size?} — at the text insertion point (inline), else as a frame; with `id`: edits that equation",
             has_doc,
             insert
         ),

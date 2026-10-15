@@ -1429,7 +1429,12 @@ mod color_tests {
                 let mut session = fill_session();
                 session.execute("style.paragraph.apply", &json!({"name": "Existing"})).unwrap();
                 session.execute("style.character.apply", &json!({"name": "Existing"})).unwrap();
-                assert_fill_rejected(&mut session, command, json!({"name": "Existing", "rename": "Renamed", "chars": {"fill": fill, "size": 24}}));
+                let mut params = json!({"name": "Existing", "chars": {"fill": fill, "size": 24}});
+                // Only the edit commands take `rename`.
+                if command.ends_with(".edit") {
+                    params["rename"] = json!("Renamed");
+                }
+                assert_fill_rejected(&mut session, command, params);
             }
         }
     }
@@ -1897,7 +1902,7 @@ mod export_tag_tests {
         assert!(html.contains("<h1 class=\"chapter\">Origins</h1>"), "{html}");
         assert!(html.contains("<strong class=\"key-term\">word</strong>"), "{html}");
         // Tagged PDF: a heading element and a paragraph element.
-        let r = s.execute("file.exportPdf", &json!({"tagged": true, "compress": false})).unwrap();
+        let r = s.execute("file.exportPdf", &json!({"tagged": true, "compressImages": false})).unwrap();
         let pdf = super::super::file::base64_decode(r["base64"].as_str().unwrap());
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/S/H1") && text.contains("/S/P"), "structure elements");
@@ -2015,12 +2020,20 @@ mod sample_color_tests {
     #[test]
     fn sampling_and_explicit_colour_use_the_same_text_application_path() {
         for command in ["color.sample", "object.color"] {
+            // Each command gets its own key: the eyedropper samples at `at`, object.color takes `color`.
+            let params = |at: [f64; 2], color: &str, extra: serde_json::Value| {
+                let mut p = if command == "color.sample" { json!({"at": at}) } else { json!({"color": color}) };
+                if let (Some(p), Some(extra)) = (p.as_object_mut(), extra.as_object()) {
+                    p.extend(extra.clone());
+                }
+                p
+            };
             let (mut s, _) = session_with_image();
             let f = s.execute("frame.create", &json!({"rect": [300, 300, 500, 360], "content": "text"})).unwrap();
             let story = designcraft_doc::StoryId(f["story"].as_u64().unwrap());
             s.execute("text.select", &json!({"story": story.0, "anchor": 0})).unwrap();
             let undo = s.doc().unwrap().history.undo.len();
-            let r = s.execute(command, &json!({"at": [100, 100], "color": "#ff0000"})).unwrap();
+            let r = s.execute(command, &params([100.0, 100.0], "#ff0000", json!({}))).unwrap();
             assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1, "{command}");
             s.execute("text.insert", &json!({"text": "Hi"})).unwrap();
             let text = s.doc().unwrap().doc.story(story).unwrap();
@@ -2028,11 +2041,11 @@ mod sample_color_tests {
             // Explicit ids override text targeting, including with a text selection active.
             let fid = ItemId(f["id"].as_u64().unwrap());
             s.execute("text.select", &json!({"story": story.0, "anchor": 0, "focus": 2})).unwrap();
-            let r = s.execute(command, &json!({"at": [180, 100], "color": "#0000ff", "id": fid.0})).unwrap();
+            let r = s.execute(command, &params([180.0, 100.0], "#0000ff", json!({"id": fid.0}))).unwrap();
             assert_eq!(s.doc().unwrap().doc.item(fid).unwrap().fill.swatch, r["swatch"].as_str().unwrap());
             let text = s.doc().unwrap().doc.story(story).unwrap();
             assert_ne!(text.format_after(0).over.fill.as_deref(), r["swatch"].as_str(), "text unchanged: {command}");
-            let r = s.execute(command, &json!({"at": [180, 100], "color": "#0000ff", "target": "stroke"})).unwrap();
+            let r = s.execute(command, &params([180.0, 100.0], "#0000ff", json!({"target": "stroke"}))).unwrap();
             let text = s.doc().unwrap().doc.story(story).unwrap();
             assert_eq!(text.format_after(0).over.stroke.as_deref(), r["swatch"].as_str(), "selected text stroke: {command}");
         }

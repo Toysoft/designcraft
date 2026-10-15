@@ -280,6 +280,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 let (id, p) = c.split_once('=').unwrap_or((&c, "{}"));
                 let p: Value = serde_json::from_str(p).map_err(|e| format!("--cmd {id}: {e}"))?;
                 let p = designcraft_engine::script::resolve(&p, &results).map_err(|e| format!("--cmd {id}: {e}"))?;
+                // A key the command's description doesn't name is an error, not a default (#776).
+                designcraft_engine::check_params(id, &p).map_err(|e| e.to_string())?;
                 let r = s.execute(id, &p).map_err(|e| e.to_string())?;
                 results.push(r.clone());
                 if !r.is_null() {
