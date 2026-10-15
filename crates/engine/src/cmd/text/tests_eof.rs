@@ -161,7 +161,9 @@ fn eof_format_and_typing_have_exact_document_undo_redo_after_native_reopen() {
 
 #[test]
 fn ordinary_carets_empty_stories_and_cell_eof_keep_their_existing_policy() {
-    for (text, at) in [("AB", 1), ("A\n\nB", 2)] {
+    // A nonempty paragraph start is an ordinary caret. Upstream's hidden-mark regression
+    // covers the distinct blank-paragraph caret, whose LF now takes formatting immediately.
+    for (text, at) in [("AB", 1), ("A\nB", 2)] {
         let (mut s, sid) = fixture(text);
         select(&mut s, sid, at, at);
         let before = s.doc().unwrap().doc.story(sid).unwrap().clone();
