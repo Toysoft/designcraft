@@ -5,7 +5,8 @@ Start the app with `--control <port>` (or `DESIGNCRAFT_CONTROL_PORT`). The serve
 
 For an isolated native test profile, set `DESIGNCRAFT_CONFIG_DIR` to a dedicated directory before
 launch. UI/engine preferences and the `Recovery` directory then live under that root. An unset
-override preserves the usual platform paths; an explicitly empty override disables those paths.
+override preserves the usual platform paths (or `DesignCraftData` next to the executable when a
+`portable.txt` sits there); an explicitly empty override disables those paths.
 `DESIGNCRAFT_NO_PREFS` still disables preference reads/writes independently of recovery.
 
 Control pointer and key input is queued across native frames. After a drag, wait for both the

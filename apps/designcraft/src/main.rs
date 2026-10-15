@@ -258,6 +258,12 @@ fn main() -> eframe::Result {
             _ => files.push(a),
         }
     }
+    // A portable.txt whose DesignCraftData folder cannot be written: the platform folders are used
+    // instead (see `profile`), and the user is told, in the log and in the status bar.
+    let portable_note = profile::unwritable_portable_dir().map(|dir| {
+        log::warn!("portable mode is off: {} cannot be written; settings and recovery use the usual folders", dir.display());
+        format!("Portable mode is off: {} cannot be written, so settings are kept in the usual place.", dir.display())
+    });
     // The log file lives under the settings directory; opened after the arguments, so `--version`
     // leaves no file behind. Records logged until now are written to it first.
     if let (Some(logger), Some(dir)) = (logger, profile::config_dir()) {
@@ -343,6 +349,10 @@ fn main() -> eframe::Result {
                 app.status(format!("Recovered {n} unsaved document{} from the last session.", if n == 1 { "" } else { "s" }));
             }
             load_prefs(&mut app);
+            // After `load_prefs`, which replaces the UI state and with it the status line.
+            if let Some(note) = portable_note {
+                app.status(note);
+            }
             app.integrated_titlebar = cfg!(target_os = "macos");
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
