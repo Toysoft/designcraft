@@ -15,6 +15,8 @@ mod control_server;
 mod gpu;
 mod logging;
 #[cfg(target_os = "macos")]
+mod mac_window;
+#[cfg(target_os = "macos")]
 mod native_menu;
 mod profile;
 
@@ -25,6 +27,9 @@ struct App {
     app: DesignApp,
     #[cfg(target_os = "macos")]
     menu: Option<native_menu::NativeMenu>,
+    /// The window's `movable` flag as last set; see `mac_window`.
+    #[cfg(target_os = "macos")]
+    movable: Option<bool>,
     /// The graphics start in progress (`gpu.json`) until a frame has been presented; see `gpu`.
     startup: Option<gpu::Startup>,
     /// Frames begun so far.
@@ -58,6 +63,8 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
+        #[cfg(target_os = "macos")]
+        mac_window::sync_movable(ui.ctx(), &mut self.movable);
     }
     fn on_exit(&mut self) {
         // A normal exit before the third frame is not a crash.
@@ -360,6 +367,8 @@ fn main() -> eframe::Result {
                 app,
                 #[cfg(target_os = "macos")]
                 menu: None,
+                #[cfg(target_os = "macos")]
+                movable: None,
                 startup: gpu,
                 frames: 0,
             }))

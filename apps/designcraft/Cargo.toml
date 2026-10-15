@@ -35,3 +35,6 @@ winit = { version = "0.30", default-features = false, features = ["x11"] }
 # The same winit as eframe; only the native termination opt-in is used.
 winit = { version = "0.30", default-features = false }
 muda = { version = "0.21", default-features = false }
+# The versions muda uses: the window's `movable` flag (see `mac_window`), through safe methods.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
