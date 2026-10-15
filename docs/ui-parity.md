@@ -61,6 +61,11 @@ context menus, typing at a caret) are things a layout artist does every minute, 
 
 ## Remaining effort
 
+Paragraph Style Options' General pane shows a Style Settings summary of differences from its
+parent, including captured color, size and spacing. Pending edits appear before OK without
+changing the document. Fully captured default attributes do not overwhelm the summary. This
+covers checking the sampled and redefined settings in the styles tutorial (2:45 and 5:15).
+
 | Work | Opus 5.5 h |
 |---|---|
 | Copy/paste, context menus, threading clicks, caret formatting on every platform, with control-channel regression tests | 30–50 |

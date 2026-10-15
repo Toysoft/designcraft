@@ -3271,20 +3271,59 @@ fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialo
                     ui.end_row();
                 });
                 ui.add_space(8.0);
-                crate::rtl::label(
-                    ui,
-                    egui::RichText::new(format!(
-                        "{} {} {:.1} pt · {}",
-                        cp.font_family,
-                        cp.font_style,
-                        cp.size,
-                        crate::i18n::tr(&app.ui.language, pp.align.label())
-                    ))
-                    .color(crate::theme::Tokens::get(ui.ctx()).text_dim),
-                );
+                crate::rtl::label(ui, egui::RichText::new(crate::i18n::tr(&app.ui.language, "Style Settings:")).font(semibold(12.0)));
+                let summary = paragraph_style_summary(&app.ui.language, d, &style, &doc.styles);
+                egui::ScrollArea::vertical().id_salt("paragraph_style_settings").max_height(220.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(summary).color(crate::theme::Tokens::get(ui.ctx()).text_dim)).wrap());
+                });
             }
         });
     });
+}
+
+/// Show what the style changes from its parent, including edits waiting for OK. Fully captured
+/// styles contain every default, so comparing resolved values keeps the summary readable.
+fn paragraph_style_summary(lang: &str, d: &Dialog, style: &designcraft_doc::ParagraphStyle, styles: &designcraft_doc::Styles) -> String {
+    let based = d.fields.get("basedOn").and_then(Value::as_str).or(style.based_on.as_deref()).unwrap_or(designcraft_doc::NO_PARA_STYLE);
+    let (base_para, base_chars) = styles.resolve_para_style(based);
+    let (mut para, mut chars) = (base_para.clone(), base_chars.clone());
+    para.apply(&style.para);
+    chars.apply(&style.chars);
+    for (key, value) in &d.fields {
+        if let Some(key) = key.strip_prefix("c.") {
+            let mut delta = designcraft_doc::CharAttrs::default();
+            if delta.set_json(key, value).is_ok() {
+                chars.apply(&delta);
+            }
+        } else if let Some(key) = key.strip_prefix("p.") {
+            let (key, value) = key.split_once('.').map_or((key, value.clone()), |(attr, field)| (attr, json!({field:value})));
+            let mut delta = designcraft_doc::ParaAttrs::default();
+            if delta.set_json_over(key, &value, &para).is_ok() {
+                para.apply(&delta);
+            }
+        }
+    }
+    let mut char_delta = base_chars.delta(&chars);
+    if base_chars.font_family != chars.font_family {
+        char_delta.font_style = Some(chars.font_style.clone());
+    }
+    let mut parts = vec![crate::i18n::style_name(lang, based).to_string()];
+    for value in [serde_json::to_value(base_para.delta(&para)), serde_json::to_value(char_delta)] {
+        if let Ok(Value::Object(attrs)) = value {
+            for (key, value) in attrs {
+                let suffix = if matches!(
+                    key.as_str(),
+                    "size" | "spaceBefore" | "spaceAfter" | "leftIndent" | "rightIndent" | "firstLineIndent" | "lastLineIndent"
+                ) {
+                    " pt"
+                } else {
+                    ""
+                };
+                parts.push(format!("{}: {}{suffix}", setting_label(lang, &key), setting_text(&value)));
+            }
+        }
+    }
+    parts.join(" + ")
 }
 
 fn delete_paragraph_style(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
@@ -4808,6 +4847,53 @@ fn find_font(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paragraph_style_settings_show_captured_color_and_pending_spacing_without_changing_the_document() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let f = app.run("frame.create", json!({"rect":[36,36,300,200],"content":"text","text":"Heading"})).unwrap();
+        app.run("text.select", json!({"story":f["story"],"anchor":0,"focus":7})).unwrap();
+        app.run("type.char", json!({"fontFamily":"Source Sans 3","fontStyle":"Bold","size":16,"fill":"[Paper]"})).unwrap();
+        app.run("style.paragraph.create", json!({"name":"Header","fromSelection":true})).unwrap();
+        let doc = app.session.doc().unwrap().doc.clone();
+        let style = doc.styles.para("Header").unwrap();
+        let mut d = Dialog::new("paragraphStyleOptions", json!({"name":"Header"}));
+        let summary = paragraph_style_summary("", &d, style, &doc.styles);
+        for value in ["Source Sans 3", "Bold", "16 pt", "[Paper]"] {
+            assert!(summary.contains(value), "{summary}");
+        }
+        assert!(summary.len() < 250, "default attributes do not swamp the captured settings: {summary}");
+        d.fields.insert("c.fill".into(), json!("[Registration]"));
+        d.fields.insert("p.spaceAfter".into(), json!(4.5));
+        let summary = paragraph_style_summary("", &d, style, &doc.styles);
+        assert!(summary.contains("[Registration]") && !summary.contains("[Paper]"), "{summary}");
+        assert!(summary.contains("4.5 pt"), "{summary}");
+        assert_eq!(app.session.doc().unwrap().doc, doc);
+    }
+
+    #[test]
+    fn paragraph_style_settings_compare_with_the_chosen_parent() {
+        let mut styles = designcraft_doc::Styles::default();
+        styles.paragraph.push(designcraft_doc::ParagraphStyle {
+            name: "Parent".into(),
+            chars: designcraft_doc::CharAttrs { size: Some(20.0), ..Default::default() },
+            based_on: None,
+            next_style: None,
+            para: Default::default(),
+            shortcut: String::new(),
+        });
+        let style = designcraft_doc::ParagraphStyle {
+            name: "Child".into(),
+            based_on: Some("Parent".into()),
+            next_style: None,
+            para: Default::default(),
+            chars: Default::default(),
+            shortcut: String::new(),
+        };
+        let d = Dialog::new("paragraphStyleOptions", json!({"name":"Child"}));
+        assert_eq!(paragraph_style_summary("", &d, &style, &styles), "Parent");
+    }
 
     #[test]
     fn step_and_repeat_dialog_previews_and_makes_the_copies_as_one_undo_step() {
