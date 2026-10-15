@@ -116,6 +116,11 @@ pub(crate) fn command(app: &mut DesignApp, id: &str, params: &Value) -> Option<R
         let visible = app.ui.docking.as_ref().is_some_and(|layout| layout.contains(&panel));
         return Some(change(app, if visible { "close" } else { "activate" }, &json!({"panel": panel})));
     }
+    if id == "window.panel"
+        && let Some(result) = open_floating_group(app, params)
+    {
+        return Some(result);
+    }
     if id == "window.panel.layout" {
         return Some(
             params
@@ -192,6 +197,94 @@ fn apply_action(app: &mut DesignApp, action: Action<String>) -> Result<Value, St
     }
     app.ui.open_panel = None;
     Ok(json!({"layout": app.ui.docking}))
+}
+
+/// The panel in front of each tab group in the dock (not the floating groups).
+fn front_tabs(layout: &Layout<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visit: Vec<&Node<String>> = layout.root.iter().collect();
+    while let Some(node) = visit.pop() {
+        if out.len() > craft_ui::docking::MAX_PANELS {
+            break;
+        }
+        match node {
+            Node::Split { first, second, .. } => {
+                visit.push(first);
+                visit.push(second);
+            }
+            Node::Tabs { panels, active } => out.extend(panels.get(*active).cloned()),
+            Node::Stack { .. } => {}
+        }
+    }
+    out
+}
+
+/// Bring each of `front` back in front of the dock tab group that holds it.
+fn restore_front_tabs(layout: &mut Layout<String>, front: &[String]) {
+    let mut visit: Vec<&mut Node<String>> = layout.root.iter_mut().collect();
+    let mut seen = 0usize;
+    while let Some(node) = visit.pop() {
+        seen = seen.saturating_add(1);
+        if seen > 2 * craft_ui::docking::MAX_PANELS {
+            break;
+        }
+        match node {
+            Node::Split { first, second, .. } => {
+                visit.push(first);
+                visit.push(second);
+            }
+            Node::Tabs { panels, active } => {
+                if let Some(i) = panels.iter().position(|p| front.contains(p)) {
+                    *active = i;
+                }
+            }
+            Node::Stack { .. } => {}
+        }
+    }
+}
+
+/// Panels InDesign opens together as one floating group from the Window menu, in tab order:
+/// Window › Styles › Paragraph Styles (or Character Styles) brings both.
+const FLOATING_GROUPS: &[&[&str]] = &[&["characterStyles", "paragraphStyles"]];
+
+/// Window › a panel of a [`FLOATING_GROUPS`] group none of whose panels is showing: the group
+/// opens floating over the right of the canvas, with that panel in front. None otherwise (the
+/// panel opens as before).
+fn open_floating_group(app: &mut DesignApp, params: &Value) -> Option<Result<Value, String>> {
+    let panel = params.get("panel").and_then(Value::as_str).and_then(normalize)?;
+    let group = FLOATING_GROUPS.iter().find(|g| g.contains(&panel))?;
+    // Panels in the workspace's icon groups open from there.
+    if app.ui.icon_groups.as_ref().is_some_and(|g| g.iter().flatten().any(|p| group.contains(&p.as_str()))) {
+        return None;
+    }
+    let layout = app.ui.docking.clone().unwrap_or_else(|| legacy(app));
+    if group.iter().any(|p| layout.contains(&p.to_string())) {
+        return None;
+    }
+    let (w, h) = (290.0, 340.0);
+    let (x, y) = app.canvas_rect.map_or((400.0, 140.0), |r| ((r.right() - w - 24.0).max(r.left()), r.top() + 96.0));
+    let before = (app.ui.docking.clone(), app.ui.docking_hidden.clone(), app.ui.floating.clone(), app.ui.open_panel.clone());
+    // The dock's tab in front stays in front (opening a panel passes through the dock).
+    let front = front_tabs(&layout);
+    let open = |app: &mut DesignApp| -> Result<Value, String> {
+        let first = group.first().ok_or("empty panel group")?;
+        change(app, "float", &json!({"panel": first, "x": x, "y": y, "width": w, "height": h}))?;
+        for p in group.get(1..).unwrap_or_default() {
+            change(app, "move", &json!({"panel": p, "anchor": first}))?;
+        }
+        change(app, "activate", &json!({"panel": panel}))
+    };
+    let result = open(app);
+    if result.is_ok()
+        && let Some(layout) = app.ui.docking.as_mut()
+    {
+        restore_front_tabs(layout, &front);
+    }
+    if result.is_err() {
+        // All or nothing.
+        (app.ui.docking, app.ui.docking_hidden, app.ui.floating, app.ui.open_panel) = before;
+    }
+    Some(result)
 }
 
 fn change(app: &mut DesignApp, operation: &str, params: &Value) -> Result<Value, String> {

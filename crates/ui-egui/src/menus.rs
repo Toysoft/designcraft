@@ -3908,8 +3908,10 @@ mod tests {
         app.run("file.new", json!({})).unwrap();
         activate(&mut app, "app.characterPanel", &Value::Null);
         assert_eq!(app.ui.open_panel.as_deref(), Some("character"));
+        // Paragraph Styles opens floating, grouped with Character Styles, as in InDesign.
         activate(&mut app, "app.paragraphStylesPanel", &Value::Null);
-        assert_eq!(app.ui.open_panel.as_deref(), Some("paragraphStyles"));
+        let layout = app.ui.docking.as_ref().unwrap();
+        assert!(layout.floating.iter().any(|g| g.panels == ["characterStyles", "paragraphStyles"] && g.active == 1));
         let story = app.run("frame.create", json!({"rect": [36, 36, 200, 100], "content": "text", "text": "Page "})).unwrap()["story"].clone();
         app.run("text.select", json!({"story": story, "anchor": 5, "focus": 5})).unwrap();
         activate(&mut app, "app.insertCurrentPageNumber", &Value::Null);

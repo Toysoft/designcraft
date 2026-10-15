@@ -650,3 +650,28 @@ fn legacy_dock_menu_button_opens_the_active_panel_menu() {
     assert_eq!(h.state().session.active().unwrap().doc.page_count(), pages + 1);
     assert!(!egui::Popup::is_any_open(&h.ctx));
 }
+
+/// Window › Styles › Paragraph Styles opens InDesign's floating Character Styles | Paragraph Styles
+/// group, which stays open while other panels open (Learn Skills Daily's InDesign course, 7:55).
+#[test]
+fn paragraph_styles_open_floating_with_character_styles() {
+    let mut app = app();
+    app.run("window.panel", json!({"panel":"paragraphStyles"})).unwrap();
+    let layout = app.ui.docking.clone().unwrap();
+    let group = layout.floating.iter().find(|g| g.panels.iter().any(|p| p == "paragraphStyles")).expect("a floating group");
+    assert_eq!(group.panels, ["characterStyles", "paragraphStyles"]);
+    assert_eq!(group.panels[group.active], "paragraphStyles", "the one chosen is in front");
+    // The dock still shows Properties in front.
+    assert!(matches!(&layout.root, Some(craft_ui::docking::Node::Tabs { panels, active }) if panels[*active] == "properties"), "{:?}", layout.root);
+    // Other panels from Window leave it open.
+    app.run("window.panel", json!({"panel":"color"})).unwrap();
+    app.run("window.panel", json!({"panel":"links"})).unwrap();
+    let layout = app.ui.docking.clone().unwrap();
+    assert!(layout.floating.iter().any(|g| g.panels == ["characterStyles", "paragraphStyles"]));
+    // Once showing, Window › Character Styles brings that tab forward.
+    app.run("window.panel", json!({"panel":"characterStyles"})).unwrap();
+    let layout = app.ui.docking.clone().unwrap();
+    let group = layout.floating.iter().find(|g| g.panels.iter().any(|p| p == "characterStyles")).unwrap();
+    assert_eq!(group.panels[group.active], "characterStyles");
+    assert_eq!(layout.panels().iter().filter(|p| p.as_str() == "characterStyles").count(), 1);
+}
