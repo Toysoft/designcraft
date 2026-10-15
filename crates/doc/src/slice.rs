@@ -57,18 +57,25 @@ impl Story {
         if src.text.is_empty() {
             return pos;
         }
-        // Text first (creates empty marker entries), then formats and marker payloads.
+        // The table anchored in the paragraph at `pos` keeps its anchor wherever the paste moves it.
+        let p0 = self.para_at(pos);
+        let own = self.paras.get(p0).and_then(|p| p.table).and_then(|id| {
+            let r = self.para_ranges().get(p0)?.clone();
+            Some((r.start + self.text.get(r)?.find(TABLE_ANCHOR)?, id))
+        });
+        // Text first (creates empty marker entries), then formats and marker payloads; tables are
+        // fixed up once at the end.
         let mut at = pos;
         for (r, f) in src.runs() {
             if r.is_empty() {
                 continue;
             }
-            self.insert_with(at, &src.text[r.clone()], f.clone());
+            self.insert_with_raw(at, &src.text[r.clone()], f.clone());
             at += r.len();
         }
         let end = at;
+        let mut claims: Vec<(usize, u64)> = own.map(|(a, id)| (if a >= pos { a + (end - pos) } else { a }, id)).into_iter().collect();
         // Paragraph formats of the pasted paragraphs after the first.
-        let p0 = self.para_at(pos);
         for (k, pf) in src.paras.iter().enumerate().skip(1) {
             if let Some(p) = self.paras.get_mut(p0 + k) {
                 *p = crate::story::ParaFormat { table: None, ..pf.clone() };
@@ -106,25 +113,25 @@ impl Story {
                 *slot = Arc::new(crate::xref::TextAnchor { id, name: a.name.clone() });
             }
         }
-        // Tables: re-attach by paragraph (fresh ids so a pasted copy never shares an id).
+        // Tables: re-attach at their anchors (fresh ids so a pasted copy never shares an id).
         if !src.tables.is_empty() {
             let mut next = self.tables.keys().max().copied().unwrap_or(0) + 1;
-            for (k, pf) in src.paras.iter().enumerate() {
+            let ranges = src.para_ranges();
+            for (pf, r) in src.paras.iter().zip(ranges) {
                 let Some(tid) = pf.table else { continue };
                 let Some(t) = src.tables.get(&tid) else { continue };
-                let pi = p0 + k;
+                let Some(k) = src.text.get(r.clone()).and_then(|t| t.find(TABLE_ANCHOR)) else { continue };
                 let mut t = (**t).clone();
                 t.id = next;
                 next += 1;
+                claims.push((pos + r.start + k, t.id));
                 self.tables.insert(t.id, Arc::new(t));
-                if let Some(p) = self.paras.get_mut(pi) {
-                    p.table = Some(next - 1);
-                }
             }
-            self.fix_tables();
         }
+        let splits = self.fix_tables_with(&claims);
         self.rev += 1;
-        end
+        // Past any return the fix-up put inside the pasted text.
+        end + splits.iter().filter(|&&s| s < end).count()
     }
 
     /// Append the whole of `other` as new paragraphs after this story's text (threading two
@@ -192,6 +199,32 @@ impl Story {
 mod tests {
     use super::*;
     use crate::story::ParaFormat;
+
+    #[test]
+    fn pasting_a_table_next_to_another_gives_each_its_own_paragraph() {
+        let mut s = Story::with_text(StoryId(1), "x", ParaFormat::default());
+        let a = s.insert_table(1, crate::Table::new(5, 1, 1, 0, 0, 10.0));
+        let n = TABLE_ANCHOR.len_utf8();
+        let copy = s.extract(a..a + n);
+        // After the anchor: the copy follows the original.
+        let mut after = s.clone();
+        let end = after.insert_story(a + n, &copy);
+        after.check().unwrap();
+        assert_eq!(after.text, format!("x\n{TABLE_ANCHOR}\n{TABLE_ANCHOR}\n"));
+        assert_eq!((after.table_anchor(5), after.table_anchor(6)), (Some(a), Some(a + n + 1)));
+        assert_eq!(end, a + 2 * n + 1);
+        // Before the anchor: the copy comes first and the original keeps its table.
+        let mut before = s.clone();
+        let end = before.insert_story(a, &copy);
+        before.check().unwrap();
+        assert_eq!((before.table_anchor(6), before.table_anchor(5)), (Some(a), Some(a + n + 1)));
+        assert_eq!(end, a + n);
+        // Paragraphs pasted before the anchor keep the table too.
+        let mut text = s.clone();
+        text.insert_story(a, &Story::with_text(StoryId(2), "Hello\nWorld", ParaFormat::default()));
+        text.check().unwrap();
+        assert_eq!(text.table_anchor(5), Some(a + "Hello\nWorld".len()));
+    }
 
     #[test]
     fn copy_paste_keeps_formatting_and_notes() {

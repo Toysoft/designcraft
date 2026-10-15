@@ -47,7 +47,7 @@ basics of editing fail for too many users on Windows and Linux.
 | Colour fields: hex, picker from any swatch field | ✓ | ✓ | ~ | hex entry and picker issues (#323, #190) |
 | Panels: Pages, Layers, Swatches, Color, Stroke, Character, Paragraph, Styles, Links, Effects, Text Wrap, Align, Pathfinder, Table, Index, TOC, Hyperlinks, Bookmarks, Articles, Tags, Notes, Track Changes, Object States, Buttons and Forms, Preflight, Data Merge, Library, Scripts, Glyphs, Info | ✓ | all present | ~ | **Tabs panel missing** (#326); Navigator, Trap Presets, Animation, Timing missing; pull-down panels can't scroll on Linux (#267) |
 | Dialogs: New Document, Document Setup, Preferences (all pages), Paragraph/Character/Object/Table/Cell Style Options, Export PDF, Print, Package, Find/Change | ✓ | present | ~ | generated command dialogs fill the long tail; depth varies |
-| Workspaces | Essentials, Advanced, Book, Digital Publishing, Interactive for PDF, Printing and Proofing, Typography, Touch | ✓ named workspaces + custom | ~ | tab bar overlaps menus in Book/Advanced (#182) |
+| Workspaces | Essentials, Essentials Classic, Advanced, Book, Digital Publishing, Interactive for PDF, Printing and Proofing, Review, Typography, Touch | ✓ named workspaces (Essentials Classic: Control panel and iconic panel groups) + custom; Window › Workspace; no Review or Touch | ~ | tab bar overlaps menus in Book/Advanced (#182) |
 | Story Editor | ✓ | ✓ | ~ | style-name column, depth ruler missing |
 | Undo granularity (a drag = one step) | ✓ | ✓ (Begin/Preview/Commit) | ✓ | |
 | Closing with unsaved changes asks | ✓ | ✓ File › Close and window/menu quit (#146, #545) | ✓ | macOS Dock Quit still bypasses the prompt (#544) |
