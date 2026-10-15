@@ -47,8 +47,9 @@ impl El {
     pub(crate) fn val(&self, name: &str) -> Option<String> {
         self.child(name).map(|e| e.attr("val").unwrap_or("true").to_string())
     }
+    /// A toggle property (`ST_OnOff`: a boolean, or the words `on` and `off`). None when unset.
     pub(crate) fn on(&self, name: &str) -> Option<bool> {
-        self.val(name).map(|v| !matches!(v.as_str(), "0" | "false" | "none"))
+        self.val(name).map(|v| !matches!(v.as_str(), "0" | "false" | "none" | "off"))
     }
 }
 
@@ -166,7 +167,7 @@ fn run_attrs(rpr: Option<&El>) -> CharAttrs {
         _ => None,
     };
     if let Some(u) = r.val("u") {
-        a.underline = Some(u != "none" && u != "0" && u != "false");
+        a.underline = Some(!matches!(u.as_str(), "none" | "0" | "false" | "off"));
     }
     if let Some(s) = r.on("strike") {
         a.strikethrough = Some(s);
@@ -893,5 +894,25 @@ mod tests {
         let quote = i.para_styles.iter().find(|s| s.name == "Quote").unwrap();
         assert_eq!(quote.based_on.as_deref(), Some("Normal"));
         assert_eq!(quote.chars.size, None, "inherited from Normal, not copied");
+    }
+
+    /// `ST_OnOff` is a boolean plus the words `on` and `off`: an explicit `off` is off.
+    #[test]
+    fn off_valued_toggles_stay_off() {
+        let document = format!(
+            r#"<w:document {W}><w:body><w:p>
+              <w:r><w:rPr><w:b w:val="off"/><w:i w:val="0"/><w:strike w:val="off"/><w:u w:val="off"/><w:caps w:val="off"/></w:rPr><w:t>plain</w:t></w:r>
+              <w:r><w:rPr><w:b w:val="on"/></w:rPr><w:t>bold</w:t></w:r>
+            </w:p></w:body></w:document>"#
+        );
+        let st = import(&docx(&document, "", "")).unwrap().story;
+        st.check().unwrap();
+        let plain = st.format_after(st.text.find("plain").unwrap()).clone().over;
+        assert_eq!(plain.font_style.as_deref(), Some("Regular"), "an explicit `off` is not bold");
+        assert_eq!(plain.strikethrough, Some(false));
+        assert_eq!(plain.underline, Some(false));
+        assert_eq!(plain.capitalization, None, "no all-caps");
+        let on = st.format_after(st.text.find("bold").unwrap()).clone().over;
+        assert_eq!(on.font_style.as_deref(), Some("Bold"), "`on` is still on");
     }
 }
