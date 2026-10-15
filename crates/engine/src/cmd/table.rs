@@ -9,7 +9,7 @@
 use designcraft_compose as compose;
 use designcraft_doc::story::floor_char_boundary;
 use designcraft_doc::{
-    AltFills, CellAddr, CellRange, CellStroke, Document, RowHeightMode, Selection, StoryId, StrokeType, Table, TableSel, TextSel,
+    AltFills, CellAddr, CellRange, CellStroke, Document, RowHeightMode, RowKind, Selection, StoryId, StrokeType, Table, TableSel, TextSel,
     VerticalJustification,
 };
 use serde_json::{Value, json};
@@ -219,6 +219,33 @@ fn table_specs() -> Vec<CommandSpec> {
             "{direction?: leftToRight|rightToLeft, border?: {weight?, color?, tint?, type?}, spaceBefore?, spaceAfter?, headerRows?, footerRows?, repeatHeader?, repeatFooter?, altRows?: {first, firstColor, firstTint, next, nextColor, nextTint, skipFirst, skipLast} | null, altCols?: … | null}",
             in_table,
             options
+        ),
+        cmd!(
+            "table.convertRowsToHeader",
+            "To Header",
+            ["Table", "Convert Rows"],
+            None,
+            "{rows?: [a,b]} — the target rows, at the top of the table or right after its header rows",
+            |s| can_convert_rows(s, RowKind::Header),
+            |s, p| convert_rows(s, p, RowKind::Header)
+        ),
+        cmd!(
+            "table.convertRowsToBody",
+            "To Body",
+            ["Table", "Convert Rows"],
+            None,
+            "{rows?: [a,b]} — the target header rows next to the body, footer rows next to it, or both",
+            |s| can_convert_rows(s, RowKind::Body),
+            |s, p| convert_rows(s, p, RowKind::Body)
+        ),
+        cmd!(
+            "table.convertRowsToFooter",
+            "To Footer",
+            ["Table", "Convert Rows"],
+            None,
+            "{rows?: [a,b]} — the target rows, at the bottom of the table or right before its footer rows",
+            |s| can_convert_rows(s, RowKind::Footer),
+            |s, p| convert_rows(s, p, RowKind::Footer)
         ),
         cmd!(noundo "table.select", "Select Cells", [], None, "{story?, table?, rows?: [a,b], cols?: [a,b], what?: cell|row|column|table}", in_table_or_ids, select),
         cmd!(noundo "table.selectTable", "Select Table", ["Table", "Select"], None, "{}", in_table, |s, p| {
@@ -943,6 +970,27 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
             t.set_header_footer(h, f);
         }
         Ok(json!({"options": t.options}))
+    })
+}
+
+/// Convert Rows is greyed out unless the selected cells (or the caret's cell) can change kind.
+fn can_convert_rows(s: &Session, kind: RowKind) -> std::result::Result<(), String> {
+    let st = s.active().ok_or("no document open")?;
+    if st.selection.cells.is_none() {
+        in_cell(s)?;
+    }
+    let g = target(s, &Value::Null, "table.convertRows").map_err(|e| e.to_string())?;
+    let t = st.doc.story(g.story).and_then(|x| x.tables.get(&g.table)).ok_or("no table")?;
+    t.convert_rows_counts(g.range.r0, g.range.r1, kind).map(|_| ())
+}
+
+fn convert_rows(s: &mut Session, p: &Value, kind: RowKind) -> Result<Value> {
+    const ID: &str = "table.convertRows";
+    let g = target(s, p, ID)?;
+    edit_table(s, &g, ID, |t| {
+        let (h, f) = t.convert_rows_counts(g.range.r0, g.range.r1, kind).map_err(|e| bad(ID, e))?;
+        t.set_header_footer(h, f);
+        Ok(json!({"headerRows": h, "footerRows": f}))
     })
 }
 

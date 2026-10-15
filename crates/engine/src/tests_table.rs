@@ -873,3 +873,92 @@ fn split_selected_block_and_merged_cells_preserves_geometry_and_history() {
         }
     }
 }
+
+fn header_footer(s: &mut Session) -> (u64, u64) {
+    let t = s.execute("table.get", &json!({})).unwrap();
+    (t["headerRows"].as_u64().unwrap(), t["footerRows"].as_u64().unwrap())
+}
+
+fn convert_enabled(s: &Session, to: &str) -> bool {
+    crate::cmd::find_command(&format!("table.convertRowsTo{to}")).unwrap().info(s).enabled
+}
+
+fn select_rows(s: &mut Session, a: usize, b: usize) {
+    s.execute("table.select", &json!({"what": "row", "rows": [a, b]})).unwrap();
+}
+
+#[test]
+fn convert_rows_follows_the_table_edges() {
+    let (mut s, _, _) = session_with_frame();
+    s.execute("table.insert", &json!({"rows": 6, "cols": 2})).unwrap();
+    // Rows at the top become header rows, in one undo step.
+    select_rows(&mut s, 0, 1);
+    let undo = s.doc().unwrap().history.undo.len();
+    s.execute("table.convertRowsToHeader", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (2, 0));
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (0, 0));
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (2, 0));
+    // A row with a body row between it and the header rows can't become a header row.
+    select_rows(&mut s, 3, 3);
+    assert!(!convert_enabled(&s, "Header"));
+    assert!(s.execute("table.convertRowsToHeader", &json!({})).is_err());
+    assert_eq!(header_footer(&mut s), (2, 0));
+    // The row right after the header rows can.
+    select_rows(&mut s, 2, 2);
+    s.execute("table.convertRowsToHeader", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (3, 0));
+    // Footer rows come from the bottom.
+    select_rows(&mut s, 3, 3);
+    assert!(!convert_enabled(&s, "Footer"));
+    select_rows(&mut s, 5, 5);
+    s.execute("table.convertRowsToFooter", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (3, 1));
+    select_rows(&mut s, 4, 4);
+    s.execute("table.convertRowsToFooter", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (3, 2));
+    // The last body row stays a body row.
+    select_rows(&mut s, 3, 3);
+    assert!(!convert_enabled(&s, "Header") && !convert_enabled(&s, "Footer") && !convert_enabled(&s, "Body"));
+    // Back to body: only header rows next to the body, and footer rows next to it.
+    select_rows(&mut s, 0, 0);
+    assert!(!convert_enabled(&s, "Body"));
+    select_rows(&mut s, 1, 2);
+    s.execute("table.convertRowsToBody", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (1, 2));
+    select_rows(&mut s, 5, 5);
+    assert!(!convert_enabled(&s, "Body"));
+    select_rows(&mut s, 4, 4);
+    s.execute("table.convertRowsToBody", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (1, 1));
+    // Header rows can't jump to the footer, nor footer rows to the header.
+    select_rows(&mut s, 0, 0);
+    assert!(!convert_enabled(&s, "Footer"));
+    select_rows(&mut s, 5, 5);
+    assert!(!convert_enabled(&s, "Header"));
+    // The whole table back to body rows.
+    s.execute("table.select", &json!({"what": "table"})).unwrap();
+    s.execute("table.convertRowsToBody", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (0, 0));
+    check(&s);
+}
+
+#[test]
+fn convert_rows_keeps_merged_cells_on_one_side() {
+    let (mut s, _, _) = session_with_frame();
+    s.execute("table.insert", &json!({"rows": 4, "cols": 2})).unwrap();
+    s.execute("table.select", &json!({"rows": [0, 1], "cols": [1, 1]})).unwrap();
+    s.execute("table.merge", &json!({})).unwrap();
+    // Row 0 alone would split the merged cell between header and body.
+    select_rows(&mut s, 0, 0);
+    assert!(!convert_enabled(&s, "Header"));
+    select_rows(&mut s, 0, 1);
+    s.execute("table.convertRowsToHeader", &json!({})).unwrap();
+    assert_eq!(header_footer(&mut s), (2, 0));
+    // Likewise back: row 1 alone would leave half of it in the header.
+    select_rows(&mut s, 1, 1);
+    assert!(!convert_enabled(&s, "Body"));
+    check(&s);
+}

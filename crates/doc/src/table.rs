@@ -931,6 +931,47 @@ impl Table {
         }
     }
 
+    /// Header and footer row counts after Table ▸ Convert Rows turns rows `r0..=r1` into `kind`
+    /// rows. Header rows grow from the top and footer rows from the bottom, so the rows must
+    /// touch the table's edge or the rows already converted; back to body, they must touch the
+    /// body. One body row stays, and no merged cell may straddle a moved boundary.
+    pub fn convert_rows_counts(&self, r0: usize, r1: usize, kind: RowKind) -> Result<(usize, usize), String> {
+        let (r0, r1) = (r0.min(r1), r0.max(r1));
+        let n = self.nrows();
+        if r1 >= n {
+            return Err("row out of range".into());
+        }
+        let (h, f) = (self.header_rows(), self.footer_rows());
+        let body_end = n - f;
+        let (nh, nf) = match kind {
+            RowKind::Header if r0 > h => return Err("select rows at the top of the table or right after its header rows".into()),
+            RowKind::Header if r1 >= body_end => return Err("footer rows can't become header rows".into()),
+            RowKind::Header => (h.max(r1 + 1), f),
+            RowKind::Footer if r1 + 1 < body_end => return Err("select rows at the bottom of the table or right before its footer rows".into()),
+            RowKind::Footer if r0 < h => return Err("header rows can't become footer rows".into()),
+            RowKind::Footer => (h, f.max(n - r0)),
+            RowKind::Body => {
+                if (r0 < h && r1 + 1 < h) || (r1 >= body_end && r0 > body_end) {
+                    return Err("select the header or footer rows next to the body".into());
+                }
+                (if r0 < h { r0 } else { h }, if r1 >= body_end { n - 1 - r1 } else { f })
+            }
+        };
+        if (nh, nf) == (h, f) {
+            return Err("the rows already are of that kind".into());
+        }
+        if nh + nf >= n {
+            return Err("a table keeps at least one body row".into());
+        }
+        let owners = self.owners();
+        let nc = self.ncols();
+        let straddled = |b: usize| (0..nc).any(|c| owners.get(b * nc + c).is_some_and(|o| o.0 < b));
+        if (nh != h && straddled(nh)) || (nf != f && straddled(n - nf)) {
+            return Err("unmerge the cells that span header, body and footer rows first".into());
+        }
+        Ok((nh, nf))
+    }
+
     /// Cell texts, rows separated by `\n`, cells by `\t` (Convert Table to Text, search, agents).
     pub fn plain_text(&self) -> String {
         let mut out = String::new();
