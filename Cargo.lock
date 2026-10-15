@@ -1099,6 +1099,7 @@ dependencies = [
  "designcraft-fonts",
  "designcraft-geom",
  "designcraft-images",
+ "designcraft-postscript",
  "hayro-cmap",
  "hayro-interpret",
  "hayro-syntax",
@@ -1108,6 +1109,17 @@ dependencies = [
  "log",
  "thiserror 2.0.21",
  "tiff",
+]
+
+[[package]]
+name = "designcraft-postscript"
+version = "0.8.0"
+dependencies = [
+ "kurbo",
+ "miniz_oxide 0.8.9",
+ "pdf-writer",
+ "skrifa 0.47.0",
+ "weezl",
 ]
 
 [[package]]
@@ -1137,6 +1149,7 @@ dependencies = [
  "designcraft-fonts",
  "designcraft-geom",
  "designcraft-images",
+ "designcraft-postscript",
  "hayro",
  "image",
  "log",
