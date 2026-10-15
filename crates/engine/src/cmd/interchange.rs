@@ -80,6 +80,10 @@ pub fn import_report(bytes: &[u8], dir: Option<&std::path::Path>) -> Result<(Doc
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LINK_PATH_BYTES: usize = 128 * 1024;
 
+/// How many trailing folders of a link are tried beside the opened package.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LINK_SUFFIX_PARTS: usize = 8;
+
 #[cfg(not(target_arch = "wasm32"))]
 fn packaged_link_candidates(link: &str, dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
     // Enough for a maximum-length Windows path even with four-byte UTF-8 characters.
@@ -101,6 +105,14 @@ fn packaged_link_candidates(link: &str, dir: Option<&std::path::Path>) -> Vec<st
             let suffix = &parts[index + 1..];
             if !suffix.is_empty() && suffix.iter().all(safe_part) {
                 candidates.push(dir.join("Links").join(suffix.iter().collect::<std::path::PathBuf>()));
+            }
+        }
+        // A package moved off its author's machine keeps its own subfolders (`/images/logo.png`
+        // beside the .idml as `images/logo.png`): try the link's trailing folders, longest first.
+        let first = parts.len().saturating_sub(MAX_LINK_SUFFIX_PARTS);
+        for start in first..parts.len().saturating_sub(1) {
+            if let Some(suffix) = parts.get(start..).filter(|s| s.iter().all(safe_part)) {
+                candidates.push(dir.join(suffix.iter().collect::<std::path::PathBuf>()));
             }
         }
         if let Some(name) = parts.last().filter(|part| safe_part(part)) {
@@ -204,6 +216,23 @@ mod tests {
         assert_eq!(*asset.data, png, "the packaged graphic must render even when its author-machine path no longer exists");
         let resolved = std::path::absolute(&path).unwrap();
         assert_eq!(asset.link.as_deref(), resolved.to_str(), "remember the resolved link so update and preflight use the packaged file");
+        assert_eq!(super::super::links::status(asset), "ok");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opens_links_from_a_subfolder_beside_the_package() {
+        let dir = std::env::temp_dir().join(format!("dc-idml-subfolder-links-{}", std::process::id()));
+        let path = dir.join("images").join("logo.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The author's absolute `/images/…` does not exist here; `images/` beside the .idml does.
+        let (idml, png) = linked_idml("/images/logo.png", false).unwrap();
+        std::fs::write(&path, &png).unwrap();
+
+        let doc = import(&idml, Some(&dir)).unwrap();
+        let asset = doc.assets.values().next().unwrap();
+        assert_eq!(*asset.data, png);
+        assert_eq!(asset.link.as_deref(), std::path::absolute(&path).unwrap().to_str());
         assert_eq!(super::super::links::status(asset), "ok");
         std::fs::remove_dir_all(dir).unwrap();
     }
