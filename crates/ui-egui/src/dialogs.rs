@@ -424,6 +424,13 @@ fn pdf_export(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     }
 }
 
+/// The selected text frame's width (its own, before rotation).
+fn selected_frame_width(app: &DesignApp) -> Option<f64> {
+    let st = app.session.active()?;
+    let fid = st.selection.items.first().copied().or_else(|| st.selection.text.and_then(|t| t.frame))?;
+    Some(st.doc.item(fid)?.inner_bounds().width())
+}
+
 /// The options of the selected text frame (the first selected item, or the frame of the caret).
 fn selected_frame_options(app: &DesignApp) -> Option<designcraft_doc::TextFrameOptions> {
     let st = app.session.active()?;
@@ -441,8 +448,19 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
     let o = selected_frame_options(app).unwrap_or_default();
     let units = app.session.active().map(|s| s.doc.settings.horizontal_units).unwrap_or(Unit::Picas);
     let fm = |v: f64| json!(format_measure(v, units));
+    // Fixed Number: the width each column gets in the frame (shown, as in InDesign).
+    let inner = selected_frame_width(app).map(|w| w - o.inset[1] - o.inset[3]).unwrap_or(0.0);
+    let n = o.columns.max(1) as f64;
+    let width = match o.columns_kind {
+        designcraft_doc::ColumnsKind::FixedWidth if o.column_width > 0.0 => o.column_width,
+        _ => ((inner - o.gutter * (n - 1.0)) / n).max(0.0),
+    };
+    let kind = |v: Value| v.as_str().unwrap_or_default().to_string();
     let shown = json!({
         "columns": o.columns, "gutter": fm(o.gutter),
+        "columnsKind": kind(serde_json::to_value(o.columns_kind).unwrap_or_default()), "columnWidth": fm(width),
+        "balanceColumns": o.balance_columns, "ignoreWrap": o.ignore_wrap,
+        "firstBaseline": kind(serde_json::to_value(o.first_baseline).unwrap_or_default()), "firstBaselineMin": fm(o.first_baseline_min),
         "insetTop": fm(o.inset[0]), "insetLeft": fm(o.inset[1]), "insetBottom": fm(o.inset[2]), "insetRight": fm(o.inset[3]),
         "verticalJustification": serde_json::to_value(o.vertical_justification).unwrap_or(Value::Null),
         "columnRule": o.column_rule, "columnRuleWeight": format_measure(o.column_rule_weight, Unit::Points), "columnRuleColor": o.column_rule_color,
@@ -454,6 +472,7 @@ fn seed_text_frame_options(app: &DesignApp, d: &mut Dialog) {
             d.fields.entry(k.clone()).or_insert_with(|| v.clone());
         }
     }
+    d.fields.entry("insetLinked".to_string()).or_insert_with(|| json!(o.inset.iter().all(|v| (v - o.inset[0]).abs() < 1e-9)));
     d.fields.insert("_shown".into(), shown);
 }
 
@@ -466,38 +485,113 @@ fn percent(t: f32) -> String {
 fn text_frame_options_dialog(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     let lang = app.ui.language.clone();
     let tr = |s: &'static str| crate::i18n::tr(&lang, s);
-    egui::Grid::new("tfo").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-        crate::rtl::label(ui, tr("Number of columns"));
-        text_field(ui, d, "columns", 80.0);
+    if d.s("section").is_empty() {
+        d.fields.insert("section".into(), json!("general"));
+    }
+    ui.set_min_width(560.0);
+    ui.horizontal_top(|ui| {
+        // A fixed height: the separator would otherwise stretch the dialog to the window.
+        ui.set_min_height(330.0);
+        ui.set_max_height(330.0);
+        section_list(&lang, ui, d, &[("general", "General"), ("baseline", "Baseline Options"), ("rules", "Column Rules")]);
+        ui.separator();
+        ui.vertical(|ui| match d.s("section").as_str() {
+            "baseline" => {
+                crate::rtl::label(ui, egui::RichText::new(tr("First Baseline")).font(semibold(12.0)));
+                egui::Grid::new("tfo_fb").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
+                    crate::rtl::label(ui, tr("Offset:"));
+                    translated_combo(
+                        &lang,
+                        ui,
+                        d,
+                        "firstBaseline",
+                        &[("ascent", "Ascent"), ("capHeight", "Cap Height"), ("leading", "Leading"), ("xHeight", "x Height"), ("fixed", "Fixed")],
+                    );
+                    crate::rtl::label(ui, tr("Min:"));
+                    text_field(ui, d, "firstBaselineMin", 70.0);
+                    ui.end_row();
+                });
+            }
+            "rules" => column_rules(app, ui, d),
+            _ => general(&lang, ui, d),
+        });
+    });
+}
+
+/// Text Frame Options › General: columns, inset spacing, vertical justification, text wrap.
+fn general(lang: &str, ui: &mut egui::Ui, d: &mut Dialog) {
+    let tr = |s: &'static str| crate::i18n::tr(lang, s);
+    crate::rtl::label(ui, egui::RichText::new(tr("Columns")).font(semibold(12.0)));
+    egui::Grid::new("tfo_cols").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
+        crate::rtl::label(ui, tr("Columns:"));
+        translated_combo(lang, ui, d, "columnsKind", &[("fixedNumber", "Fixed Number"), ("fixedWidth", "Fixed Width")]);
         ui.end_row();
-        crate::rtl::label(ui, tr("Gutter"));
-        text_field(ui, d, "gutter", 80.0);
+        crate::rtl::label(ui, tr("Number:"));
+        text_field(ui, d, "columns", 70.0);
+        // Fixed Number: the width follows from the frame; Fixed Width: it's set here.
+        crate::rtl::label(ui, tr("Width:"));
+        ui.add_enabled_ui(d.s("columnsKind") == "fixedWidth", |ui| text_field(ui, d, "columnWidth", 70.0));
+        ui.end_row();
+        crate::rtl::label(ui, tr("Gutter:"));
+        text_field(ui, d, "gutter", 70.0);
         ui.end_row();
     });
+    check(ui, d, "balanceColumns", tr("Balance Columns"));
     ui.add_space(6.0);
-    crate::rtl::label(ui, egui::RichText::new(tr("Inset spacing")).font(semibold(12.0)));
-    egui::Grid::new("tfo_inset").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-        for (label, key) in [("Top", "insetTop"), ("Bottom", "insetBottom"), ("Left", "insetLeft"), ("Right", "insetRight")] {
-            crate::rtl::label(ui, tr(label));
-            text_field(ui, d, key, 80.0);
-            ui.end_row();
-        }
-    });
-    ui.add_space(6.0);
-    egui::Grid::new("tfo_vj").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-        crate::rtl::label(ui, tr("Vertical justification"));
-        let cur = d.s("verticalJustification");
-        egui::ComboBox::from_id_salt("vj").selected_text(crate::rtl::widget(ui, crate::i18n::tr(&lang, &cur))).show_ui(ui, |ui| {
-            for v in ["top", "center", "bottom", "justify"] {
-                if ui.selectable_label(cur == v, crate::rtl::widget(ui, crate::i18n::tr(&lang, v))).clicked() {
-                    d.fields.insert("verticalJustification".into(), json!(v));
+    crate::rtl::label(ui, egui::RichText::new(tr("Inset Spacing")).font(semibold(12.0)));
+    // While linked, a side typed in sets all four ("Make all settings the same").
+    let sides = ["insetTop", "insetLeft", "insetBottom", "insetRight"];
+    let before: Vec<String> = sides.iter().map(|k| d.s(k)).collect();
+    // Two rows, Top | Left and Bottom | Right, the link between the columns (fixed-width
+    // captions; the second column starts where the first row's does).
+    let mut col2_x: Option<f32> = None;
+    for (r, row) in [[("Top:", "insetTop"), ("Left:", "insetLeft")], [("Bottom:", "insetBottom"), ("Right:", "insetRight")]].into_iter().enumerate() {
+        ui.horizontal(|ui| {
+            for (k, (label, key)) in row.into_iter().enumerate() {
+                if k == 1 {
+                    match col2_x {
+                        Some(x) => ui.add_space((x - ui.cursor().min.x).max(0.0)),
+                        None => col2_x = Some(ui.cursor().min.x),
+                    }
+                }
+                let x0 = ui.cursor().min.x;
+                crate::rtl::label(ui, tr(label));
+                ui.add_space(((if k == 0 { 56.0 } else { 44.0 }) - (ui.cursor().min.x - x0)).max(0.0));
+                text_field(ui, d, key, 70.0);
+                if k == 0 && r == 0 {
+                    let linked = d.b("insetLinked");
+                    let tip = tr("Make all settings the same");
+                    if crate::widgets::icon_toggle_sized(ui, if linked { "link" } else { "link-broken" }, linked, tip, egui::vec2(22.0, 21.0))
+                        .clicked()
+                    {
+                        d.fields.insert("insetLinked".into(), json!(!linked));
+                    }
                 }
             }
         });
+    }
+    if d.b("insetLinked")
+        && let Some(k) = sides.iter().zip(&before).find(|(k, b)| d.s(k) != **b).map(|(k, _)| *k)
+    {
+        let v = d.fields.get(k).cloned().unwrap_or_default();
+        for side in sides {
+            d.fields.insert(side.into(), v.clone());
+        }
+    }
+    ui.add_space(6.0);
+    crate::rtl::label(ui, egui::RichText::new(tr("Vertical Justification")).font(semibold(12.0)));
+    egui::Grid::new("tfo_vj").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        crate::rtl::label(ui, tr("Align:"));
+        translated_combo(lang, ui, d, "verticalJustification", &[("top", "Top"), ("center", "Center"), ("bottom", "Bottom"), ("justify", "Justify")]);
         ui.end_row();
     });
     ui.add_space(6.0);
-    crate::rtl::label(ui, egui::RichText::new(tr("Column Rules")).font(semibold(12.0)));
+    check(ui, d, "ignoreWrap", tr("Ignore Text Wrap"));
+}
+
+/// Text Frame Options › Column Rules.
+fn column_rules(app: &DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
+    let tr = |s: &'static str| crate::i18n::tr(&app.ui.language, s);
     check(ui, d, "columnRule", tr("Insert Column Rule"));
     let swatches: Vec<String> = app
         .session
@@ -568,6 +662,23 @@ fn confirm_text_frame_options(app: &mut DesignApp, d: &mut Dialog) -> Result<Val
     }
     if edited(d, "verticalJustification") {
         p.insert("verticalJustification".into(), json!(d.s("verticalJustification")));
+    }
+    for key in ["columnsKind", "firstBaseline"] {
+        if edited(d, key) {
+            p.insert(key.into(), json!(d.s(key)));
+        }
+    }
+    // The width counts only for Fixed Width columns (Fixed Number shows it).
+    if d.s("columnsKind") == "fixedWidth" && (edited(d, "columnWidth") || edited(d, "columnsKind")) {
+        p.insert("columnWidth".into(), json!(d.m("columnWidth").ok_or_else(|| bad("the column width is not a measure"))?));
+    }
+    if edited(d, "firstBaselineMin") {
+        p.insert("firstBaselineMin".into(), json!(d.m("firstBaselineMin").ok_or_else(|| bad("the first baseline minimum is not a measure"))?));
+    }
+    for key in ["balanceColumns", "ignoreWrap"] {
+        if edited(d, key) {
+            p.insert(key.into(), json!(d.b(key)));
+        }
     }
     if edited(d, "columnRule") {
         p.insert("columnRule".into(), json!(d.b("columnRule")));
@@ -6159,6 +6270,46 @@ mod tests {
         let dialog = app.ui.dialog.as_ref().unwrap();
         assert_eq!(dialog.fields["width"], 0);
         assert!(dialog.fields["status"].as_str().unwrap().contains("page size out of range"));
+    }
+
+    #[test]
+    fn text_frame_options_set_columns_baseline_and_wrap_as_indesign_does() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        // A 300 pt frame, 2 columns, 12 pt gutter (picas in the dialog).
+        let r = app.run("frame.create", json!({"rect": [36, 36, 336, 236], "content": "text", "text": "Hello"})).unwrap();
+        let id = designcraft_doc::ItemId(r["id"].as_u64().unwrap());
+        app.run("object.textFrameOptions", json!({"ids": [id.0], "columns": 2, "gutter": 12})).unwrap();
+        let opts = |app: &DesignApp| app.session.doc().unwrap().doc.item(id).unwrap().text_frame().unwrap().options.clone();
+        let mut d = Dialog::new("textFrameOptions", json!({}));
+        seed_text_frame_options(&app, &mut d);
+        // Fixed Number shows each column's width: (300 - 12) / 2 = 144 pt.
+        assert_eq!((d.s("columnsKind"), d.s("columnWidth"), d.s("firstBaseline")), ("fixedNumber".into(), "12p0".into(), "ascent".into()));
+        for (k, v) in [
+            ("columnsKind", json!("fixedWidth")),
+            ("columnWidth", json!("10p0")),
+            ("firstBaseline", json!("capHeight")),
+            ("firstBaselineMin", json!("0p6")),
+            ("balanceColumns", json!(true)),
+            ("ignoreWrap", json!(true)),
+        ] {
+            d.fields.insert(k.into(), v);
+        }
+        app.ui.dialog = Some(d);
+        confirm(&mut app).unwrap();
+        let o = opts(&app);
+        assert_eq!(o.columns_kind, designcraft_doc::ColumnsKind::FixedWidth);
+        assert_eq!((o.column_width, o.first_baseline_min, o.columns), (120.0, 6.0, 2));
+        assert_eq!(o.first_baseline, designcraft_doc::FirstBaseline::CapHeight);
+        assert!(o.balance_columns && o.ignore_wrap);
+        // Fixed Number again: the width isn't sent.
+        let mut d = Dialog::new("textFrameOptions", json!({}));
+        seed_text_frame_options(&app, &mut d);
+        assert_eq!(d.s("columnWidth"), "10p0", "Fixed Width shows its own width");
+        d.fields.insert("columnsKind".into(), json!("fixedNumber"));
+        app.ui.dialog = Some(d);
+        confirm(&mut app).unwrap();
+        assert_eq!((opts(&app).columns_kind, opts(&app).column_width), (designcraft_doc::ColumnsKind::FixedNumber, 120.0));
     }
 
     #[test]

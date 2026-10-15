@@ -561,7 +561,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?: ascent|capHeight|leading|xHeight|emboxHeight|fixed, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, columnsKind?: fixedNumber|fixedWidth|flexibleWidth, columnWidth? (pt, Fixed Width), firstBaseline?: ascent|capHeight|leading|xHeight|emboxHeight|fixed, firstBaselineMin? (pt), autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -1693,6 +1693,8 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
     let rule_offset = ranged("columnRuleOffset", -1440.0, 1440.0, "a number of points")?;
     let rule_top = ranged("columnRuleTopInset", -1440.0, 1440.0, "a number of points")?;
     let rule_bottom = ranged("columnRuleBottomInset", -1440.0, 1440.0, "a number of points")?;
+    let column_width = ranged("columnWidth", 0.0, 15552.0, "a number of points")?;
+    let first_baseline_min = ranged("firstBaselineMin", 0.0, 15552.0, "a number of points")?;
     let rule_color = match p.get("columnRuleColor") {
         None | Some(Value::Null) => None,
         Some(Value::String(c)) if st.doc.swatch(c).is_some() => Some(c.clone()),
@@ -1735,6 +1737,12 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(v) = p.get("ignoreWrap").and_then(Value::as_bool) {
                 o.ignore_wrap = v;
             }
+            if let Some(v) = column_width {
+                o.column_width = v;
+            }
+            if let Some(v) = first_baseline_min {
+                o.first_baseline_min = v;
+            }
             if let Some(v) = p.get("balanceColumns").and_then(Value::as_bool) {
                 o.balance_columns = v;
             }
@@ -1758,6 +1766,23 @@ fn text_frame_options(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let Some(v) = rule_bottom {
                 o.column_rule_bottom_inset = v;
+            }
+            // Fixed Width columns set the frame's width: n columns, the gutters between them and
+            // the left and right insets.
+            let n = f64::from(o.columns.max(1));
+            let width = n * o.column_width + (n - 1.0) * o.gutter + o.inset[1] + o.inset[3];
+            let fixed_width = o.columns_kind == designcraft_doc::ColumnsKind::FixedWidth && o.column_width > 0.0;
+            if fixed_width
+                && ["columnsKind", "columnWidth", "columns", "gutter", "inset"].iter().any(|k| p.get(*k).is_some())
+                && let Some(it) = d.item_mut(*id)
+            {
+                let r = it.inner_bounds();
+                if r.width() > 1e-9 {
+                    let xf = designcraft_geom::Affine::translate((r.x0, 0.0))
+                        * designcraft_geom::Affine::scale_non_uniform(width / r.width(), 1.0)
+                        * designcraft_geom::Affine::translate((-r.x0, 0.0));
+                    it.path.transform(xf);
+                }
             }
         }
         // Story direction belongs to the story: every frame of the thread turns.
@@ -3458,6 +3483,29 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fixed_width_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_width_columns_set_the_frame_width() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [36, 36, 300, 300], "content": "text", "text": "Hello"})).unwrap();
+        let id = ItemId(r["id"].as_u64().unwrap());
+        let p = json!({"ids": [id.0], "columns": 2, "gutter": 12, "inset": 0, "columnsKind": "fixedWidth", "columnWidth": 120});
+        s.execute("object.textFrameOptions", &p).unwrap();
+        let b = s.doc().unwrap().doc.item(id).unwrap().inner_bounds();
+        assert!((b.width() - (2.0 * 120.0 + 12.0)).abs() < 1e-6, "{b:?}");
+        assert!((b.x0 - 36.0).abs() < 1e-6 && (b.height() - 264.0).abs() < 1e-6, "{b:?}");
+        // Widths beyond the largest page are refused and change nothing.
+        for (k, v) in [("columnWidth", 1e9), ("columnWidth", -1.0), ("firstBaselineMin", 1e9)] {
+            assert!(s.execute("object.textFrameOptions", &json!({"ids": [id.0], k: v})).is_err(), "{k} {v}");
+        }
+        assert!((s.doc().unwrap().doc.item(id).unwrap().inner_bounds().width() - 252.0).abs() < 1e-6);
     }
 }
 
