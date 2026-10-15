@@ -2,6 +2,7 @@
 
 use super::browser_policy::{has_query_flag, mime_for};
 use designcraft_engine::Session;
+use designcraft_ui_egui::cloud;
 use designcraft_ui_egui::{DesignApp, ImportRequest, ImportedFile, Inbox, Services};
 use wasm_bindgen::JsCast as _;
 
@@ -60,6 +61,11 @@ pub fn start() {
                     if has_query_flag(&query(), "sample") {
                         let _ = app.run("file.newSample", serde_json::json!({}));
                     }
+                    app.cloud.connect(crate::cloud::Service::new(cc.egui_ctx.clone()));
+                    if let Some(share) = collabcraft_share::CollabCraft::from_env() {
+                        app.share.connect(share);
+                    }
+                    cloud::start(&mut app);
                     Ok(Box::new(WebShell { app, inbox }))
                 }),
             )

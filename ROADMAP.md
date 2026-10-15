@@ -132,6 +132,15 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-14 (cloud)** · Open and Save reach cloud storage through CollabCraft. The start screen
+  grows a Cloud section listing your own layouts and what other people shared. The same service is
+  offered beside This Computer in Save As. The application bar gains an account menu, a Share split
+  button and a presence row. The pages, the menus and every string a user reads are craft-ui's. All
+  twelve Craft apps therefore offer the same ones. DesignCraft answers three things of its own.
+  What a layout is, how bytes become one and back, and where the worker runs. A save carries the
+  etag the layout was read at as its condition. A stored copy somebody else has moved on therefore
+  refuses it. No provider credential, provider URL or provider protocol lives in this repository.
+  No readiness percentage change.
 - **2026-10-13** · Object › Fitting has InDesign's shortcuts: Fill Frame Proportionally ⌘⌥⇧C, Fit Content Proportionally ⌘⌥⇧E, Fit Frame to Content ⌘⌥C, Fit Content to Frame ⌘⌥E, Center Content ⌘⇧E. No readiness percentage change.
 - **2026-10-13** · Gradients between process colours blend as inks, as InDesign shows them: magenta to cyan passes through C 50 M 50 (a light lilac) on screen instead of the darker RGB mix, and a midpoint between CMYK or grey stops no longer turns the PDF shading RGB. No readiness percentage change.
 - **2026-10-14** · The Swatches panel has InDesign's header: a Fill/Stroke proxy, Formatting Affects Container/Text and the Tint of the colour in front (a tint alone keeps each object's own swatch). Clicking a swatch applies it to the fill or stroke in front (of the text, when formatting affects text), and the bottom row has New Color Group, New Swatch and Delete Swatch. No readiness percentage change.
