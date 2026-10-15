@@ -587,6 +587,30 @@ pub fn item_hit(it: &Item, p: Point, tol: f64) -> bool {
     designcraft_geom::hit::stroke_contains(&bp, it.stroke.weight.max(1.0), tol + reach, inner)
 }
 
+/// The frontmost descendant of `it` under `p` that `want` accepts, looking inside nested groups;
+/// `it` itself when nothing inside it matches and `want` accepts it. `p` is in the space `it`
+/// sits in, as [`item_hit`] takes it.
+///
+/// Children are tried front to back and a hidden one is skipped, so of several that `want`
+/// accepts the answer is the one in front. Objects `want` rejects do not hide the ones behind
+/// them: a text frame under a rectangle in the same group is still found.
+pub fn hit_descendant(it: &Item, p: Point, tol: f64, want: &dyn Fn(&Item) -> bool) -> Option<ItemId> {
+    if !item_hit(it, p, tol) {
+        return None;
+    }
+    let inner = it.xf.inverse() * p;
+    let children: Vec<&Arc<Item>> = it.shown_children().collect();
+    for c in children.into_iter().rev() {
+        if c.hidden {
+            continue;
+        }
+        if let Some(id) = hit_descendant(c, inner, tol, want) {
+            return Some(id);
+        }
+    }
+    want(it).then_some(it.id)
+}
+
 /// How far from its path type on a path is hit (points): about a cap height of 12–18 pt type,
 /// either side (the type may sit on or under the path).
 const PATH_TYPE_REACH: f64 = 12.0;

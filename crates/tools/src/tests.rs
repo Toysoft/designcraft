@@ -1252,7 +1252,8 @@ fn eyedropper_ignores_inactive_states_of_a_multi_state_object() {
     // Children [vector, raster] with the raster on top: it samples only while it is the active state.
     for (active, samples) in [(1, true), (0, false)] {
         let mut group = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(area));
-        group.content = Content::Group { items: vec![std::sync::Arc::new(vector.clone()), std::sync::Arc::new(raster.clone())] };
+        group.content =
+            designcraft_doc::item::Content::Group { items: vec![std::sync::Arc::new(vector.clone()), std::sync::Arc::new(raster.clone())] };
         group.states = vec!["a".into(), "b".into()];
         group.active_state = active;
         let mut d2 = d.clone();
@@ -1313,4 +1314,53 @@ fn anchor_tools_show_pen_state_cursors() {
     assert_eq!(cursor("addAnchor"), Cursor::PenAdd);
     assert_eq!(cursor("deleteAnchor"), Cursor::PenDelete);
     assert_eq!(cursor("convertDirection"), Cursor::PenConvert);
+}
+
+#[test]
+fn loaded_text_cursor_threads_into_a_frame_inside_a_group() {
+    // `hit` stops at the group, so the loaded cursor showed NotAllowed over a text frame inside
+    // one and a click did nothing. InDesign threads into it (gaps 27).
+    let mut td = thread_doc();
+    let lid = td.d.default_layer();
+    let rect = Rect::new(600.0, 100.0, 700.0, 200.0);
+    // The frame, then the same frame moved inside a group. Both transforms are the identity, so
+    // the child's coordinates stay the spread's.
+    let (inner, _) = td.d.add_text_frame(SpreadRef::Doc(0), rect, lid, "", ParaFormat::default()).unwrap();
+    let frame_item = td.d.item(inner).cloned().unwrap();
+    td.d.remove_item(inner).unwrap();
+    let gid = ItemId(td.d.alloc());
+    let mut group = Item::new(gid, lid, Shape::Group, shapes::rectangle(rect));
+    group.content = designcraft_doc::item::Content::Group { items: vec![std::sync::Arc::new(frame_item)] };
+    td.d.insert_item(SpreadRef::Doc(0), group, None).unwrap();
+    td.l = CanvasLayout::new(&td.d, false);
+
+    let mut t = create("selection");
+    let cx = td.cx();
+    click(&mut t, &cx, td.port(td.a, true), Mods::default());
+    let p = td.at(650.0, 150.0);
+
+    // Selection still reaches the group, which is what a plain click there should pick.
+    assert_eq!(cx.hit(p).map(|(_, i)| i), Some(gid));
+    // The loaded text cursor reaches the frame inside it.
+    assert_eq!(cx.hit_text_frame(p).map(|(_, i)| i), Some(inner), "the frame in the group");
+    assert_eq!(t.cursor(&cx, p, Mods::default()), Cursor::ThreadLink);
+    // And the click threads to that frame, not to the group.
+    assert_eq!(click(&mut t, &cx, p, Mods::default()), thread_exec(serde_json::json!({"from": td.a.0, "to": inner.0})));
+
+    // A group with nothing threadable in it still says no.
+    let mut td2 = thread_doc();
+    let r2 = Rect::new(600.0, 300.0, 700.0, 400.0);
+    let plain = ItemId(td2.d.alloc());
+    let child = Item::new(plain, lid, Shape::Rectangle, shapes::rectangle(r2));
+    let g2 = ItemId(td2.d.alloc());
+    let mut group2 = Item::new(g2, lid, Shape::Group, shapes::rectangle(r2));
+    group2.content = designcraft_doc::item::Content::Group { items: vec![std::sync::Arc::new(child)] };
+    td2.d.insert_item(SpreadRef::Doc(0), group2, None).unwrap();
+    td2.l = CanvasLayout::new(&td2.d, false);
+    let cx2 = td2.cx();
+    let mut t2 = create("selection");
+    click(&mut t2, &cx2, td2.port(td2.a, true), Mods::default());
+    let q = td2.at(650.0, 350.0);
+    assert_eq!(cx2.hit_text_frame(q).map(|(_, i)| i), None, "no text frame in that group");
+    assert_eq!(t2.cursor(&cx2, q, Mods::default()), Cursor::NotAllowed);
 }

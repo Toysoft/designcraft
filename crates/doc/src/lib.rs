@@ -46,7 +46,7 @@ pub use datamerge::{
 };
 pub use designcraft_color as color;
 pub use designcraft_geom as geom;
-pub use edit::{ItemLoc, ItemPath, SpreadRef, item_hit as edit_hit};
+pub use edit::{ItemLoc, ItemPath, SpreadRef, hit_descendant, item_hit as edit_hit};
 pub use endnotes::{ENDNOTE_REF, EditorialNote, EndnoteOptions, NOTE_MARK};
 pub use flex::{FlexAlign, FlexDirection, FlexJustify, FlexLayout, FlexSize};
 pub use ids::*;
