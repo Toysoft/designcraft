@@ -325,6 +325,9 @@ pub enum Overlay {
         b: Point,
         label: String,
     },
+    /// The whole content of this frame drawn faintly, the part outside the frame included (while
+    /// the content moves inside it).
+    ContentGhost(ItemId),
     /// A page selected with the Page tool (canvas rect): its outline and eight handles.
     PageHandles(Rect),
     /// A small tag whose bottom-left is at `p` (the Page tool's liquid page rule; English, the UI
