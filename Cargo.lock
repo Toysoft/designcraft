@@ -797,6 +797,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-pdf"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=c3487320b2d1de657b860b3c8abb44e1f2b32bd8#c3487320b2d1de657b860b3c8abb44e1f2b32bd8"
+dependencies = [
+ "krilla",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-print"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=d991bf6792f8ade99c51358bf3c1d902c8cd96b5#d991bf6792f8ade99c51358bf3c1d902c8cd96b5"
@@ -977,6 +986,7 @@ dependencies = [
  "designcraft-idml",
  "designcraft-images",
  "designcraft-pdf",
+ "designcraft-pptx",
  "designcraft-render",
  "designcraft-textimport",
  "designcraft-tools",
@@ -985,7 +995,7 @@ dependencies = [
  "hayro-syntax",
  "kurbo",
  "log",
- "quick-xml 0.38.4",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
@@ -1049,7 +1059,7 @@ dependencies = [
  "designcraft-compose",
  "designcraft-doc",
  "designcraft-geom",
- "quick-xml 0.38.4",
+ "quick-xml",
  "thiserror 2.0.21",
  "zip",
 ]
@@ -1082,6 +1092,7 @@ dependencies = [
 name = "designcraft-pdf"
 version = "0.8.0"
 dependencies = [
+ "craft-pdf",
  "designcraft-color",
  "designcraft-compose",
  "designcraft-doc",
@@ -1092,12 +1103,28 @@ dependencies = [
  "hayro-interpret",
  "hayro-syntax",
  "image",
- "krilla",
  "krilla-svg",
  "kurbo",
  "log",
  "thiserror 2.0.21",
  "tiff",
+]
+
+[[package]]
+name = "designcraft-pptx"
+version = "0.8.0"
+dependencies = [
+ "designcraft-color",
+ "designcraft-compose",
+ "designcraft-doc",
+ "designcraft-fonts",
+ "designcraft-geom",
+ "designcraft-images",
+ "image",
+ "quick-xml",
+ "skrifa 0.47.0",
+ "thiserror 2.0.21",
+ "zip",
 ]
 
 [[package]]
@@ -1123,7 +1150,7 @@ name = "designcraft-textimport"
 version = "0.8.0"
 dependencies = [
  "designcraft-doc",
- "quick-xml 0.38.4",
+ "quick-xml",
  "zip",
 ]
 
@@ -2438,8 +2465,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27da593198b20eeba65caeb73c2bbeec3e53ab08fa549898312ce81c4fce5e33"
+source = "git+https://github.com/storytold/craft-libs?rev=c3487320b2d1de657b860b3c8abb44e1f2b32bd8#c3487320b2d1de657b860b3c8abb44e1f2b32bd8"
 dependencies = [
  "base64",
  "bumpalo",
@@ -3505,15 +3531,6 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
-
-[[package]]
-name = "quick-xml"
-version = "0.38.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "quick-xml"
@@ -5001,7 +5018,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.41.0",
+ "quick-xml",
  "quote",
 ]
 
