@@ -16,6 +16,7 @@ pub mod dock;
 pub mod i18n;
 pub mod icons;
 pub mod menus;
+mod modal_drag;
 mod panel_docking;
 pub mod panels;
 mod prefs;
@@ -53,6 +54,7 @@ pub struct ImportedFile {
 }
 pub type OpenAsyncFn = Box<dyn FnMut(ImportRequest)>;
 pub type DownloadFn = Box<dyn FnMut(&str, &[u8])>;
+pub type ClipboardFn = Box<dyn FnMut() -> Option<String>>;
 /// Files delivered asynchronously with their original operation and document identity.
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<ImportedFile>>>;
 
@@ -73,6 +75,9 @@ pub struct Services {
     pub download: Option<DownloadFn>,
     /// Files delivered asynchronously, drained every frame with their captured request context.
     pub inbox: Option<Inbox>,
+    /// The system clipboard's text, for Paste chosen from a menu (egui only delivers it with the
+    /// paste keys, which a native menu bar takes first).
+    pub clipboard_text: Option<ClipboardFn>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +109,9 @@ pub struct SavedWorkspace {
     pub docking: Option<craft_ui::docking::Layout<String>>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub docking_hidden: std::collections::BTreeMap<String, craft_ui::docking::Location<String>>,
+    /// The workspace's own icon column (see [`UiState::icon_groups`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_groups: Option<Vec<Vec<String>>>,
 }
 
 /// A missing on-by-default bool stays on. `bool::default` is false.
@@ -210,7 +218,8 @@ pub struct UiState {
     pub display_quality: designcraft_render::DisplayQuality,
     /// Preferences › Interface › UI scaling (1 = 100%).
     pub ui_scale: f32,
-    /// Preferences › Appearance of Black: 100% K on screen as rich black.
+    /// Preferences › Appearance of Black: 100% K on screen as rich black (InDesign's default,
+    /// Display All Blacks as Rich Black; off: accurately, as dark grey).
     pub rich_black: bool,
     /// View › Overprint Preview.
     pub overprint_preview: bool,
@@ -239,6 +248,10 @@ pub struct UiState {
     #[serde(skip)]
     pub docking_opened: Option<String>,
     pub dock_expanded: bool,
+    /// A workspace's iconic panel groups (Essentials Classic), shown with their names in the icon
+    /// column instead of every panel; `None` is the full icon column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_groups: Option<Vec<Vec<String>>>,
     pub units: Unit,
     pub workspace: String,
     /// Window › Workspace › New Workspace: saved panel arrangements.
@@ -264,6 +277,9 @@ pub struct UiState {
     pub smart_spacing: bool,
     #[serde(default = "default_zone")]
     pub snap_zone: f64,
+    /// Tools panel: Formatting Affects Text (J): with text frames selected, colour edits go to
+    /// their text instead of the frames.
+    pub formatting_affects_text: bool,
     /// Window > Contextual Task Bar.
     pub task_bar: bool,
     /// Where the Contextual Task Bar is pinned: its top-left, in points from the canvas's top-left
@@ -287,6 +303,12 @@ pub struct UiState {
     pub palette: Option<String>,
     #[serde(skip)]
     pub flyout: Option<usize>,
+    /// The colour and gradient swatches applied last: what Apply Color (,) and Apply Gradient (.)
+    /// apply again.
+    #[serde(skip)]
+    pub last_color: Option<String>,
+    #[serde(skip)]
+    pub last_gradient: Option<String>,
     /// Fill/Stroke proxy (Tools and Color panels): the stroke is in front, so Apply None and the
     /// Color panel act on it (X toggles).
     #[serde(skip)]
@@ -327,7 +349,7 @@ impl Default for UiState {
             ink_limit: None,
             display_quality: designcraft_render::DisplayQuality::High,
             ui_scale: 1.0,
-            rich_black: false,
+            rich_black: true,
             overprint_preview: false,
             shortcuts: Default::default(),
             control_bar: false,
@@ -341,6 +363,7 @@ impl Default for UiState {
             docking_raise: None,
             docking_opened: None,
             dock_expanded: true,
+            icon_groups: None,
             units: Unit::Picas,
             workspace: "Essentials".into(),
             custom_workspaces: Vec::new(),
@@ -356,6 +379,7 @@ impl Default for UiState {
             smart_dimensions: true,
             smart_spacing: true,
             snap_zone: 4.0,
+            formatting_affects_text: false,
             task_bar: true,
             task_bar_pin: None,
             task_bar_at: None,
@@ -366,6 +390,8 @@ impl Default for UiState {
             dialog: None,
             palette: None,
             flyout: None,
+            last_color: None,
+            last_gradient: None,
             stroke_front: false,
         }
     }
@@ -410,6 +436,8 @@ impl Default for View {
 pub struct Shown {
     /// (doc uid, doc pointer, revision, preview).
     pub doc: (u64, u64, u64, bool),
+    /// Parent and document spreads have different canvas placement and content.
+    pub editing_parents: bool,
     /// Canvas point at the texture's top-left, zoom, and texture size in screen points.
     pub origin: Point,
     pub zoom: f64,
@@ -496,6 +524,10 @@ pub struct DesignApp {
     pub color_applied: bool,
     pub perf: Perf,
     pub synthetic: Vec<egui::Event>,
+    /// Control input stays separate from native-menu input until its frame is processed.
+    pub(crate) control_synthetic: Vec<egui::Event>,
+    control_input_frame: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    clipboard_guard_installed: bool,
     /// Story open in the Story Editor.
     pub story_editor: Option<designcraft_doc::StoryId>,
     control_rx: Option<Receiver<ControlRequest>>,
@@ -505,6 +537,9 @@ pub struct DesignApp {
     styled: bool,
     /// The interface language the UI fonts were installed for (it orders the CJK fallbacks).
     fonts_lang: String,
+    /// The installed CJK faces are among the UI fonts (false while the system fonts are still
+    /// being cataloged: the fonts are installed again when they are).
+    fonts_system: bool,
     pub restyle: bool,
     fonts_ready: bool,
     pub integrated_titlebar: bool,
@@ -515,6 +550,15 @@ pub struct DesignApp {
     last_time: f64,
     /// When recovery data was last written (seconds, egui time).
     pub last_recovery: f64,
+    /// The egui context (set by the first frame): copied text goes to the system clipboard through it.
+    egui_ctx: Option<egui::Context>,
+    /// A control-channel request is being handled: commands it runs never read or write the
+    /// user's system clipboard (a control client must not see or replace it).
+    pub(crate) in_control: bool,
+    /// The system clipboard's text that stands for the last object copy: what that copy put there
+    /// (no native menu: without it the paste keys produce no paste event), or what it held then
+    /// (native menu). It is never pasted as text: Paste with it pastes the copied objects.
+    object_clip_text: Option<String>,
     /// Quit was chosen: close the window on the next frame, as its close button does.
     quit_requested: bool,
     /// Close the window without asking about unsaved changes (the control channel's `app.quit`).
@@ -550,6 +594,9 @@ impl DesignApp {
             color_applied: false,
             perf: Perf::default(),
             synthetic: vec![],
+            control_synthetic: vec![],
+            control_input_frame: Default::default(),
+            clipboard_guard_installed: false,
             story_editor: None,
             control_rx: None,
             pending_shots: vec![],
@@ -557,6 +604,7 @@ impl DesignApp {
             shot_token: 0,
             styled: false,
             fonts_lang: String::new(),
+            fonts_system: false,
             restyle: false,
             fonts_ready: false,
             integrated_titlebar: false,
@@ -564,6 +612,9 @@ impl DesignApp {
             native_shortcuts: Default::default(),
             last_time: 0.0,
             last_recovery: 0.0,
+            egui_ctx: None,
+            in_control: false,
+            object_clip_text: None,
             quit_requested: false,
             quit_without_asking: false,
             quitting: None,
@@ -598,7 +649,12 @@ impl DesignApp {
         self.pane = pane;
     }
     pub fn view_info(&self) -> ViewInfo {
-        ViewInfo { zoom: self.view().map(|v| v.zoom).unwrap_or(1.0), snap: self.ui.snap_view(), unit: self.ui.units }
+        ViewInfo {
+            zoom: self.view().map(|v| v.zoom).unwrap_or(1.0),
+            snap: self.ui.snap_view(),
+            unit: self.ui.units,
+            stroke_in_front: self.ui.stroke_front,
+        }
     }
 
     pub fn status(&mut self, s: impl Into<String>) {
@@ -610,18 +666,107 @@ impl DesignApp {
         if let Some(r) = menus::run_ui(self, id, &params) {
             return r;
         }
+        // Only user-initiated runs touch the system clipboard, never the control channel's.
+        let system_clipboard = !self.in_control && !self.control_input_frame.load(std::sync::atomic::Ordering::Relaxed);
+        let params = if system_clipboard { self.with_system_clipboard(id, params) } else { params };
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
         self.after_engine();
-        if let Err(e) = &r {
-            self.status(e.clone());
+        match &r {
+            Err(e) => self.status(e.clone()),
+            // Copied text goes to the system clipboard too, whichever way Copy was chosen.
+            Ok(v) if system_clipboard && matches!(id, "edit.copy" | "edit.cut") => {
+                let text = match v.get("text").and_then(Value::as_str) {
+                    Some(t) => {
+                        self.object_clip_text = None;
+                        Some(t.to_string())
+                    }
+                    None if !self.native_menu => {
+                        self.object_clip_text = Some(self.copied_objects_text());
+                        self.object_clip_text.clone()
+                    }
+                    None => {
+                        self.object_clip_text = self.services.clipboard_text.as_mut().and_then(|f| f());
+                        None
+                    }
+                };
+                if let (Some(t), Some(ctx)) = (text, &self.egui_ctx) {
+                    ctx.copy_text(t);
+                    ctx.request_repaint();
+                }
+            }
+            Ok(_) => {}
         }
         r
+    }
+
+    /// Paste without the clipboard's text (a menu, not the paste keys): read it here. With no
+    /// insertion point, text that doesn't stand for copied objects becomes a new text frame
+    /// centred in the view.
+    fn with_system_clipboard(&mut self, id: &str, mut params: Value) -> Value {
+        let typing = self.session.active().is_some_and(|d| d.selection.text.is_some());
+        if !matches!(id, "edit.paste" | "edit.pasteWithoutFormatting") || !(typing || id == "edit.paste") {
+            return params;
+        }
+        if params.get("text").is_none()
+            && let Some(text) = self.services.clipboard_text.as_mut().and_then(|f| f())
+            && let Some(o) = params.as_object_mut()
+        {
+            o.insert("text".into(), Value::String(text));
+        }
+        // Still what an object copy put there: paste those objects, not the placeholder text.
+        let norm = |t: &str| t.replace("\r\n", "\n");
+        if let Some(copied) = &self.object_clip_text
+            && params.get("text").and_then(Value::as_str).is_some_and(|t| norm(t) == norm(copied))
+            && let Some(o) = params.as_object_mut()
+        {
+            o.remove("text");
+        }
+        if !typing
+            && params.get("text").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+            && let Some((spread, at)) = canvas::view_centre(self)
+            && let Ok(spread) = serde_json::to_value(spread)
+            && let Some(o) = params.as_object_mut()
+        {
+            o.entry("spread").or_insert(spread);
+            o.entry("at").or_insert(json!([at.x, at.y]));
+        }
+        params
+    }
+
+    /// Plain text for the system clipboard after copying objects: the copied text frames' stories,
+    /// or U+FFFC (object replacement character) when none has text.
+    fn copied_objects_text(&self) -> String {
+        let mut stories = Vec::new();
+        if let Some(clip) = &self.session.clipboard
+            && let Some(sp) = clip.spreads.first()
+        {
+            for it in &sp.items {
+                it.walk(&mut |i| {
+                    if let Some(tf) = i.text_frame()
+                        && !stories.contains(&tf.story)
+                    {
+                        stories.push(tf.story);
+                    }
+                });
+            }
+        }
+        let text = stories
+            .iter()
+            .filter_map(|id| self.session.clipboard.as_ref()?.story(*id))
+            .map(|st| {
+                st.text.chars().filter(|c| !('\u{E000}'..='\u{E1FF}').contains(c)).map(|c| if c == '\u{2028}' { '\n' } else { c }).collect::<String>()
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.is_empty() { '\u{FFFC}'.to_string() } else { text }
     }
 
     /// Handle requests produced by tools/commands (dialogs, view changes, file pickers).
     pub fn after_engine(&mut self) {
         let reqs = std::mem::take(&mut self.session.ui_requests);
         for r in reqs {
+            let was_find = self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange");
             match r {
                 UiRequest::Dialog { id, params } => self.ui.dialog = Some(dialogs::Dialog::new(&id, params)),
                 UiRequest::View { params } => canvas::apply_view_request(self, &params),
@@ -629,6 +774,10 @@ impl DesignApp {
                     let _ = params;
                     let _ = self.pick_and_open(&purpose);
                 }
+            }
+            // Release only when the request actually replaces Find, including a native PDF picker.
+            if was_find && !self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange") {
+                self.session.reset_find_scope();
             }
         }
         // New documents get a fitted view.
@@ -642,7 +791,6 @@ impl DesignApp {
     /// command right away; asynchronous ones (web) deliver the file through the inbox.
     pub fn pick_and_open(&mut self, purpose: &str) -> Result<Value, String> {
         let target = self.session.active().map(|d| d.uid);
-        let cmd = if purpose == "place" { "file.place" } else { "file.open" };
         if let Some(pick) = self.services.pick_open.as_mut() {
             return match pick(purpose) {
                 // Image Import Options: a multi-page PDF asks which page.
@@ -654,10 +802,11 @@ impl DesignApp {
                             Some(dialogs::Dialog::new("pdfImport", json!({"path": path, "page": "1", "pages": pages, "target": target})));
                         Ok(Value::Null)
                     } else {
-                        self.open_file(cmd, json!({"path": path}))
+                        self.place_file(json!({"path": path}))
                     }
                 }
-                Some(path) => self.open_file(cmd, json!({"path": path})),
+                Some(path) if purpose == "place" => self.place_file(json!({"path": path})),
+                Some(path) => self.open_file("file.open", json!({"path": path})),
                 None => Ok(Value::Null),
             };
         }
@@ -689,10 +838,8 @@ impl DesignApp {
     pub(crate) fn confirm_pdf_import(&mut self, page: u64, crop: String) -> Result<Value, String> {
         let file = self.pending_pdf.take().ok_or("PDF import cancelled: no pending file")?;
         self.activate_import_target(&file.request)?;
-        self.open_file(
-            "file.place",
-            json!({"name": file.name, "base64": designcraft_engine::cmd::base64_encode(&file.bytes), "pdfPage": page, "pdfCrop": crop}),
-        )
+        let params = json!({"name": file.name, "base64": designcraft_engine::cmd::base64_encode(&file.bytes), "pdfPage": page, "pdfCrop": crop});
+        if file.request.purpose == "place" { self.place_file(params) } else { self.open_file("file.place", params) }
     }
 
     /// A single unresolved PDF owns its bytes. Later deliveries cancel explicitly rather than
@@ -746,6 +893,8 @@ impl DesignApp {
         let b64 = designcraft_engine::cmd::base64_encode(&file.bytes);
         if lower.ends_with(".ase") || file.request.purpose == "swatches" {
             self.run("swatch.load", json!({"base64": b64}))
+        } else if file.request.purpose == "place" {
+            self.place_file(json!({"name": file.name, "base64": b64}))
         } else if place {
             self.open_file("file.place", json!({"name": file.name, "base64": b64}))
         } else {
@@ -761,6 +910,9 @@ impl DesignApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        if self.egui_ctx.is_none() {
+            self.egui_ctx = Some(ctx.clone());
+        }
         if !self.color_applied {
             self.color_applied = true;
             if let Some(cs) = self.ui.color_settings.clone() {
@@ -772,16 +924,20 @@ impl DesignApp {
             ctx.set_zoom_factor(scale);
         }
         if !self.styled {
-            theme::install_fonts(ctx, &self.ui.language);
+            self.fonts_system = theme::install_fonts(ctx, &self.ui.language);
             self.fonts_lang = self.ui.language.clone();
             self.styled = true;
             self.restyle = true;
         } else {
-            if self.fonts_lang != self.ui.language {
-                theme::install_fonts(ctx, &self.ui.language);
+            if self.fonts_lang != self.ui.language || (!self.fonts_system && theme::system_fonts_ready()) {
+                self.fonts_system = theme::install_fonts(ctx, &self.ui.language);
                 self.fonts_lang = self.ui.language.clone();
             }
             self.fonts_ready = true;
+        }
+        if !self.fonts_system {
+            // The font scan runs in the background: look again shortly.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         if self.restyle {
             theme::apply(ctx, &theme::Tokens::for_brightness(self.ui.brightness));
@@ -807,7 +963,7 @@ impl DesignApp {
         if self.fonts_ready {
             self.drain_inbox();
         }
-        if !self.synthetic.is_empty() {
+        if !self.synthetic.is_empty() || !self.control_synthetic.is_empty() {
             ctx.request_repaint();
         }
         self.collect_screenshots(ctx);
@@ -816,10 +972,13 @@ impl DesignApp {
             menus::shortcuts(self, ctx);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
-            let p = f.path().to_string_lossy().to_string();
-            if !p.is_empty() {
-                let _ = self.open_dropped(&p);
+        {
+            let (dropped, pointer) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.hover_pos()));
+            for f in dropped {
+                let p = f.path().to_string_lossy().to_string();
+                if !p.is_empty() {
+                    let _ = self.open_dropped_at(&p, pointer);
+                }
             }
         }
         self.handle_quit(ctx);
@@ -969,10 +1128,38 @@ impl DesignApp {
         }
     }
 
-    /// A file dropped on the window: documents open, anything else is placed.
+    /// A file dropped on the window: documents open, anything else is placed on the spread in
+    /// view (a parent spread while parents are being edited).
     pub fn open_dropped(&mut self, path: &str) -> Result<Value, String> {
-        let cmd = if opens_as_document(path) { "file.open" } else { "file.place" };
-        self.open_file(cmd, json!({"path": path}))
+        self.open_dropped_at(path, None)
+    }
+
+    /// [`Self::open_dropped`] at the pointer: a graphic's top left lands where the file was
+    /// dropped on the canvas, text goes to a new frame on the page there.
+    pub fn open_dropped_at(&mut self, path: &str, pointer: Option<egui::Pos2>) -> Result<Value, String> {
+        if opens_as_document(path) {
+            return self.open_file("file.open", json!({"path": path}));
+        }
+        let mut params = json!({"path": path});
+        if let (Some((sr, at)), Some(o)) = (canvas::drop_point(self, pointer), params.as_object_mut()) {
+            o.insert("spread".into(), serde_json::to_value(sr).unwrap_or(Value::Null));
+            o.insert("x".into(), json!(at.x));
+            o.insert("y".into(), json!(at.y));
+            if let (designcraft_doc::SpreadRef::Doc(si), Some(st)) = (sr, self.session.active()) {
+                let pi = st.doc.spreads.get(si).and_then(|s| s.page_at_x(at.x)).unwrap_or(0);
+                o.insert("page".into(), json!(st.doc.first_page_of_spread(si) + pi + 1));
+            }
+        }
+        self.open_file("file.place", params)
+    }
+
+    /// File › Place: the file fills the selected empty or graphic frame; with none, an image loads
+    /// into the place cursor (click to place at its natural size, drag to draw the frame).
+    pub(crate) fn place_file(&mut self, mut params: Value) -> Result<Value, String> {
+        if let Some(o) = params.as_object_mut() {
+            o.insert("loadCursor".into(), json!(true));
+        }
+        self.open_file("file.place", params)
     }
 
     /// Open (`file.open`, `file.openBytes`) or place (`file.place`) a file the user chose. A file
@@ -986,6 +1173,9 @@ impl DesignApp {
         let r = self.run(cmd, params);
         if let Err(e) = &r {
             let title = if cmd == "file.place" { "Can't Place the File" } else { "Can't Open the File" };
+            if self.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange") {
+                self.session.reset_find_scope();
+            }
             self.ui.dialog = Some(dialogs::Dialog::new("alert", json!({"title": title, "file": file, "message": e})));
         } else if let Ok(result) = &r {
             let warnings: Vec<&str> = result
@@ -1005,19 +1195,39 @@ impl DesignApp {
         r
     }
 
-    /// Inject synthetic events (one pointer event per frame).
-    pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
-        if self.synthetic.is_empty() {
+    /// Keep widget clipboard output private while a queued control event is running.
+    pub(crate) fn install_clipboard_guard(&mut self, ctx: &egui::Context) {
+        if self.clipboard_guard_installed {
             return;
         }
-        let n = match self.synthetic[0] {
+        let private = self.control_input_frame.clone();
+        ctx.on_end_pass(
+            "control clipboard",
+            std::sync::Arc::new(move |ui| {
+                if private.load(std::sync::atomic::Ordering::Relaxed) {
+                    ui.ctx().output_mut(|o| {
+                        o.commands.retain(|cmd| !matches!(cmd, egui::OutputCommand::CopyText(_) | egui::OutputCommand::CopyImage(_)))
+                    });
+                }
+            }),
+        );
+        self.clipboard_guard_installed = true;
+    }
+
+    /// Inject synthetic events (one pointer event per frame), retaining control provenance.
+    pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
+        let private = !self.control_synthetic.is_empty();
+        self.control_input_frame.store(private, std::sync::atomic::Ordering::Relaxed);
+        let events = if private { &mut self.control_synthetic } else { &mut self.synthetic };
+        let Some(first) = events.first() else { return };
+        let n = match first {
             egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => 1,
-            _ => self.synthetic.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(self.synthetic.len(), |i| i + 1),
+            _ => events.iter().position(|e| matches!(e, egui::Event::Key { pressed: false, .. })).map_or(events.len(), |i| i + 1),
         };
-        if let Some(egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. }) = self.synthetic.first() {
+        if let egui::Event::PointerMoved(p) | egui::Event::PointerButton { pos: p, .. } = first {
             raw.events.push(egui::Event::PointerMoved(*p));
         }
-        raw.events.extend(self.synthetic.drain(..n));
+        raw.events.extend(events.drain(..n));
     }
 
     /// Lay out the whole window.
@@ -1230,7 +1440,9 @@ impl DesignApp {
 /// and IDML.
 pub fn opens_as_document(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    [".designcraft", ".idml"].iter().any(|ext| n.ends_with(ext))
+    // InDesign files go to the open path too, which says how to bring them over (as IDML)
+    // instead of failing to place them as a graphic.
+    [".designcraft", ".idml", ".indd", ".indt"].iter().any(|ext| n.ends_with(ext))
 }
 
 pub fn now_ms() -> f64 {
@@ -1265,6 +1477,17 @@ pub fn drop_key_name_text(raw: &mut egui::RawInput, text_field_focused: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// InDesign shows 100% K as pure black on screen unless Appearance of Black says otherwise
+    /// (Display All Blacks as Rich Black is its default); settings saved without the field get it too.
+    #[test]
+    fn black_shows_as_rich_black_by_default() {
+        assert!(UiState::default().rich_black);
+        let saved: UiState = serde_json::from_str("{}").unwrap();
+        assert!(saved.rich_black);
+        let accurate: UiState = serde_json::from_str(r#"{"richBlack": false}"#).unwrap();
+        assert!(!accurate.rich_black, "a saved choice is kept");
+    }
 
     /// An app with one document that has an unsaved edit.
     fn app_with_unsaved_document() -> DesignApp {
@@ -1856,7 +2079,7 @@ mod tests {
 
     #[test]
     fn dropped_documents_open_and_the_rest_is_placed() {
-        for name in ["a.designcraft", "B.IDML"] {
+        for name in ["a.designcraft", "B.IDML", "c.indd", "D.INDT"] {
             assert!(opens_as_document(name), "{name}");
         }
         for name in ["a.png", "b.pdf", "idml.txt", "c.idml.zip"] {
@@ -1886,6 +2109,23 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let e = r.unwrap_err();
         assert_eq!(alert(&app), ("Can't Place the File".to_string(), e));
+    }
+
+    #[test]
+    fn a_file_dropped_while_a_parent_is_open_lands_on_the_parent() {
+        let mut app = DesignApp::new(Session::new(), Services::default());
+        app.run("file.new", json!({"pages": 3})).unwrap();
+        app.canvas_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0)));
+        app.run("layout.parents.edit", json!({"on": true})).unwrap();
+        let _ = app.view_mut();
+        let path = std::env::temp_dir().join(format!("designcraft-ui-{}-drop.png", std::process::id()));
+        std::fs::write(&path, designcraft_render::Rendered { width: 10, height: 10, pixels: vec![200; 400] }.to_png()).unwrap();
+        let r = app.open_dropped(&path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        r.unwrap();
+        let d = &app.session.doc().unwrap().doc;
+        assert_eq!(d.parents[0].items.len(), 1, "the graphic is on the parent spread");
+        assert!(d.spreads.iter().all(|s| s.items.is_empty()), "no document page gets it");
     }
 
     #[test]
@@ -2108,7 +2348,7 @@ mod browser_import_tests {
         result.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1));
         result.into_bytes()
     }
-    fn pdf() -> Vec<u8> {
+    pub(super) fn pdf() -> Vec<u8> {
         pdf_pages(3)
     }
 
@@ -2209,11 +2449,44 @@ mod browser_import_tests {
         assert_eq!(*asset.data, bytes);
         assert!(app.pending_pdf.is_none());
         assert!(app.session.documents()[1].doc.assets.is_empty());
+        app.run("place.drop", json!({"x": 36, "y": 36})).unwrap();
         let exported = app.run("file.exportPdf", json!({})).unwrap();
         let exported = designcraft_engine::cmd::base64_decode(exported["base64"].as_str().unwrap());
         let pixels = designcraft_render::render_pdf_page(&exported, 0, 400).unwrap();
         assert!(pixels.data().iter().filter(|p| p.g > 240 && p.r < 10 && p.b < 10).count() > 1000);
         assert_eq!(pixels.data().iter().filter(|p| p.r > 240 && p.g < 10 && p.b < 10).count(), 0);
+    }
+
+    #[test]
+    fn place_loads_the_cursor_unless_a_frame_can_take_the_graphic() {
+        let mut app = app();
+        let items = |app: &DesignApp| app.session.doc().unwrap().doc.spreads[0].items.len();
+        // Nothing selected: the graphic waits in the place cursor; Escape unloads it.
+        let request = app.import_request("place");
+        deliver(&mut app, request, "red.svg", image());
+        assert_eq!(app.session.tool_id(), "placeGun");
+        assert!(app.session.loaded.is_some());
+        assert_eq!(items(&app), 0);
+        let mods = designcraft_tools::Mods::default();
+        app.session.tool_key(designcraft_tools::ToolKey::Escape, mods, designcraft_engine::ViewInfo::at_zoom(1.0)).unwrap();
+        assert_eq!(app.session.tool_id(), "selection");
+        assert!(app.session.loaded.is_none());
+        // A click with the loaded cursor places the graphic at its natural size.
+        let request = app.import_request("place");
+        deliver(&mut app, request, "red.svg", image());
+        app.run("place.drop", json!({"x": 100, "y": 100})).unwrap();
+        let it = app.session.doc().unwrap().doc.spreads[0].items.last().unwrap();
+        assert_eq!(it.bounds(), designcraft_geom::Rect::new(100.0, 100.0, 107.5, 107.5), "10 CSS px = 7.5 pt");
+        // An empty graphic frame selected: the graphic fills it.
+        let f = app.run("frame.create", json!({"rect": [200, 200, 300, 300], "content": "graphic"})).unwrap()["id"].as_u64().unwrap();
+        app.run("selection.set", json!({"ids": [f]})).unwrap();
+        let request = app.import_request("place");
+        deliver(&mut app, request, "red.svg", image());
+        assert_eq!(app.session.tool_id(), "selection");
+        assert!(app.session.loaded.is_none());
+        assert_eq!(items(&app), 2);
+        let frame = app.session.doc().unwrap().doc.item(designcraft_doc::ItemId(f)).unwrap();
+        assert!(matches!(frame.content, designcraft_doc::Content::Graphic(_)));
     }
 
     #[test]

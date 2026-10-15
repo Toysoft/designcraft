@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::OnceLock};
 mod ar;
 mod it;
 mod ja;
+mod ka;
 mod pt_br;
 mod uk;
 
@@ -21,6 +22,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("pt-br", "Português (Brasil)"),
     ("it", "Italiano"),
     ("uk", "Українська"),
+    ("ka", "ქართული"),
 ];
 
 /// English → [German, French, Spanish, Japanese, Simplified Chinese].
@@ -55,6 +57,23 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cut", ["Ausschneiden", "Couper", "Cortar", "カット", "剪切"]),
     ("Copy", ["Kopieren", "Copier", "Copiar", "コピー", "复制"]),
     ("Paste", ["Einfügen", "Coller", "Pegar", "ペースト", "粘贴"]),
+    (
+        "Bulleted & Numbered Lists",
+        [
+            "Aufzählungszeichen und nummerierte Listen",
+            "Listes à puces et numérotées",
+            "Listas con viñetas y numeradas",
+            "箇条書き",
+            "项目符号列表和编号列表",
+        ],
+    ),
+    ("Current Page Number", ["Aktuelle Seitenzahl", "Numéro de page actuelle", "Número de página actual", "現在のページ番号", "当前页码"]),
+    ("Apply Color (,)", ["Farbe anwenden (,)", "Appliquer la couleur (,)", "Aplicar color (,)", "カラーを適用 (,)", "应用颜色 (,)"]),
+    ("Apply Gradient (.)", ["Verlauf anwenden (.)", "Appliquer le dégradé (.)", "Aplicar degradado (.)", "グラデーションを適用 (.)", "应用渐变 (.)"]),
+    ("View Options", ["Ansichtsoptionen", "Options d’affichage", "Opciones de visualización", "表示オプション", "视图选项"]),
+    ("Frame Edges", ["Rahmenkanten", "Bords du bloc", "Bordes del marco", "フレーム枠", "框架边缘"]),
+    ("Rulers", ["Lineale", "Règles", "Reglas", "定規", "标尺"]),
+    ("Hidden Characters", ["Verborgene Zeichen", "Caractères masqués", "Caracteres ocultos", "制御文字", "隐藏字符"]),
     ("Reverse Path", ["Pfadrichtung umkehren", "Inverser le tracé", "Invertir trazado", "パスの方向反転", "反转路径"]),
     ("Set Anchor", ["Ankerpunkt festlegen", "Définir le point d’ancrage", "Definir punto de ancla", "アンカーポイントを設定", "设置锚点"]),
     ("Clear", ["Löschen", "Effacer", "Borrar", "消去", "清除"]),
@@ -191,6 +210,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Buttons and Forms", ["Schaltflächen und Formulare", "Boutons et formulaires", "Botones y formularios", "ボタンとフォーム", "按钮和表单"]),
     ("Liquid Layout", ["Flüssiges Layout", "Mise en page liquide", "Maquetación líquida", "リキッドレイアウト", "自适应版面"]),
     ("Workspace", ["Arbeitsbereich", "Espace de travail", "Espacio de trabajo", "ワークスペース", "工作区"]),
+    ("Editorial", ["Redaktion", "Éditorial", "Editorial", "エディトリアル", "编辑"]),
+    ("Object & Layout", ["Objekt und Layout", "Objet et mise en page", "Objeto y diseño", "オブジェクト＆レイアウト", "对象和版面"]),
+    ("Styles", ["Formate", "Styles", "Estilos", "スタイル", "样式"]),
+    ("Essentials Classic", ["Essentials Classic", "Essentials Classic", "Essentials Classic", "Essentials Classic", "基本功能（经典）"]),
     ("Split Window", ["Fenster teilen", "Fractionner la fenêtre", "Dividir ventana", "ウィンドウを分割", "拆分窗口"]),
     ("New Window", ["Neues Fenster", "Nouvelle fenêtre", "Nueva ventana", "新規ウィンドウ", "新建窗口"]),
     (
@@ -296,6 +319,28 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Document Setup", ["Document Setup", "Document Setup", "Document Setup", "Document Setup", "文档设置"]),
     ("Drop Shadow", ["Drop Shadow", "Drop Shadow", "Drop Shadow", "Drop Shadow", "投影"]),
     ("Duplicate Spread", ["Duplicate Spread", "Duplicate Spread", "Duplicate Spread", "Duplicate Spread", "复制跨页"]),
+    (
+        "Duplicate Spread at End of Document",
+        [
+            "Druckbogen am Dokumentende duplizieren",
+            "Dupliquer la planche à la fin du document",
+            "Duplicar pliego al final del documento",
+            "ドキュメントの最後にスプレッドを複製",
+            "在文档末尾复制跨页",
+        ],
+    ),
+    ("Delete Spread", ["Druckbogen löschen", "Supprimer la planche", "Eliminar pliego", "スプレッドを削除", "删除跨页"]),
+    ("Parent Pages", ["Übergeordnete Seiten", "Pages parents", "Páginas principales", "親ページ", "父页面"]),
+    (
+        "Apply Parent to Pages",
+        [
+            "Übergeordnete Seite auf Seiten anwenden",
+            "Appliquer le parent aux pages",
+            "Aplicar principal a páginas",
+            "親ページを適用",
+            "将父页面应用于页面",
+        ],
+    ),
     ("Email", ["Email", "Email", "Email", "Email", "电子邮件"]),
     ("Embed", ["Embed", "Embed", "Embed", "Embed", "嵌入"]),
     ("Export PDF", ["PDF exportieren", "Exporter en PDF", "Exportar PDF", "PDF を書き出し", "导出PDF"]),
@@ -612,6 +657,22 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Edit Page", ["Edit Page", "Edit Page", "Edit Page", "Edit Page", "编辑页面"]),
     ("Import File", ["Import File", "Import File", "Import File", "Import File", "导入文件"]),
     ("Insert Page", ["Insert Page", "Insert Page", "Insert Page", "Insert Page", "插入页面"]),
+    (
+        "Delete selected pages",
+        ["Ausgewählte Seiten löschen", "Supprimer les pages sélectionnées", "Eliminar páginas seleccionadas", "選択したページを削除", "删除选定页面"],
+    ),
+    ("Create new page", ["Neue Seite erstellen", "Créer une page", "Crear página nueva", "新規ページを作成", "新建页面"]),
+    ("Edit page size", ["Seitenformat bearbeiten", "Modifier le format de page", "Editar tamaño de página", "ページサイズを編集", "编辑页面大小"]),
+    (
+        "Custom Page Size…",
+        [
+            "Benutzerdefiniertes Seitenformat …",
+            "Format de page personnalisé…",
+            "Tamaño de página personalizado…",
+            "カスタムページサイズ…",
+            "自定页面大小…",
+        ],
+    ),
     ("Hide Bar", ["Hide Bar", "Hide Bar", "Hide Bar", "Hide Bar", "隐藏栏"]),
     ("Properties Panel", ["Properties Panel", "Properties Panel", "Properties Panel", "Properties Panel", "属性面板"]),
     ("New Workspace…", ["New Workspace…", "New Workspace…", "New Workspace…", "New Workspace…", "新建工作区…"]),
@@ -1783,13 +1844,13 @@ const TABLE: &[(&str, [&str; 5])] = &[
         ],
     ),
     (
-        "Select an object to color its fill or stroke.",
+        "Select an object or text to color its fill or stroke.",
         [
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "Select an object to color its fill or stroke.",
-            "选择一个对象以设置其填色或描边颜色。",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "Select an object or text to color its fill or stroke.",
+            "选择一个对象或文本以设置其填色或描边颜色。",
         ],
     ),
     (
@@ -1969,6 +2030,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Cap Height", ["Cap Height", "Cap Height", "Cap Height", "Cap Height", "大写字母高度"]),
     ("Leading", ["Leading", "Leading", "Leading", "Leading", "行距"]),
     ("x Height", ["x Height", "x Height", "x Height", "x Height", "x 字高"]),
+    ("Em Box Height", ["Em Box Height", "Em Box Height", "Em Box Height", "Em Box Height", "全角字框高度"]),
     ("Fixed", ["Fixed", "Fixed", "Fixed", "Fixed", "固定"]),
     ("Never (continuous)", ["Never (continuous)", "Never (continuous)", "Never (continuous)", "Never (continuous)", "从不（连续编号）"]),
     ("Page", ["Page", "Page", "Page", "Page", "页面"]),
@@ -1994,6 +2056,23 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("forcedLineBreak", ["forcedLineBreak", "forcedLineBreak", "forcedLineBreak", "forcedLineBreak", "强制换行符"]),
     ("emSpace", ["emSpace", "emSpace", "emSpace", "emSpace", "全角空格"]),
     ("enSpace", ["enSpace", "enSpace", "enSpace", "enSpace", "半角空格"]),
+    ("dropcap", ["Initiale", "lettrine", "capitular", "ドロップキャップ", "首字下沉"]),
+    ("Drop Caps", ["Initialen", "Lettrines", "Capitulares", "ドロップキャップ", "首字下沉"]),
+    ("Lines:", ["Zeilen:", "Lignes :", "Líneas:", "行数：", "行数："]),
+    ("Characters:", ["Zeichen:", "Caractères :", "Caracteres:", "文字数：", "字符数："]),
+    ("Drop Lines", ["Initialzeilen", "Lignes lettrine", "Líneas capitular", "ドロップ行数", "下沉行数"]),
+    ("Drop Chars", ["Initialzeichen", "Car. lettrine", "Car. capitular", "ドロップ文字数", "下沉字符数"]),
+    ("Align Left Edge", ["Linke Kante ausrichten", "Aligner le bord gauche", "Alinear borde izquierdo", "左端揃え", "左边缘对齐"]),
+    (
+        "Scale for Descenders",
+        [
+            "Für Unterlängen skalieren",
+            "Mise à l'échelle pour les jambages",
+            "Escalar para trazos descendentes",
+            "ディセンダーに合わせて拡大・縮小",
+            "为下伸部分缩放",
+        ],
+    ),
     ("chars", ["chars", "chars", "chars", "chars", "指定字符"]),
     ("[Automatic]", ["[Automatic]", "[Automatic]", "[Automatic]", "[Automatic]", "[自动]"]),
     ("Tracking:", ["Tracking:", "Tracking:", "Tracking:", "Tracking:", "字距调整："]),
@@ -2400,6 +2479,10 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Inward", ["Inward", "Inward", "Inward", "Inward", "向内"]),
     ("Metrics", ["Metrics", "Metrics", "Metrics", "Metrics", "度量"]),
     ("Optical", ["Optical", "Optical", "Optical", "Optical", "视觉"]),
+    (
+        "Optical Margin Alignment",
+        ["Optischer Randausgleich", "Marges optiques", "Alineación de márgenes ópticos", "オプティカルマージン揃え", "视觉边距对齐"],
+    ),
     ("Applies to fill", ["Applies to fill", "Applies to fill", "Applies to fill", "Applies to fill", "应用于填色"]),
     ("Applies to text", ["Applies to text", "Applies to text", "Applies to text", "Applies to text", "应用于文本"]),
     ("Gray", ["Gray", "Gray", "Gray", "Gray", "灰度"]),
@@ -2498,6 +2581,96 @@ const TABLE: &[(&str, [&str; 5])] = &[
     ("Added", ["Added", "Added", "Added", "Added", "已添加"]),
     ("Deleted", ["Deleted", "Deleted", "Deleted", "Deleted", "已删除"]),
     ("Guide-based", ["Guide-based", "Guide-based", "Guide-based", "Guide-based", "基于参考线"]),
+    ("Page:", ["Seite:", "Page :", "Página:", "ページ:", "页面："]),
+    ("Content:", ["Inhalt:", "Contenu :", "Contenido:", "コンテンツ:", "内容："]),
+    ("Object Constraints:", ["Objektbeschränkungen:", "Contraintes d’objet :", "Restricciones de objeto:", "オブジェクトの制約:", "对象约束："]),
+    (
+        "Resize with Page:",
+        ["Mit Seite skalieren:", "Redimensionner avec la page :", "Cambiar tamaño con la página:", "ページと共にサイズ変更:", "随页面调整大小："],
+    ),
+    ("Pin:", ["Fixieren:", "Épingler :", "Fijar:", "固定:", "固定："]),
+    ("Object-Based", ["Object-Based", "Object-Based", "Object-Based", "Object-Based", "基于对象"]),
+    ("Guide-Based", ["Guide-Based", "Guide-Based", "Guide-Based", "Guide-Based", "基于参考线"]),
+    ("Resize Page", ["Seitengröße ändern", "Redimensionner la page", "Cambiar tamaño de página", "ページのサイズを変更", "调整页面大小"]),
+    (
+        "Liquid Page Rule:",
+        ["Regel für flüssige Seiten:", "Règle de page liquide :", "Regla de página líquida:", "リキッドページルール:", "自适应页面规则："],
+    ),
+    (
+        "Show Parent Page Overlay",
+        [
+            "Überlagerung der übergeordneten Seite anzeigen",
+            "Afficher la superposition de la page parent",
+            "Mostrar superposición de página principal",
+            "親ページオーバーレイを表示",
+            "显示父页面叠加",
+        ],
+    ),
+    (
+        "Controlled by Parent",
+        ["Durch übergeordnete Seite gesteuert", "Contrôlé par le parent", "Controlado por principal", "親ページで制御", "由父页面控制"],
+    ),
+    ("US Business Card", ["US-Visitenkarte", "Carte de visite US", "Tarjeta de visita EE. UU.", "US 名刺", "美国名片"]),
+    (
+        "Object is pinned relative to the page edge. Click to release.",
+        [
+            "Das Objekt ist relativ zum Seitenrand fixiert. Zum Lösen klicken.",
+            "L’objet est épinglé par rapport au bord de la page. Cliquez pour le libérer.",
+            "El objeto está fijado respecto al borde de la página. Haga clic para soltarlo.",
+            "オブジェクトはページの端を基準に固定されています。クリックすると解除します。",
+            "对象已相对于页面边缘固定。单击可释放。",
+        ],
+    ),
+    (
+        "Click to pin the object relative to the page edge.",
+        [
+            "Klicken, um das Objekt relativ zum Seitenrand zu fixieren.",
+            "Cliquez pour épingler l’objet par rapport au bord de la page.",
+            "Haga clic para fijar el objeto respecto al borde de la página.",
+            "クリックすると、オブジェクトをページの端を基準に固定します。",
+            "单击可将对象相对于页面边缘固定。",
+        ],
+    ),
+    (
+        "The object changes width as the page changes width. Click to lock the object width.",
+        [
+            "Die Objektbreite ändert sich mit der Seitenbreite. Zum Sperren der Breite klicken.",
+            "La largeur de l’objet suit celle de la page. Cliquez pour verrouiller la largeur.",
+            "El ancho del objeto cambia con el de la página. Haga clic para bloquear el ancho.",
+            "オブジェクトの幅はページの幅に合わせて変わります。クリックすると幅をロックします。",
+            "对象宽度随页面宽度变化。单击可锁定对象宽度。",
+        ],
+    ),
+    (
+        "The object's width is locked. Click to let the object change width as the page changes width.",
+        [
+            "Die Objektbreite ist gesperrt. Klicken, damit sie sich mit der Seitenbreite ändert.",
+            "La largeur de l’objet est verrouillée. Cliquez pour qu’elle suive celle de la page.",
+            "El ancho del objeto está bloqueado. Haga clic para que cambie con el de la página.",
+            "オブジェクトの幅はロックされています。クリックすると、ページの幅に合わせて変わります。",
+            "对象宽度已锁定。单击可让其随页面宽度变化。",
+        ],
+    ),
+    (
+        "The object changes height as the page changes height. Click to lock the object height.",
+        [
+            "Die Objekthöhe ändert sich mit der Seitenhöhe. Zum Sperren der Höhe klicken.",
+            "La hauteur de l’objet suit celle de la page. Cliquez pour verrouiller la hauteur.",
+            "El alto del objeto cambia con el de la página. Haga clic para bloquear el alto.",
+            "オブジェクトの高さはページの高さに合わせて変わります。クリックすると高さをロックします。",
+            "对象高度随页面高度变化。单击可锁定对象高度。",
+        ],
+    ),
+    (
+        "The object's height is locked. Click to let the object change height as the page changes height.",
+        [
+            "Die Objekthöhe ist gesperrt. Klicken, damit sie sich mit der Seitenhöhe ändert.",
+            "La hauteur de l’objet est verrouillée. Cliquez pour qu’elle suive celle de la page.",
+            "El alto del objeto está bloqueado. Haga clic para que cambie con el de la página.",
+            "オブジェクトの高さはロックされています。クリックすると、ページの高さに合わせて変わります。",
+            "对象高度已锁定。单击可让其随页面高度变化。",
+        ],
+    ),
     ("Loop", ["Loop", "Loop", "Loop", "Loop", "循环播放"]),
     ("Object-based", ["Object-based", "Object-based", "Object-based", "Object-based", "基于对象"]),
     ("Off", ["Off", "Off", "Off", "Off", "关闭"]),
@@ -2868,6 +3041,7 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     static UKRAINIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static PORTUGUESE_BR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static ITALIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    static GEORGIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     if lang == "ar" {
         return ARABIC.get_or_init(|| ar::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
@@ -2883,6 +3057,9 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     }
     if lang == "it" {
         return ITALIAN.get_or_init(|| it::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
+    }
+    if lang == "ka" {
+        return GEORGIAN.get_or_init(|| ka::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
     if lang == "uk" {
         return UKRAINIAN.get_or_init(|| uk::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
@@ -2904,10 +3081,11 @@ pub(crate) fn ukrainian_catalog() -> Vec<&'static str> {
     uk::TABLE.iter().map(|(_, text)| *text).chain(uk::CONTEXT.iter().map(|(_, _, text)| *text)).collect()
 }
 
-/// Count captions in Ukrainian put the category before the value so every count uses
-/// a grammatical form; other languages keep the existing value-first caption.
+/// Count captions in Ukrainian and Georgian put the category before the value so every count
+/// uses one grammatical form (Georgian nouns stay singular after numerals: `გვერდი: 5`); other
+/// languages keep the existing value-first caption.
 pub fn count_label(lang: &str, noun: &str, count: usize) -> String {
-    if lang == "uk" { format!("{}: {count}", tr(lang, noun)) } else { format!("{count} {}", tr(lang, noun)) }
+    if matches!(lang, "uk" | "ka") { format!("{}: {count}", tr(lang, noun)) } else { format!("{count} {}", tr(lang, noun)) }
 }
 
 /// Localize reserved built-in style names only; user-defined names are document data.
@@ -2921,7 +3099,14 @@ pub fn style_name<'a>(lang: &str, name: &'a str) -> &'a str {
 /// Built-in workspace captions; custom workspace names remain unchanged.
 pub fn workspace_name<'a>(lang: &str, name: &'a str) -> &'a str {
     match name {
-        "Essentials" | "Advanced" | "Book" | "Digital Publishing" | "Interactive for PDF" | "Printing and Proofing" | "Typography" => tr(lang, name),
+        "Essentials"
+        | "Essentials Classic"
+        | "Advanced"
+        | "Book"
+        | "Digital Publishing"
+        | "Interactive for PDF"
+        | "Printing and Proofing"
+        | "Typography" => tr(lang, name),
         _ => name,
     }
 }
@@ -2953,8 +3138,11 @@ mod tests {
         for (key, expected) in uk::TABLE {
             assert_eq!(tr("uk", key), *expected, "uk: {key}");
         }
+        for (key, expected) in ka::TABLE {
+            assert_eq!(tr("ka", key), *expected, "ka: {key}");
+        }
         let unknown = String::from("A user-defined untranslated label");
-        for lang in ["uk", "ar", "pt-br", "it", "zh", "ja", "de", "fr", "es", "", "unknown"] {
+        for lang in ["uk", "ar", "pt-br", "it", "ka", "zh", "ja", "de", "fr", "es", "", "unknown"] {
             assert!(std::ptr::eq(tr(lang, &unknown), unknown.as_str()));
         }
     }
@@ -3037,6 +3225,29 @@ mod tests {
         assert_eq!(style_name("uk", "My layout style"), "My layout style");
         assert_eq!(workspace_name("uk", "Essentials"), "Основне");
         assert_eq!(workspace_name("uk", "My workspace"), "My workspace");
+    }
+
+    #[test]
+    fn georgian_catalog_preserves_placeholders_and_counts() {
+        let catalog: HashMap<_, _> = ka::TABLE.iter().copied().collect();
+        assert_eq!(catalog.len(), ka::TABLE.len(), "duplicate Georgian keys");
+        let placeholders = |s: &str| {
+            s.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name.to_owned())).collect::<std::collections::BTreeSet<_>>()
+        };
+        for (key, translation) in ka::TABLE {
+            assert!(!translation.trim().is_empty(), "empty {key}");
+            assert_eq!(placeholders(key), placeholders(translation), "placeholders: {key}");
+            assert_eq!(key.ends_with('…'), translation.ends_with('…'), "ellipsis: {key}");
+            // Georgian has no capitals in running text: Mtavruli never appears in the interface.
+            assert!(!translation.chars().any(|c| ('\u{1C90}'..='\u{1CBF}').contains(&c)), "Mtavruli: {key}");
+        }
+        assert_eq!(tr("ka", "File"), "ფაილი");
+        assert_eq!(tr("ka", "Save As…"), "შენახვა როგორც…");
+        assert_eq!(tr("ka", "Unknown label"), "Unknown label");
+        assert!(!is_rtl("ka"));
+        for n in [1, 2, 5, 21] {
+            assert_eq!(count_label("ka", "pages", n), format!("გვერდი: {n}"));
+        }
     }
 
     #[test]

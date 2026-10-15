@@ -330,7 +330,7 @@ pub fn relative_between(from_dir: &Path, target: &Path) -> String {
 }
 
 pub fn fingerprint_of(path: &Path) -> Option<Fingerprint> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = crate::io::metadata(path).ok()?;
     let mtime = meta
         .modified()
         .ok()

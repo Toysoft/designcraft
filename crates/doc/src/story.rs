@@ -255,7 +255,8 @@ impl Story {
         self.insert_with_raw(pos, text, fmt);
     }
 
-    fn insert_with_raw(&mut self, pos: usize, text: &str, fmt: CharFormat) {
+    /// [`Story::insert_with`] without the table fix-up.
+    pub(crate) fn insert_with_raw(&mut self, pos: usize, text: &str, fmt: CharFormat) {
         if text.is_empty() {
             return;
         }
@@ -332,20 +333,25 @@ impl Story {
         self.marks_deleted(a, b);
         let pi = self.para_at(a);
         let removed = self.text[a..b].bytes().filter(|c| *c == b'\n').count();
-        // Merged paragraphs keep a table whose anchor survives the deletion.
+        // Merged paragraphs keep the tables whose anchors survive the deletion (the fix-up gives
+        // each its own paragraph again).
+        let mut claims = Vec::new();
         if removed > 0 && !self.tables.is_empty() {
             let ranges = self.para_ranges();
-            let first = self.paras[pi].table.filter(|_| self.text[ranges[pi].start..a].contains(TABLE_ANCHOR));
-            let last = self.paras[pi + removed]
-                .table
-                .filter(|_| self.text[b.min(ranges[pi + removed].end)..ranges[pi + removed].end].contains(TABLE_ANCHOR));
-            self.paras[pi].table = first.or(last);
+            let anchor = |pi: usize, r: std::ops::Range<usize>| {
+                self.paras[pi].table.and_then(|id| self.text[r.clone()].find(TABLE_ANCHOR).map(|k| (r.start + k, id)))
+            };
+            let first = anchor(pi, ranges[pi].start..a);
+            let end = ranges[pi + removed].end;
+            let last = anchor(pi + removed, b.min(end)..end).map(|(at, id)| (at.saturating_sub(b - a), id));
+            self.paras[pi].table = first.or(last).map(|(_, id)| id);
+            claims.extend(first.into_iter().chain(last));
         }
         self.paras.drain(pi + 1..pi + 1 + removed);
         self.text.replace_range(a..b, "");
         self.remove_run_bytes(a, b - a);
         self.normalize();
-        self.fix_tables();
+        self.fix_tables_with(&claims);
         self.rev += 1;
     }
 

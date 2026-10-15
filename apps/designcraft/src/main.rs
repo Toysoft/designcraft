@@ -45,7 +45,7 @@ impl eframe::App for App {
         #[cfg(target_os = "macos")]
         {
             if self.menu.is_none() && std::env::var_os("DESIGNCRAFT_NO_NATIVE_MENU").is_none() {
-                self.menu = Some(native_menu::NativeMenu::install(&mut self.app));
+                self.menu = Some(native_menu::NativeMenu::install(&mut self.app, ctx));
             }
             if let Some(m) = &mut self.menu {
                 m.poll(&mut self.app, ctx);
@@ -210,6 +210,7 @@ fn services() -> Services {
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
         write: Some(Box::new(|p: &str, b: &[u8]| designcraft_engine::atomic::write_atomic(std::path::Path::new(p), b).map_err(|e| e.to_string()))),
+        clipboard_text: Some(Box::new(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok())),
         ..Default::default()
     }
 }
@@ -288,6 +289,14 @@ fn main() -> eframe::Result {
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
     {
         create.instance_descriptor.backends = s.backends();
+    }
+    // Nothing draws or dispatches indirectly, so wgpu's check of indirect arguments only costs a
+    // compute shader when the device is created, one that Metal can't compile on an Intel Iris
+    // Pro: the device is lost and the window never opens. `WGPU_VALIDATION_INDIRECT_CALL=1` turns
+    // the check back on.
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
+        create.instance_descriptor.flags =
+            create.instance_descriptor.flags.difference(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL).with_env();
     }
     // winit has no file drag-and-drop on Wayland (only on X11), so dropping images from the file
     // manager showed a "no" cursor. Run through XWayland when it's there; DESIGNCRAFT_WAYLAND=1

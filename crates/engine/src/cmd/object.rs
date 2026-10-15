@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use designcraft_color::BlendMode;
 use designcraft_doc::{
-    Content, Document, Fill, Item, ItemId, ParaFormat, Selection, Shape, SpreadRef, Story, StoryId, Stroke, TextFrame, TextFrameOptions, TextSel,
+    AssetId, Content, Document, Fill, Item, ItemId, ParaFormat, Selection, Shape, SpreadRef, Story, StoryId, Stroke, TextFrame, TextFrameOptions,
+    TextSel,
 };
 use designcraft_geom::{Affine, Point, Rect, Vec2, shapes};
 use serde_json::{Value, json};
@@ -179,12 +180,35 @@ pub fn specs() -> Vec<CommandSpec> {
                 )
             }
         ),
-        cmd!("object.fill", "Fill", [], None, "{swatch (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?}", has_selection, |s, p| {
-            let sw = str_param(p, "swatch").ok_or_else(|| bad("object.fill", "missing swatch"))?.to_string();
-            known_swatch(&s.doc()?.doc, &sw, "object.fill", "swatch")?;
-            let tint = f64_or(p, "tint", 1.0) as f32;
-            set_flag(s, p, move |i| i.fill = Fill { swatch: sw.clone(), tint, ..i.fill.clone() }, false)
-        }),
+        cmd!(
+            "object.fill",
+            "Fill",
+            [],
+            None,
+            "{swatch? (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?} — at least one; a tint alone keeps each object's own swatch (the Swatches panel's Tint field)",
+            has_selection,
+            |s, p| {
+                let sw = str_param(p, "swatch").map(str::to_string);
+                let tint = match p.get("tint") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_f64().filter(|t| (0.0..=1.0).contains(t)).ok_or_else(|| bad("object.fill", "`tint` is 0..1"))? as f32),
+                };
+                match &sw {
+                    Some(sw) => known_swatch(&s.doc()?.doc, sw, "object.fill", "swatch")?,
+                    None if tint.is_none() => return Err(bad("object.fill", "missing swatch")),
+                    None => {}
+                }
+                set_flag(
+                    s,
+                    p,
+                    move |i| match &sw {
+                        Some(sw) => i.fill = Fill { swatch: sw.clone(), tint: tint.unwrap_or(1.0), ..i.fill.clone() },
+                        None => i.fill.tint = tint.unwrap_or(i.fill.tint),
+                    },
+                    false,
+                )
+            }
+        ),
         cmd!(
             "object.swapFillStroke",
             "Swap Fill and Stroke",
@@ -217,10 +241,15 @@ pub fn specs() -> Vec<CommandSpec> {
                     }
                 }
                 let p2 = p.clone();
+                // A tint alone (the Swatches panel's Tint field) recolours strokes, it doesn't add one.
+                let tint_only = p.as_object().is_some_and(|o| o.contains_key("tint") && o.keys().all(|k| k == "tint" || k == "ids"));
                 set_flag(
                     s,
                     p,
                     move |i| {
+                        if tint_only && i.stroke.is_none() {
+                            return;
+                        }
                         let mut st = if i.stroke.is_none() && p2.get("swatch").is_none() { Stroke::default() } else { i.stroke.clone() };
                         if let Some(v) = p2.get("swatch").and_then(Value::as_str) {
                             st.swatch = v.into();
@@ -532,7 +561,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Text Frame Options…",
             ["Object"],
             Some("Cmd+B"),
-            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
+            "{columns?, gutter?, inset?: number|[t,l,b,r] (null keeps that side), verticalJustification?: top|center|bottom|justify, firstBaseline?: ascent|capHeight|leading|xHeight|emboxHeight|fixed, autoSize?, ignoreWrap?, balanceColumns?, columnRule?: bool, columnRuleWeight? (pt), columnRuleColor? (swatch name), columnRuleTint? (0..1), columnRuleOffset? (pt, horizontal), columnRuleTopInset? (pt), columnRuleBottomInset? (pt), vertical?: bool (sets the story direction of the frames' stories, as Type ▸ Story Direction), ids?}",
             has_selection,
             text_frame_options
         ),
@@ -966,13 +995,24 @@ pub fn duplicate_from(dst: &mut Document, src: &Document, ids: &[ItemId], to: Sp
     Ok(out)
 }
 
+/// The id to reference in `dst` for asset `id` of `src`. When `src` lacks the asset (a missing graphic), an id that `dst`
+/// already uses for a different asset is swapped for a fresh unused one so the reference stays missing instead of showing
+/// an unrelated image.
+fn adopt_or_dangle(dst: &mut Document, src: &Document, id: AssetId) -> AssetId {
+    match dst.adopt_asset(src, id) {
+        Some(a) => a,
+        None if dst.assets.contains_key(&id) => AssetId(dst.alloc()),
+        None => id,
+    }
+}
+
 fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut HashMap<StoryId, StoryId>) {
     it.id = ItemId(dst.alloc());
     let my_id = it.id;
     if let Some(m) = it.media.as_mut()
         && let Some(p) = m.poster
     {
-        m.poster = dst.adopt_asset(src, p).or(Some(p));
+        m.poster = Some(adopt_or_dangle(dst, src, p));
     }
     match &mut it.content {
         Content::Text(tf) => {
@@ -984,9 +1024,8 @@ fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut Has
                     st.id = n;
                     let mut assets = HashMap::new();
                     for a in designcraft_doc::story_asset_refs(&st) {
-                        if let Some(na) = dst.adopt_asset(src, a)
-                            && na != a
-                        {
+                        let na = adopt_or_dangle(dst, src, a);
+                        if na != a {
                             assets.insert(a, na);
                         }
                     }
@@ -1003,9 +1042,7 @@ fn renumber(dst: &mut Document, src: &Document, it: &mut Item, stories: &mut Has
             }
         }
         Content::Graphic(g) => {
-            if let Some(a) = dst.adopt_asset(src, g.asset) {
-                g.asset = a;
-            }
+            g.asset = adopt_or_dangle(dst, src, g.asset);
         }
         Content::Group { items } => {
             for c in items.iter_mut() {
@@ -1487,6 +1524,20 @@ fn set_flag(s: &mut Session, p: &Value, f: impl Fn(&mut Item), deselect: bool) -
 /// An object a colour command may change: neither it nor its layer is locked.
 fn unlocked(d: &Document, it: &Item) -> bool {
     !it.locked && d.layer(it.layer).is_none_or(|l| !l.locked)
+}
+
+/// Refuses a path edit on `id` when it, a group it sits in, or its layer is locked.
+pub(super) fn path_editable(d: &Document, id: ItemId, cmd: &str) -> Result<()> {
+    let loc = d.find(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
+    let mut items = d.spread(loc.spread).map(|sp| &sp.items[..]).unwrap_or_default();
+    for &i in &loc.path {
+        let Some(it) = items.get(i) else { break };
+        if !unlocked(d, it) {
+            return Err(bad(cmd, "the path is locked"));
+        }
+        items = it.children();
+    }
+    Ok(())
 }
 
 fn has_editable_selection(s: &Session) -> std::result::Result<(), String> {
@@ -2075,6 +2126,7 @@ fn path_append(s: &mut Session, p: &Value) -> Result<Value> {
     let a = p.get("anchor").and_then(anchor_from).ok_or_else(|| bad("path.appendAnchor", "missing anchor"))?;
     let subpath = p.get("subpath").and_then(Value::as_u64);
     s.edit(|d, _| {
+        path_editable(d, id, "path.appendAnchor")?;
         let loc = d.find(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let inv = (d.parent_xf(&loc) * d.item_at(&loc).map(|i| i.xf).unwrap_or_default()).inverse();
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
@@ -2110,12 +2162,10 @@ fn path_set_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let subpath = p.get("subpath").and_then(Value::as_u64);
     let which = p.get("anchor").cloned().unwrap_or(Value::Null);
     s.edit(|d, _| {
+        path_editable(d, id, ID)?;
         let loc = d.find(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let inv = (d.parent_xf(&loc) * d.item_at(&loc).map(|i| i.xf).unwrap_or_default()).inverse();
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
-        if it.locked {
-            return Err(bad(ID, "the path is locked"));
-        }
         let sp = match subpath {
             Some(i) => usize::try_from(i).ok().and_then(|i| it.path.subpaths.get_mut(i)),
             None => it.path.subpaths.last_mut(),
@@ -2157,12 +2207,19 @@ fn path_reverse(s: &mut Session, p: &Value) -> Result<Value> {
     {
         return Err(bad("path.reverse", "no such subpath"));
     }
-    let ids = if only.is_some() { ids.into_iter().take(1).collect() } else { ids };
+    let ids: Vec<ItemId> = if only.is_some() { ids.into_iter().take(1).collect() } else { ids };
+    let doc = &s.doc()?.doc;
+    let editable: Vec<ItemId> = ids.iter().copied().filter(|id| path_editable(doc, *id, "path.reverse").is_ok()).collect();
+    if editable.is_empty()
+        && let Some(id) = ids.first()
+    {
+        path_editable(doc, *id, "path.reverse")?;
+    }
     s.edit(|d, _| {
         let mut reversed = 0;
-        for id in &ids {
+        for id in &editable {
             let Some(it) = d.item_mut(*id) else { continue };
-            if it.locked || it.is_group() {
+            if it.is_group() {
                 continue;
             }
             for (i, sp) in it.path.subpaths.iter_mut().enumerate() {
@@ -2184,6 +2241,7 @@ fn path_close(s: &mut Session, p: &Value) -> Result<Value> {
     let id = super::id_param(p, "id").ok_or_else(|| bad("path.close", "missing id"))?;
     let only = p.get("subpath").and_then(Value::as_u64).map(|i| usize::try_from(i).unwrap_or(usize::MAX));
     s.edit(|d, _| {
+        path_editable(d, id, "path.close")?;
         let it = d.item_mut(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         if only.is_some_and(|i| i >= it.path.subpaths.len()) {
             return Err(bad("path.close", "no such subpath"));
@@ -2206,6 +2264,7 @@ fn path_move_anchors(s: &mut Session, p: &Value) -> Result<Value> {
     let d0 = Vec2::new(f64_or(p, "dx", 0.0), f64_or(p, "dy", 0.0));
     let handle = str_param(p, "handle").map(str::to_string);
     s.edit(|d, _| {
+        path_editable(d, id, "path.moveAnchors")?;
         let loc = d.find(id).ok_or(designcraft_doc::DocError::NoItem(id))?;
         let m = d.parent_xf(&loc) * d.item_at(&loc).map(|i| i.xf).unwrap_or_default();
         // Spread-space delta → inner-space delta (linear part only).
@@ -3300,6 +3359,50 @@ mod path_edit_tests {
         assert!(s.execute("path.appendAnchor", &json!({"id": id, "anchor": {"p": [0, 0]}})).is_err());
         assert!(s.execute("path.close", &json!({"id": id, "subpath": 4})).is_err());
     }
+
+    /// Every edit that `path_editable` guards, aimed at the path `id` of `session_with_path`.
+    fn path_edits(id: u64) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            ("path.appendAnchor", json!({"id": id, "anchor": {"p": [400, 250]}})),
+            ("path.setAnchor", json!({"id": id, "anchor": 0, "p": [90, 110]})),
+            ("path.close", json!({"id": id})),
+            ("path.moveAnchors", json!({"id": id, "anchors": [[0, 0]], "dx": 10, "dy": 10})),
+            ("path.reverse", json!({"ids": [id]})),
+            ("path.addAnchor", json!({"id": id, "at": [150, 100]})),
+            ("path.deleteAnchor", json!({"id": id, "subpath": 0, "anchor": 0})),
+            ("path.convertAnchor", json!({"id": id, "subpath": 0, "anchor": 0})),
+            ("path.erase", json!({"id": id, "points": [[120, 100], [180, 100]]})),
+            ("path.smooth", json!({"id": id, "points": [[120, 100], [180, 100]]})),
+            ("path.split", json!({"id": id, "at": [150, 100]})),
+        ]
+    }
+
+    fn assert_no_path_edit(s: &mut crate::Session, id: u64, why: &str) {
+        let before = anchors(s, id);
+        for (cmd, p) in path_edits(id) {
+            assert!(s.execute(cmd, &p).is_err(), "{cmd} {why}");
+        }
+        assert_eq!(anchors(s, id), before, "{why}");
+        assert!(!s.doc().unwrap().doc.item(ItemId(id)).unwrap().path.subpaths[0].closed, "{why}");
+    }
+
+    #[test]
+    fn path_edits_leave_a_path_on_a_locked_layer_alone() {
+        let (mut s, id) = session_with_path();
+        let layer = s.doc().unwrap().doc.item(ItemId(id)).unwrap().layer;
+        s.execute("layer.set", &json!({"id": layer.0, "locked": true})).unwrap();
+        assert_no_path_edit(&mut s, id, "on a locked layer");
+    }
+
+    #[test]
+    fn path_edits_leave_a_path_in_a_locked_group_alone() {
+        let (mut s, id) = session_with_path();
+        let other = s.execute("frame.create", &json!({"rect": [400, 400, 450, 450]})).unwrap()["id"].as_u64().unwrap();
+        let group = s.execute("object.group", &json!({"ids": [id, other]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.lock", &json!({"ids": [group]})).unwrap();
+        assert!(!s.doc().unwrap().doc.item(ItemId(id)).unwrap().locked, "only the group is locked");
+        assert_no_path_edit(&mut s, id, "in a locked group");
+    }
 }
 
 #[cfg(test)]
@@ -3325,5 +3428,38 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fill_tint_tests {
+    use super::*;
+
+    #[test]
+    fn a_tint_alone_keeps_each_objects_own_swatch() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let a = s.execute("frame.create", &json!({"rect": [36, 36, 100, 100]})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("frame.create", &json!({"rect": [136, 36, 200, 100]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.fill", &json!({"ids": [a], "swatch": "C=100 M=0 Y=0 K=0"})).unwrap();
+        s.execute("object.fill", &json!({"ids": [b], "swatch": "C=0 M=100 Y=0 K=0"})).unwrap();
+        s.execute("object.fill", &json!({"ids": [a, b], "tint": 0.4})).unwrap();
+        let fill_of = |s: &Session, id: u64| s.doc().unwrap().doc.item(ItemId(id)).unwrap().fill.clone();
+        assert_eq!((fill_of(&s, a).swatch.as_str(), fill_of(&s, a).tint), ("C=100 M=0 Y=0 K=0", 0.4));
+        assert_eq!((fill_of(&s, b).swatch.as_str(), fill_of(&s, b).tint), ("C=0 M=100 Y=0 K=0", 0.4));
+        // A swatch without a tint is at 100 %, as before.
+        s.execute("object.fill", &json!({"ids": [a], "swatch": "[Black]"})).unwrap();
+        assert_eq!(fill_of(&s, a).tint, 1.0);
+        // Neither, or a tint out of range: refused.
+        assert!(s.execute("object.fill", &json!({"ids": [a]})).is_err());
+        assert!(s.execute("object.fill", &json!({"ids": [a], "tint": 2})).is_err());
+        assert!(s.execute("object.fill", &json!({"ids": [a], "tint": "x"})).is_err());
+        // A stroke tint alone: stroked objects take it, an object without a stroke keeps none.
+        s.execute("object.stroke", &json!({"ids": [a], "swatch": "C=100 M=0 Y=0 K=0", "weight": 2})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [b], "swatch": "[None]"})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [a, b], "tint": 0.5})).unwrap();
+        let stroke_of = |s: &Session, id: u64| s.doc().unwrap().doc.item(ItemId(id)).unwrap().stroke.clone();
+        assert_eq!((stroke_of(&s, a).swatch.as_str(), stroke_of(&s, a).tint, stroke_of(&s, a).weight), ("C=100 M=0 Y=0 K=0", 0.5, 2.0));
+        assert!(stroke_of(&s, b).is_none());
     }
 }

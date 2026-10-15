@@ -108,3 +108,46 @@ fn one_file_placed_several_times_imports_as_one_asset() {
         }
     }
 }
+
+/// An `<SVG>` placement linking `uri`, whose GraphicBounds are `bounds` (left top right bottom).
+fn svg(n: usize, uri: &str, bounds: [f64; 4]) -> String {
+    let [l, t, r, b] = bounds;
+    format!(
+        r#"<SVG Self="sv{n}" ItemTransform="1 0 0 1 0 0">
+        <Properties><GraphicBounds Left="{l}" Top="{t}" Right="{r}" Bottom="{b}"/></Properties>
+        <Link Self="lk{n}" LinkResourceURI="{uri}" LinkResourceFormat="$ID/SVG" StoredState="Normal"/>
+      </SVG>"#
+    )
+}
+
+#[test]
+fn placed_svg_with_only_a_viewbox_keeps_its_viewbox_size() {
+    const OVERHANG: &str =
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><line x1="-10" y1="50" x2="0" y2="50" stroke="#000"/></svg>"##;
+    const SIZED: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100"><rect width="200" height="100"/></svg>"#;
+    let reader = |p: &str| match p {
+        "/art/overhang.svg" => Some(OVERHANG.as_bytes().to_vec()),
+        "/art/sized.svg" => Some(SIZED.as_bytes().to_vec()),
+        _ => None,
+    };
+    // GraphicBounds are the art's bounds: 211 wide for the overhanging one, placed twice (the second
+    // reuses the first's asset); a sized SVG is still stretched onto its bounds.
+    let frames = vec![
+        frame(1, 0.0, 0.0, &svg(1, "file:/art/overhang.svg", [-11.0, 0.0, 200.0, 100.0])),
+        frame(2, 100.0, 0.0, &svg(2, "file:/art/overhang.svg", [-11.0, 0.0, 200.0, 100.0])),
+        frame(3, 200.0, 0.0, &svg(3, "file:/art/sized.svg", [-10.0, 0.0, 200.0, 100.0])),
+    ];
+    let d = import_idml_with(&package(&frames), &reader).unwrap();
+    let mut gs: Vec<_> = d.spreads[0]
+        .items
+        .iter()
+        .filter_map(|i| match &i.content {
+            Content::Graphic(g) => Some((i.xf.translation().x, g.size, g.xf.translation().x)),
+            _ => None,
+        })
+        .collect();
+    gs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let got: Vec<_> = gs.into_iter().map(|(_, size, x)| (size, x)).collect();
+    assert_eq!(got, vec![((200.0, 100.0), -11.0), ((200.0, 100.0), -11.0), ((210.0, 100.0), -10.0)]);
+}

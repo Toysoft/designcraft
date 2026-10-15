@@ -32,6 +32,28 @@ impl Default for Fill {
 }
 
 impl Fill {
+    /// A radial gradient's ellipse on an object whose bounds (in its own space) are `b`: centre and
+    /// horizontal and vertical radii. As in InDesign, a radial gradient stretches with the object's
+    /// box: by default it's centred and reaches the box's sides (an ellipse in a non-square box);
+    /// with a Gradient Swatch tool vector it's centred at the vector's start, and the vector's
+    /// length, measured with the box made square, sets its size.
+    pub fn radial_ellipse(&self, b: designcraft_geom::Rect) -> (designcraft_geom::Point, f64, f64) {
+        let k = if b.width() > 1e-9 && b.height() > 1e-9 { b.height() / b.width() } else { 1.0 };
+        match self.gradient_vector {
+            Some([x0, y0, x1, y1]) => {
+                let r = designcraft_geom::Vec2::new(x1 - x0, (y1 - y0) / k).hypot();
+                (designcraft_geom::Point::new(x0, y0), r, r * k)
+            }
+            // A box with no width or height (a straight line's) has no ellipse: a circle across
+            // its length.
+            None if b.width() <= 1e-9 || b.height() <= 1e-9 => {
+                let r = b.width().max(b.height()).max(1e-3) / 2.0;
+                (b.center(), r, r)
+            }
+            None => (b.center(), b.width() / 2.0, b.height() / 2.0),
+        }
+    }
+
     pub fn none() -> Self {
         Fill { swatch: designcraft_color::swatch::NONE.into(), tint: 1.0, gradient_angle: None, gradient_vector: None, overprint: false }
     }
@@ -281,6 +303,10 @@ pub enum FirstBaseline {
     Leading,
     XHeight,
     Fixed,
+    /// The top of the font's em box: its `BASE` em box; else, for a CJK font, its OS/2 typo
+    /// ascender when the typo ascender and descender span one em; else half an em above half the
+    /// cap height.
+    EmboxHeight,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,7 +347,7 @@ pub struct TextFrameOptions {
     pub first_baseline_min: f64,
     pub ignore_wrap: bool,
     pub auto_size: AutoSize,
-    /// Reference point (0..9) that stays fixed when auto-sizing.
+    /// Reference point (0..9, row-major from the top left) that stays fixed when auto-sizing.
     pub auto_size_ref: u8,
     pub column_rule: bool,
     pub column_rule_weight: f64,
@@ -382,7 +408,7 @@ impl Default for TextFrameOptions {
             first_baseline_min: 0.0,
             ignore_wrap: false,
             auto_size: AutoSize::Off,
-            auto_size_ref: 1,
+            auto_size_ref: 4,
             column_rule: false,
             column_rule_weight: 1.0,
             column_rule_color: designcraft_color::swatch::BLACK.into(),
@@ -1105,6 +1131,29 @@ impl Item {
         self.path.bounds().unwrap_or(Rect::ZERO)
     }
 
+    /// The box a gradient feather spans, in item space: the path's bounds, or a group's visible
+    /// objects' (a group has no path of its own). Only the active states contribute, including in
+    /// nested groups. Walk iteratively so deeply nested documents don't exhaust the call stack.
+    pub fn feather_bounds(&self) -> Rect {
+        if !self.is_group() {
+            return self.inner_bounds();
+        }
+        let mut stack: Vec<_> = self.shown_children().map(|c| (c.as_ref(), c.xf)).collect();
+        let mut bounds: Option<Rect> = None;
+        while let Some((it, xf)) = stack.pop() {
+            if it.hidden {
+                continue;
+            }
+            if it.is_group() {
+                stack.extend(it.shown_children().map(|c| (c.as_ref(), xf * c.xf)));
+            } else {
+                let b = xf.transform_rect_bbox(it.inner_bounds());
+                bounds = Some(bounds.map_or(b, |have| have.union(b)));
+            }
+        }
+        bounds.unwrap_or(Rect::ZERO)
+    }
+
     /// Spread-space geometric bounds (axis-aligned box of the transformed path; groups: union).
     /// A group (its bounds are its children's). A frame holding pasted-into items is not.
     pub fn is_group(&self) -> bool {
@@ -1156,11 +1205,27 @@ impl Item {
         b.inflate(w, w)
     }
 
-    /// The frame's text area (inner space) after inset.
+    /// The text frame's text area (inner space): inside the part of a visible stroke that lies
+    /// within the frame, then the inset, on each edge.
     pub fn text_area(&self) -> Rect {
         let r = self.inner_bounds();
-        let inset = self.text_frame().map(|t| t.options.inset).unwrap_or([0.0; 4]);
+        let s = self.stroke_inside();
+        let inset = self.text_frame().map(|t| t.options.inset).unwrap_or([0.0; 4]).map(|v| v + s);
         Rect::new(r.x0 + inset[1], r.y0 + inset[0], (r.x1 - inset[3]).max(r.x0 + inset[1]), (r.y1 - inset[2]).max(r.y0 + inset[0]))
+    }
+
+    /// How far a visible stroke reaches inside the path: half its weight centred, all of it inside,
+    /// none outside.
+    fn stroke_inside(&self) -> f64 {
+        let w = self.stroke.weight;
+        if self.stroke.is_none() || !w.is_finite() {
+            return 0.0;
+        }
+        match self.stroke.align {
+            StrokeAlign::Center => w / 2.0,
+            StrokeAlign::Inside => w,
+            StrokeAlign::Outside => 0.0,
+        }
     }
 
     /// Spread-space centre.
@@ -1208,6 +1273,32 @@ mod tests {
     }
 
     #[test]
+    fn text_area_starts_inside_the_stroke() {
+        let mut it = Item::new(ItemId(1), LayerId(1), Shape::Rectangle, shapes::rectangle(Rect::new(0.0, 0.0, 100.0, 50.0)));
+        it.content = Content::Text(TextFrame { story: StoryId(2), options: TextFrameOptions { inset: [5.0, 6.0, 7.0, 8.0], ..Default::default() } });
+        let unstroked = Rect::new(6.0, 5.0, 92.0, 43.0);
+        let stroked = |align: StrokeAlign, swatch: &str| {
+            let mut it = it.clone();
+            it.stroke = Stroke { weight: 4.0, align, swatch: swatch.into(), ..Stroke::default() };
+            it.text_area()
+        };
+        let black = designcraft_color::swatch::BLACK;
+        // The part of the stroke inside the frame, on every edge, then the inset.
+        assert_eq!(stroked(StrokeAlign::Center, black), Rect::new(8.0, 7.0, 90.0, 41.0));
+        assert_eq!(stroked(StrokeAlign::Inside, black), Rect::new(10.0, 9.0, 88.0, 39.0));
+        assert_eq!(stroked(StrokeAlign::Outside, black), unstroked);
+        // A stroke without a colour doesn't count.
+        assert_eq!(stroked(StrokeAlign::Inside, designcraft_color::swatch::NONE), unstroked);
+        // Nor does a weight that isn't a number.
+        it.stroke = Stroke { weight: f64::NAN, ..Stroke::default() };
+        assert_eq!(it.text_area(), unstroked);
+        // A stroke wider than the frame leaves no room for text.
+        it.stroke = Stroke { weight: 200.0, align: StrokeAlign::Inside, ..Stroke::default() };
+        let a = it.text_area();
+        assert!(a.width() == 0.0 && a.height() == 0.0, "{a:?}");
+    }
+
+    #[test]
     fn group_bounds_union_children() {
         let a = Item::new(ItemId(1), LayerId(1), Shape::Rectangle, shapes::rectangle(Rect::new(0.0, 0.0, 10.0, 10.0)));
         let b = Item::new(ItemId(2), LayerId(1), Shape::Rectangle, shapes::rectangle(Rect::new(20.0, 20.0, 30.0, 40.0)));
@@ -1217,6 +1308,29 @@ mod tests {
         let mut n = 0;
         g.walk(&mut |_| n += 1);
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn feather_bounds_follow_visible_states_in_nested_groups() {
+        let a = Item::new(ItemId(1), LayerId(1), Shape::Rectangle, shapes::rectangle(Rect::new(10.0, 20.0, 30.0, 40.0)));
+        let mut b = a.clone();
+        b.id = ItemId(2);
+        b.xf = Affine::translate((500.0, 500.0));
+        let mut state = Item::new(ItemId(3), LayerId(1), Shape::Group, PathData::default());
+        state.content = Content::Group { items: vec![Arc::new(a), Arc::new(b)] };
+        state.states = vec!["Visible".into(), "Inactive".into()];
+        assert_eq!(state.feather_bounds(), Rect::new(10.0, 20.0, 30.0, 40.0));
+        state.active_state = 1;
+        assert_eq!(state.feather_bounds(), Rect::new(510.0, 520.0, 530.0, 540.0));
+        state.active_state = 0;
+        state.xf = Affine::translate((5.0, 10.0)) * Affine::scale(2.0);
+        let mut hidden = state.clone();
+        hidden.id = ItemId(4);
+        hidden.hidden = true;
+        hidden.xf = Affine::translate((-1000.0, -1000.0));
+        let mut outer = Item::new(ItemId(5), LayerId(1), Shape::Group, PathData::default());
+        outer.content = Content::Group { items: vec![Arc::new(state), Arc::new(hidden)] };
+        assert_eq!(outer.feather_bounds(), Rect::new(25.0, 50.0, 65.0, 90.0));
     }
 
     #[test]

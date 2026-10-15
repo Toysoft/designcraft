@@ -190,6 +190,13 @@ impl Digits {
     }
 }
 
+/// Does `c` belong to a script that capitalizes the first letter of sentences, words and headings?
+/// Georgian doesn't: Unicode maps Mkhedruli to Mtavruli capitals, but those are only for all-caps
+/// text, never for a sentence's, a title's or an index heading's first letter.
+pub fn capitalizes(c: char) -> bool {
+    !matches!(c, '\u{10A0}'..='\u{10FF}' | '\u{1C90}'..='\u{1CBF}' | '\u{2D00}'..='\u{2D2F}')
+}
+
 /// The BCP 47 tag of a language name as InDesign and IDML write it ("English: USA", "Chinese:
 /// Simplified", or a locale code such as "de_DE_2006"), for the shaper's localized forms (`locl`)
 /// and everything that depends on the language (quotes, hyphenation and spelling, line breaking,
@@ -272,6 +279,7 @@ pub fn language_tag(language: &str) -> Option<&'static str> {
         "persian" | "farsi" => "fa",
         "urdu" => "ur",
         "hebrew" => "he",
+        "georgian" => "ka",
         _ => return None,
     })
 }
@@ -431,6 +439,8 @@ pub enum NestedUntil {
     ForcedLineBreak,
     EmSpace,
     EnSpace,
+    /// The paragraph's drop cap characters.
+    Dropcap,
     /// Any of these characters.
     Chars(String),
 }
@@ -464,6 +474,18 @@ pub struct NestedStyle {
 impl Default for NestedStyle {
     fn default() -> Self {
         NestedStyle { style: String::new(), through: true, count: 1, until: NestedUntil::Words }
+    }
+}
+
+impl NestedStyle {
+    /// The drop cap's character style as a nested style: `style` through 1 drop cap.
+    pub fn drop_cap(style: &str) -> Self {
+        NestedStyle { style: style.into(), through: true, count: 1, until: NestedUntil::Dropcap }
+    }
+
+    /// Is this the form a drop cap's character style takes at the start of a nested style list?
+    pub fn is_drop_cap(&self) -> bool {
+        self.until == NestedUntil::Dropcap && self.through && self.count == 1
     }
 }
 
@@ -530,12 +552,16 @@ pub struct TabStop {
     pub align_on: String,
 }
 
+/// The colour of a paragraph rule that follows the paragraph's text colour.
+pub const TEXT_COLOR: &str = "Text Color";
+
 /// A paragraph rule (Rule Above / Rule Below).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Rule {
     pub on: bool,
     pub weight: f64,
+    /// A swatch, or [`TEXT_COLOR`].
     pub color: String,
     pub tint: f32,
     /// Width: column (true) or text (false).
@@ -547,7 +573,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Rule { on: false, weight: 1.0, color: "[Black]".into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
+        Rule { on: false, weight: 1.0, color: TEXT_COLOR.into(), tint: 1.0, column_width: true, offset: 0.0, left_indent: 0.0, right_indent: 0.0 }
     }
 }
 
@@ -735,6 +761,9 @@ attr_set! {
         stroke: String = "[None]".into(),
         stroke_tint: f32 = 1.0,
         stroke_weight: f64 = 1.0,
+        /// Stroke behind fill: the stroke is painted under the fill and lies wholly outside the
+        /// letters at its full weight, so the letters keep their shape. Off, it straddles the outline.
+        stroke_behind_fill: bool = false,
         capitalization: Capitalization = Capitalization::Normal,
         position: Position = Position::Normal,
         underline: bool = false,
@@ -809,8 +838,17 @@ attr_set! {
         last_line_indent: f64 = 0.0,
         space_before: f64 = 0.0,
         space_after: f64 = 0.0,
+        /// Drop cap: the paragraph's first `drop_cap_chars` characters (code points, never
+        /// splitting a base from its combining marks) set `drop_cap_lines` lines tall, in the
+        /// character style `drop_cap_style` ("" or `[None]`: the text's own formatting).
         drop_cap_lines: u32 = 0,
         drop_cap_chars: u32 = 0,
+        drop_cap_style: String = String::new(),
+        /// Align Left Edge: the drop cap's ink starts at the indent (its first letter's left side
+        /// bearing is taken off), and the lines beside it start where its advance ends.
+        drop_cap_align_left: bool = true,
+        /// Scale for Descenders (kept and round-tripped; doesn't change the layout).
+        drop_cap_scale_descenders: bool = false,
         /// Nested styles, in order from the paragraph start.
         nested_styles: Vec<NestedStyle> = Vec::new(),
         /// GREP styles: a character style for every match of a pattern (applied after nested).
@@ -855,7 +893,8 @@ attr_set! {
         // Keeps
         keep_with_next: u32 = 0,
         keep_lines_together: bool = false,
-        keep_all_lines: bool = true,
+        /// All lines in paragraph (true) or at start/end of paragraph (false).
+        keep_all_lines: bool = false,
         keep_first: u32 = 2,
         keep_last: u32 = 2,
         start_paragraph: StartParagraph = StartParagraph::Anywhere,
@@ -962,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn stroke_behind_fill_is_saved_only_when_set() {
+        assert!(!CharProps::default().stroke_behind_fill);
+        assert_eq!(serde_json::to_value(CharAttrs::default()).unwrap(), serde_json::json!({}));
+        let mut a = CharAttrs::default();
+        a.set_json("strokeBehindFill", &serde_json::json!(true)).unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v, serde_json::json!({"strokeBehindFill": true}));
+        assert_eq!(serde_json::from_value::<CharAttrs>(v).unwrap(), a);
+        let mut p = CharProps::default();
+        p.apply(&a);
+        assert!(p.stroke_behind_fill);
+    }
+
+    #[test]
     fn digits_map_to_their_script() {
         assert_eq!(Digits::Default.map('7', "Arabic"), '7');
         assert_eq!(Digits::Hindi.map('3', ""), '\u{0663}');
@@ -976,6 +1029,7 @@ mod tests {
         assert_eq!(language_tag("English: USA"), Some("en-US"));
         assert_eq!(language_tag("English: Australian"), Some("en"));
         assert_eq!(language_tag("Turkish"), Some("tr"));
+        assert_eq!(language_tag("Georgian"), Some("ka"));
         assert_eq!(language_tag("Japanese"), Some("ja"));
         assert_eq!(language_tag("Korean"), Some("ko"));
         assert_eq!(language_tag("Chinese"), Some("zh"));
