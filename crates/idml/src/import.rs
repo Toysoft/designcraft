@@ -499,10 +499,12 @@ impl<'r> Importer<'r> {
                     characters: c.get("CustomCharacters").unwrap_or("").into(),
                     family: c.prop("AppliedFont").unwrap_or_default(),
                     style: c.get("FontStyle").unwrap_or("Regular").trim_start_matches("$ID/").into(),
-                    relative_size: c.num("RelativeSize").unwrap_or(100.0) / 100.0,
-                    horizontal_scale: c.num("HorizontalScale").unwrap_or(100.0) / 100.0,
-                    vertical_scale: c.num("VerticalScale").unwrap_or(100.0) / 100.0,
-                    baseline_shift: c.num("BaselineShift").unwrap_or(0.0) / 100.0,
+                    // A metric `Document::check` refuses would make the whole file fail to
+                    // open, so one that is unusable here falls back to full size / no shift.
+                    relative_size: c.num("RelativeSize").filter(|v| v.is_finite() && *v > 0.0).unwrap_or(100.0) / 100.0,
+                    horizontal_scale: c.num("HorizontalScale").filter(|v| v.is_finite() && *v > 0.0).unwrap_or(100.0) / 100.0,
+                    vertical_scale: c.num("VerticalScale").filter(|v| v.is_finite() && *v > 0.0).unwrap_or(100.0) / 100.0,
+                    baseline_shift: c.num("BaselineShift").filter(|v| v.is_finite()).unwrap_or(0.0) / 100.0,
                     scale_option: c.boolean("ScaleOption").unwrap_or(true),
                 })
                 .collect();
@@ -531,9 +533,9 @@ impl<'r> Importer<'r> {
                             target_class: r.num("TargetMojikumiClass").unwrap_or(0.0) as i16,
                             side_class: r.num("SideMojikumiClass").unwrap_or(0.0) as i16,
                             after: r.boolean("SideIsAfterTarget").unwrap_or(false),
-                            minimum: r.num("Minimum").unwrap_or(0.0),
-                            desired: r.num("Desired").unwrap_or(0.0),
-                            maximum: r.num("Maximum").unwrap_or(0.0),
+                            minimum: r.num("Minimum").filter(|v| v.is_finite()).unwrap_or(0.0),
+                            desired: r.num("Desired").filter(|v| v.is_finite()).unwrap_or(0.0),
+                            maximum: r.num("Maximum").filter(|v| v.is_finite()).unwrap_or(0.0),
                             priority: r.num("CompressionPriority").unwrap_or(0.0) as i16,
                             does_not_float: r.boolean("AkiDoesNotFloat").unwrap_or(false),
                         })
