@@ -16,6 +16,7 @@ mod endnotes;
 mod export;
 mod file;
 pub(crate) mod find;
+mod fit_text;
 pub use find::same_find_domain;
 pub(crate) mod flex;
 mod fonts;

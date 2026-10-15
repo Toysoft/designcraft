@@ -176,7 +176,15 @@ impl SelectionTool {
         {
             self.loaded = None;
             self.drag = Drag::None;
-            return Some(exec(crate::thread::unthread_at_port(cx.doc, frame, out)));
+            let unthread = crate::thread::unthread_at_port(cx.doc, frame, out);
+            // A short frame's ports sit on its side handles: with no link to break there, the
+            // double click is the handle's (fit the frame to its text).
+            if unthread.is_none()
+                && let Some(fit) = fit_text_frames_at(cx, p)
+            {
+                return Some(fit);
+            }
+            return Some(exec(unthread));
         }
         self.loaded = self.loaded.and_then(|l| l.resolve(cx.doc));
         match (ev.kind, self.loaded) {
@@ -469,6 +477,15 @@ impl Tool for SelectionTool {
         if !self.direct
             && let Some(actions) = self.thread_pointer(cx, ev)
         {
+            return actions;
+        }
+        // The second press of a double click on a handle: the selected text frames fit their text.
+        if !self.direct
+            && matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
+            && ev.click_count() == 2
+            && let Some(actions) = fit_text_frames_at(cx, p)
+        {
+            self.drag = Drag::None;
             return actions;
         }
         // The second press of a double click on a text frame: edit its text.
@@ -931,6 +948,26 @@ fn handle_cursor(h: usize) -> Cursor {
 }
 
 /// Switch to the Type tool with the caret at `p` when it is over a text frame.
+/// Fit the selected text frames to their text (Fit Frame to Content), as a double click on a
+/// selection handle at `p` asks: a corner fits both ways, the top or bottom handle the height, a
+/// side handle the width. One undo step for every frame.
+fn fit_text_frames_at(cx: &ToolContext, p: Point) -> Option<Vec<Action>> {
+    let h = handle_at(cx, p)?;
+    let ids: Vec<u64> = cx.selection.items.iter().filter(|id| cx.doc.item(**id).is_some_and(|i| i.is_text_frame())).map(|id| id.0).collect();
+    if ids.is_empty() {
+        return None;
+    }
+    // On a turned spread the canvas handle is another one of the spread's (as when resizing).
+    let first = cx.selection.items.first().and_then(|id| cx.doc.find(*id))?;
+    let turns = cx.layout.slot(first.spread).map_or(0, |s| s.rotation as usize);
+    let axes = match (h + 8 - 2 * turns) % 8 {
+        1 | 5 => "height",
+        3 | 7 => "width",
+        _ => "both",
+    };
+    Some(vec![Action::Exec("object.fit".into(), json!({"mode": "fitFrameToContent", "axes": axes, "ids": ids}))])
+}
+
 fn edit_text_at(cx: &ToolContext, p: Point) -> Option<Vec<Action>> {
     let (_, id) = cx.hit(p)?;
     if !cx.doc.item(id).is_some_and(|i| i.is_text_frame()) {

@@ -1314,3 +1314,66 @@ fn anchor_tools_show_pen_state_cursors() {
     assert_eq!(cursor("deleteAnchor"), Cursor::PenDelete);
     assert_eq!(cursor("convertDirection"), Cursor::PenConvert);
 }
+
+#[test]
+fn double_click_on_a_handle_fits_the_selected_text_frames() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (fid, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 300.0, 200.0), lid, "Two words", ParaFormat::default()).unwrap();
+    let (s, c, l) = (Selection::items(vec![fid]), Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let fit = |axes: &str| vec![Action::Exec("object.fit".into(), serde_json::json!({"mode": "fitFrameToContent", "axes": axes, "ids": [fid.0]}))];
+    for ((x, y), axes) in
+        [((200.0, 200.0), "height"), ((200.0, 100.0), "height"), ((300.0, 150.0), "width"), ((100.0, 150.0), "width"), ((300.0, 200.0), "both")]
+    {
+        let p = Point::new(x + off.x, y + off.y);
+        // A double click sent as such (control channel), and the canvas's second press.
+        for ev in [PointerEvent::new(PointerKind::DoubleClick, p.x, p.y), PointerEvent::new(PointerKind::Down, p.x, p.y).with_clicks(2)] {
+            let mut t = create("selection");
+            click(&mut t, &cx, p, Mods::default());
+            assert_eq!(t.pointer(&cx, &ev), fit(axes), "{axes} at {x}, {y}: {ev:?}");
+            assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, p.x, p.y)).is_empty(), "nothing left to commit");
+        }
+    }
+    // Inside the frame (no handle), a double click still edits its text.
+    let inside = Point::new(150.0 + off.x, 150.0 + off.y);
+    let mut t = create("selection");
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, inside.x, inside.y).with_clicks(2));
+    assert_eq!(a.first(), Some(&Action::SwitchTool("type".into())));
+}
+
+#[test]
+fn double_click_on_a_graphic_frame_handle_fits_nothing() {
+    let mut d = Document::new(&NewDocument::default());
+    let id = add_rect(&mut d, Rect::new(100.0, 100.0, 300.0, 200.0));
+    let (s, c, l) = (Selection::items(vec![id]), Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let p = Point::new(300.0 + off.x, 200.0 + off.y);
+    let mut t = create("selection");
+    click(&mut t, &cx, p, Mods::default());
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, p.x, p.y).with_clicks(2));
+    assert!(!a.iter().any(|a| matches!(a, Action::Exec(id, _) if id == "object.fit")), "{a:?}");
+}
+
+#[test]
+fn double_click_on_a_one_line_frames_side_handle_fits_its_width_though_a_port_is_there() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let (fid, _) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 300.0, 112.0), lid, "Short", ParaFormat::default()).unwrap();
+    let (s, c, l) = (Selection::items(vec![fid]), Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    for (x, port_out) in [(300.0, true), (100.0, false)] {
+        let p = Point::new(x + off.x, 106.0 + off.y);
+        assert_eq!(thread::port_at(&cx, p), Some((fid, port_out)), "the port sits on the side handle");
+        let mut t = create("selection");
+        click(&mut t, &cx, p, Mods::default());
+        let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Down, p.x, p.y).with_clicks(2));
+        assert_eq!(a, vec![Action::Exec("object.fit".into(), serde_json::json!({"mode": "fitFrameToContent", "axes": "width", "ids": [fid.0]}))]);
+        // The first click's loaded cursor is gone.
+        assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Up, p.x, p.y)).is_empty());
+        assert_eq!(t.cursor(&cx, Point::new(500.0 + off.x, 500.0 + off.y), Mods::default()), Cursor::Arrow);
+    }
+}
