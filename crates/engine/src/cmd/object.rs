@@ -615,7 +615,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fitting",
             ["Object", "Fitting"],
             None,
-            "{mode: fillProportionally (preserves aspect ratio, covers frame, clips overflow)|fitProportionally (preserves aspect ratio, shows whole image, may leave empty space)|fitContentToFrame (stretches content to frame)|centerContent (keeps current size, positions at fitting alignment)|fitFrameToContent (resizes frame to content), ids?}",
+            "{mode: fillProportionally (preserves aspect ratio, covers frame, clips overflow)|fitProportionally (preserves aspect ratio, shows whole image, may leave empty space)|fitContentToFrame (stretches content to frame)|centerContent (keeps current size, positions at fitting alignment)|fitFrameToContent (resizes frame to content; a text frame bigger than its text shrinks around it, never grows, and narrows only when none of its lines wraps, as double-clicking its handle does), axes?: both|width|height (text frames, fitFrameToContent; default both), ids?} → {fitted: frames changed}",
             has_selection,
             fit
         ),
@@ -1978,15 +1978,38 @@ fn fitting_options(s: &mut Session, p: &Value) -> Result<Value> {
 fn fit(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = targets(s, p)?;
     let mode = str_param(p, "mode").unwrap_or("fitProportionally").to_string();
+    let axes = str_param(p, "axes").unwrap_or("both");
+    let axes = super::fit_text::Axes::parse(axes).ok_or_else(|| bad("object.fit", format!("unknown axes `{axes}`; use both, width or height")))?;
+    // Text frames fit their text: measured before the edit, on the document as it is.
+    let text_fits: HashMap<ItemId, Rect> = if mode == "fitFrameToContent" {
+        let doc = Arc::clone(&s.doc()?.doc);
+        ids.iter()
+            .filter(|id| doc.item(**id).is_some_and(|i| i.is_text_frame() && !i.locked))
+            .filter_map(|id| Some((*id, super::fit_text::fitted_bounds(s, &doc, *id, axes)?)))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     s.edit(|d, _| {
+        let mut fitted = 0;
         for id in &ids {
             let Some(it) = d.item_mut(*id) else { continue };
             let r = it.inner_bounds();
+            if let Some(to) = text_fits.get(id) {
+                // The frame's path takes the new bounds, in its own space (rotated frames too).
+                let (sx, sy) = (to.width() / r.width(), to.height() / r.height());
+                if sx.is_finite() && sy.is_finite() {
+                    bake(it, Affine::translate((to.x0, to.y0)) * Affine::scale_non_uniform(sx, sy) * Affine::translate((-r.x0, -r.y0)));
+                    fitted += 1;
+                }
+                continue;
+            }
             let Content::Graphic(g) = &mut it.content else { continue };
             let (nw, nh) = g.size;
             let cur = g.xf.transform_rect_bbox(Rect::new(0.0, 0.0, nw, nh));
             if mode == "fitFrameToContent" {
                 it.path = shapes::rectangle(cur);
+                fitted += 1;
                 continue;
             }
             let m = fitting_mode(&mode)
@@ -1995,8 +2018,9 @@ fn fit(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(xf) = g.fitted(r, m) {
                 g.xf = xf;
             }
+            fitted += 1;
         }
-        ok()
+        Ok(json!({"fitted": fitted}))
     })
 }
 
