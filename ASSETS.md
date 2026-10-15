@@ -67,3 +67,12 @@ Generated-in-code art is original and has no file to list: the UI icon set (`cra
 | `docs/brand/LICENSE-brand.txt` | (licence text) | ArtCraft Team | — | Terms for the ArtCraft Marks in `docs/brand/` |
 | `packaging/macos/dmg/background.svg` | @XusBadia | original work for this repository, derived from the DesignCraft app icon (`assets/app-icon/designcraft.svg`, referenced via `<image>`, not copied); text is outlined Inter / JetBrains Mono glyph paths | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | DesignCraft macOS DMG window background for the Finder window; `packaging/macos/dmg/generate.py` renders it to `background.tiff` (2026-10-08) |
 | `packaging/macos/dmg/background.tiff` | @XusBadia | Rendered from `packaging/macos/dmg/background.svg` by `packaging/macos/dmg/generate.py` | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | 1x + 2x HiDPI TIFF for the macOS DMG window; includes the app icon (see its row) and LittleCMS's built-in sRGB profile ("No copyright, use freely") |
+
+## Linux Wayland frame (Cargo dependency)
+
+| Dependency asset | Title | Author | Source | Licence |
+|---|---|---|---|---|
+| `sctk-adwaita` 0.10.1: `src/title/Cantarell-Regular.ttf` | Cantarell Regular, unmodified fallback window-title font; Linux only | Understanding Limited; Jakub Steiner | [sctk-adwaita at d5f343c](https://github.com/PolyMeilex/sctk-adwaita/blob/d5f343c45c04d4a026db57f76760819b7325db00/src/title/Cantarell-Regular.ttf) | OFL-1.1; full copyright and licence in `NOTICE` |
+
+The font is embedded by the dependency, with no font file added to this repository.
+Adwaita window buttons are vector paths and do not depend on font glyphs.
