@@ -136,9 +136,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Color Swatch…",
             [],
             None,
-            "{name?, color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b]|{model: cmyk|rgb|gray, …}(0..1), spot?: bool}",
+            "{name?, color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b]|{model: cmyk|rgb|gray, …}(0..1), spot?: bool} | {name? (\"New Gradient Swatch\"), gradient: {kind?: linear|radial, stops: [{location: 0–100, swatch?: a colour swatch's name | color?, opacity?: 0–100, midpoint?: 13–87}]}} → {name}",
             has_doc,
             create_swatch
+        ),
+        cmd!(
+            "swatch.new",
+            "New Swatch",
+            [],
+            None,
+            "{swatch?: name, target?: fill|stroke} → {name} — the Swatches panel's New Swatch: `swatch` (default: the selection's fill or stroke) as a new swatch. An unnamed colour or gradient becomes a named one (a gradient: \"New Gradient Swatch\"), still applied; a named swatch is duplicated (\"… copy\"); with nothing selected and no `swatch`, a new colour swatch",
+            has_doc,
+            new_swatch
         ),
         cmd!(
             "object.gradient",
@@ -771,7 +780,10 @@ fn delete_char(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn create_swatch(s: &mut Session, p: &Value) -> Result<Value> {
-    let c = p.get("color").ok_or_else(|| bad("swatch.create", "missing color"))?;
+    if let Some(g) = p.get("gradient") {
+        return create_gradient_swatch(s, p, g);
+    }
+    let c = p.get("color").ok_or_else(|| bad("swatch.create", "missing color (or gradient)"))?;
     let color = parse_color(c).ok_or_else(|| bad("swatch.create", "bad color"))?;
     let spot = p.get("spot").and_then(Value::as_bool).unwrap_or(false);
     let name = str_param(p, "name").map(str::to_string).unwrap_or_else(|| match color {
@@ -794,6 +806,85 @@ fn create_swatch(s: &mut Session, p: &Value) -> Result<Value> {
             hidden: false,
         });
         Ok(json!({"name": name}))
+    })
+}
+
+/// `swatch.create {gradient}`: a named gradient swatch. Stops take a colour swatch by name (as a
+/// swatch dragged onto the Gradient panel's stop) or a colour.
+fn create_gradient_swatch(s: &mut Session, p: &Value, g: &Value) -> Result<Value> {
+    use designcraft_color::{Gradient, GradientKind, GradientStop};
+    const ID: &str = "swatch.create";
+    let kind = match g.get("kind").and_then(Value::as_str) {
+        None | Some("linear") => GradientKind::Linear,
+        Some("radial") => GradientKind::Radial,
+        Some(k) => return Err(bad(ID, format!("unknown gradient kind {k}"))),
+    };
+    let doc = &s.doc()?.doc;
+    let mut stops = Vec::new();
+    for st in g.get("stops").and_then(Value::as_array).ok_or_else(|| bad(ID, "a gradient needs stops"))? {
+        let color = match (st.get("swatch").and_then(Value::as_str), st.get("color")) {
+            (Some(n), _) => match doc.swatch(n).map(|w| &w.value) {
+                Some(SwatchValue::Gradient { .. }) => return Err(bad(ID, format!("`{n}` is a gradient; a stop takes a colour"))),
+                Some(_) => doc.resolve_color(n, 1.0).ok_or_else(|| bad(ID, format!("`{n}` has no colour")))?,
+                None => return Err(bad(ID, format!("no swatch named `{n}`"))),
+            },
+            (None, Some(c)) => parse_color(c).ok_or_else(|| bad(ID, "a stop has a bad color"))?,
+            (None, None) => return Err(bad(ID, "a stop needs a swatch or a color")),
+        };
+        let pct = |k: &str, d: f64| st.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(d).clamp(0.0, 100.0) as f32 / 100.0;
+        stops.push(GradientStop {
+            offset: pct("location", 0.0),
+            color,
+            opacity: pct("opacity", 100.0),
+            midpoint: pct("midpoint", 50.0).clamp(0.13, 0.87),
+        });
+    }
+    if stops.len() < 2 {
+        return Err(bad(ID, "a gradient needs at least two stops"));
+    }
+    let mut gradient = Gradient { kind, stops };
+    gradient.sort();
+    let name = str_param(p, "name").unwrap_or("New Gradient Swatch").to_string();
+    s.edit(|d, _| {
+        let name = Styles::unique_name(|n| d.swatch(n).is_some(), &name);
+        d.swatches.push(Swatch { name: name.clone(), value: SwatchValue::Gradient { gradient }, locked: false, named: true, hidden: false });
+        Ok(json!({"name": name}))
+    })
+}
+
+/// `swatch.new`: InDesign's New Swatch. An unnamed colour or gradient (the selection's, or
+/// `swatch`) is added to the swatches under a name, and stays applied; a named swatch is
+/// duplicated as "<name> copy".
+fn new_swatch(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "swatch.new";
+    let st = s.doc()?;
+    let name = match str_param(p, "swatch") {
+        Some(n) => n.to_string(),
+        None => {
+            let Some(id) = st.selection.items.first().copied() else {
+                // Nothing selected: a new colour swatch.
+                return create_swatch(s, &json!({"color": {"c": 0, "m": 50, "y": 100, "k": 0}}));
+            };
+            let it = st.doc.item(id).ok_or_else(|| bad(ID, "no such item"))?;
+            if str_param(p, "target") == Some("stroke") { it.stroke.swatch.clone() } else { it.fill.swatch.clone() }
+        }
+    };
+    let w = st.doc.swatch(&name).cloned().ok_or_else(|| bad(ID, format!("no swatch named `{name}`")))?;
+    if matches!(w.value, SwatchValue::None | SwatchValue::Registration) {
+        return Err(bad(ID, format!("`{name}` can't be made a new swatch")));
+    }
+    if w.hidden {
+        // An unnamed gradient takes InDesign's "New Gradient Swatch"; an unnamed colour its values.
+        let new = match w.value {
+            SwatchValue::Gradient { .. } => Styles::unique_name(|n| st.doc.swatch(n).is_some(), "New Gradient Swatch"),
+            _ => name.clone(),
+        };
+        return add_to_swatches(s, &json!({"swatch": name, "name": new}));
+    }
+    s.edit(|d, _| {
+        let copy = Styles::unique_name(|n| d.swatch(n).is_some(), &format!("{name} copy"));
+        d.swatches.push(Swatch { name: copy.clone(), locked: false, named: true, hidden: false, ..w.clone() });
+        Ok(json!({"name": copy}))
     })
 }
 
@@ -2191,6 +2282,81 @@ mod gradient_stroke_tests {
         // shows its middle.
         assert!(s[1] < 60 && s[0] > 80 && s[2] > 80, "screen: the stroke is painted, {s:?}");
         assert!((0..3).all(|i| s[i].abs_diff(p[i]) < 40), "screen {s:?}, pdf {p:?}");
+    }
+}
+
+#[cfg(test)]
+mod gradient_swatch_tests {
+    use designcraft_color::SwatchValue;
+    use serde_json::json;
+
+    fn doc() -> crate::Session {
+        let mut s = crate::Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        s
+    }
+
+    #[test]
+    fn a_gradient_swatch_from_colour_swatches() {
+        let mut s = doc();
+        // As the Gradient panel's stops take swatches dragged onto them.
+        let r = s
+            .execute(
+                "swatch.create",
+                &json!({"gradient": {"stops": [{"location": 100, "swatch": "C=100 M=0 Y=0 K=0"}, {"location": 0, "swatch": "C=0 M=100 Y=0 K=0"}]}}),
+            )
+            .unwrap();
+        assert_eq!(r["name"], "New Gradient Swatch");
+        let d = &s.doc().unwrap().doc;
+        let w = d.swatch("New Gradient Swatch").unwrap();
+        assert!(w.named && !w.hidden);
+        let SwatchValue::Gradient { gradient } = &w.value else { panic!("{w:?}") };
+        assert_eq!(gradient.stops[0].color, d.resolve_color("C=0 M=100 Y=0 K=0", 1.0).unwrap(), "sorted: magenta first");
+        assert_eq!(gradient.stops[1].color, d.resolve_color("C=100 M=0 Y=0 K=0", 1.0).unwrap());
+        // A second one gets its own name; bad stops are refused.
+        let r = s
+            .execute(
+                "swatch.create",
+                &json!({"gradient": {"kind": "radial", "stops": [{"color": "#ff0000"}, {"location": 100, "color": "#0000ff"}]}}),
+            )
+            .unwrap();
+        assert_eq!(r["name"], "New Gradient Swatch 2");
+        for bad in [
+            json!({"stops": [{"swatch": "C=0 M=100 Y=0 K=0"}]}),
+            json!({"stops": [{"swatch": "Nope"}, {"swatch": "[Black]"}]}),
+            json!({"stops": [{"swatch": "New Gradient Swatch"}, {"swatch": "[Black]"}]}),
+            json!({"kind": "conic", "stops": [{"color": "#000000"}, {"color": "#ffffff"}]}),
+        ] {
+            assert!(s.execute("swatch.create", &json!({"gradient": bad})).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn new_swatch_names_the_selections_gradient_or_duplicates_a_swatch() {
+        let mut s = doc();
+        let id = s.execute("frame.create", &json!({"rect": [0, 0, 100, 100], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        // A gradient made in the Gradient panel is unnamed (and not listed) …
+        s.execute("object.gradient", &json!({"ids": [id], "stops": [{"location": 0, "color": {"c": 0, "m": 100, "y": 0, "k": 0}}, {"location": 100, "color": {"c": 100, "m": 0, "y": 0, "k": 0}}]})).unwrap();
+        let fill = |s: &crate::Session| s.doc().unwrap().doc.item(designcraft_doc::ItemId(id)).unwrap().fill.swatch.clone();
+        assert!(s.doc().unwrap().doc.swatch(&fill(&s)).unwrap().hidden);
+        // … until New Swatch: "New Gradient Swatch", listed, still the object's fill.
+        s.execute("selection.set", &json!({"ids": [id]})).unwrap();
+        assert_eq!(s.execute("swatch.new", &json!({})).unwrap()["name"], "New Gradient Swatch");
+        assert_eq!(fill(&s), "New Gradient Swatch");
+        let w = s.doc().unwrap().doc.swatch("New Gradient Swatch").unwrap().clone();
+        assert!(w.named && !w.hidden && matches!(w.value, SwatchValue::Gradient { .. }));
+        // A named swatch: a copy.
+        assert_eq!(s.execute("swatch.new", &json!({})).unwrap()["name"], "New Gradient Swatch copy");
+        assert_eq!(s.execute("swatch.new", &json!({"swatch": "C=100 M=0 Y=0 K=0"})).unwrap()["name"], "C=100 M=0 Y=0 K=0 copy");
+        assert!(s.execute("swatch.new", &json!({"swatch": "[None]"})).is_err());
+        // The stroke in front: the stroke's swatch.
+        s.execute("object.stroke", &json!({"ids": [id], "swatch": "C=100 M=0 Y=0 K=0"})).unwrap();
+        assert_eq!(s.execute("swatch.new", &json!({"target": "stroke"})).unwrap()["name"], "C=100 M=0 Y=0 K=0 copy 2");
+        // Nothing selected, no swatch given: a new colour swatch.
+        s.execute("edit.deselectAll", &json!({})).unwrap();
+        let n = s.execute("swatch.new", &json!({})).unwrap()["name"].as_str().unwrap().to_string();
+        let w = s.doc().unwrap().doc.swatch(&n).unwrap();
+        assert!(w.named && !w.hidden && matches!(w.value, SwatchValue::Color { .. }), "{w:?}");
     }
 }
 

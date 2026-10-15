@@ -71,8 +71,11 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
             {
                 ui.data_mut(|d| d.remove::<String>(egui::Id::new(PICKED)));
             }
+            // The selection's fill or stroke (whichever is in front) becomes a swatch; with nothing
+            // selected, a new colour.
             if icons::button(ui, "plus", 20.0, false, crate::i18n::tr(&app.ui.language, "New Swatch")).clicked() {
-                let _ = app.run("swatch.create", json!({"color": {"c": 0, "m": 50, "y": 100, "k": 0}}));
+                let target = if app.ui.stroke_front { "stroke" } else { "fill" };
+                let _ = app.run("swatch.new", json!({"target": target}));
             }
             if folder_button(ui, crate::i18n::tr(&app.ui.language, "New Color Group")).clicked() {
                 let _ = app.run("swatch.newColorGroup", json!({}));
