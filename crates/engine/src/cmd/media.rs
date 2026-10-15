@@ -26,7 +26,7 @@ pub(crate) fn place_media(s: &mut Session, p: &Value, name: String, mime: &str, 
     let mime = mime.to_string();
     s.edit(|d, sel| {
         let fresh = AssetId(d.alloc());
-        let aid = d.add_asset(Asset { page: 0, id: fresh, name, mime, link, data: Arc::new(bytes), pixels: None });
+        let aid = d.add_asset(Asset { id: fresh, name, mime, link, data: Arc::new(bytes), ..Default::default() });
         let id = match target {
             Some(fid) => {
                 let it = d.item_mut(fid).ok_or(designcraft_doc::DocError::NoItem(fid))?;
@@ -92,7 +92,15 @@ pub fn specs() -> Vec<CommandSpec> {
                         Some(Some((bytes, name, link, px))) => {
                             let fresh = AssetId(d.alloc());
                             let mime = designcraft_render::image_mime(&bytes).to_string();
-                            Some(Some(d.add_asset(Asset { page: 0, id: fresh, name, mime, link, data: Arc::new(bytes), pixels: Some(px) })))
+                            Some(Some(d.add_asset(Asset {
+                                id: fresh,
+                                name,
+                                mime,
+                                link,
+                                data: Arc::new(bytes),
+                                pixels: Some(px),
+                                ..Default::default()
+                            })))
                         }
                         Some(None) => Some(None),
                         None => None,

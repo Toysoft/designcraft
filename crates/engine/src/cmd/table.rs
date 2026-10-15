@@ -1400,8 +1400,15 @@ fn place_graphic(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit(|d, sel| {
         let fresh = designcraft_doc::AssetId(d.alloc());
         let mime = designcraft_render::image_mime(&bytes).to_string();
-        let aid =
-            d.add_asset(designcraft_doc::Asset { page: 0, id: fresh, name, mime, link, data: std::sync::Arc::new(bytes), pixels: Some((pw, ph)) });
+        let aid = d.add_asset(designcraft_doc::Asset {
+            id: fresh,
+            name,
+            mime,
+            link,
+            data: std::sync::Arc::new(bytes),
+            pixels: Some((pw, ph)),
+            ..Default::default()
+        });
         let st = d.story_mut(g.story).ok_or_else(|| bad(ID, "no story"))?;
         let t = st.table_mut(g.table).ok_or_else(|| bad(ID, "no table"))?;
         let (r, c) = t.owner(g.range.r0, g.range.c0);

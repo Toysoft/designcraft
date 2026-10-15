@@ -18,7 +18,7 @@ use crate::{EngineError, Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!(query "links.list", "Links", [], None, "{} → [{asset, name, path, status: ok|modified|missing|embedded, pixels, uses: [{id, page, ppi}]}], then linked text files: [{story, name, path, status (also tooLarge: unchanged size, too big to check), edited (the story was changed in the layout), uses: [{id, page}]}]", has_doc, |s, _| {
+        cmd!(query "links.list", "Links", [], None, "{} → [{asset, name, path, status: ok|modified|missing|embedded, pixels, pdfCrop (placed PDFs: the box shown), uses: [{id, page, ppi}]}], then linked text files: [{story, name, path, status (also tooLarge: unchanged size, too big to check), edited (the story was changed in the layout), uses: [{id, page}]}]", has_doc, |s, _| {
             let d = s.doc()?.doc.clone();
             Ok(Value::Array(list(&d, &mut s.text_link_checks)))
         }),
@@ -255,7 +255,8 @@ fn list(d: &Document, checks: &mut TextChecks) -> Vec<Value> {
                     json!({"id": id.0, "page": page, "ppi": ppi})
                 })
                 .collect();
-            json!({"asset": a.id.0, "name": a.name, "path": a.link, "status": status(a), "pixels": a.pixels, "uses": uses})
+            let pdf_crop = (a.mime == "application/pdf").then(|| a.pdf_crop.name());
+            json!({"asset": a.id.0, "name": a.name, "path": a.link, "status": status(a), "pixels": a.pixels, "pdfCrop": pdf_crop, "uses": uses})
         })
         .chain(texts)
         .collect()
@@ -331,6 +332,8 @@ fn relink(s: &mut Session, p: &Value) -> Result<Value> {
         a.pixels = Some(px);
         a.name = name.clone();
         a.link = Some(path.clone());
+        // A placed PDF keeps its crop choice; its box is found on the new file.
+        super::file::crop_pdf(a);
         Ok(json!({"name": name}))
     })
 }
@@ -412,6 +415,7 @@ fn update(s: &mut Session, p: &Value) -> Result<Value> {
                 let a = Arc::make_mut(a);
                 a.data = Arc::new(bytes.clone());
                 a.pixels = Some(*px);
+                super::file::crop_pdf(a);
             }
         }
         let mut warnings = Vec::new();
@@ -578,7 +582,7 @@ mod shared_asset_tests {
             link: None,
             data: Arc::new(data),
             pixels: None,
-            page: 0,
+            ..Default::default()
         };
         let mut src = Document::new(&NewDocument::default());
         let mut dst = Document::new(&NewDocument::default());
@@ -630,7 +634,7 @@ mod shared_asset_tests {
                 link: None,
                 data: Arc::new(png(8, 4)),
                 pixels: None,
-                page: 0,
+                ..Default::default()
             }),
         );
         let iid = ItemId(src.alloc());

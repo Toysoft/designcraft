@@ -43,7 +43,8 @@ fn print_booklet(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let opts = designcraft_pdf::BookletOptions { kind, space_between: p.get("spaceBetween").and_then(Value::as_f64).unwrap_or(0.0), title: None };
     let st = s.doc()?;
-    let r = designcraft_pdf::export_booklet(&st.doc, &s.cache, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
+    let r = designcraft_pdf::export_booklet(&super::interchange::with_pdf_boxes(&st.doc), &s.cache, &opts)
+        .map_err(|e| EngineError::Other(e.to_string()))?;
     match str_param(p, "path") {
         Some(path) => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -367,13 +368,12 @@ fn flatten(d: &designcraft_doc::Document, cache: &designcraft_compose::Cache, pp
             out.assets.insert(
                 aid,
                 std::sync::Arc::new(Asset {
-                    page: 0,
                     id: aid,
                     name: format!("flattened-{}.png", aid.0),
                     mime: "image/png".into(),
-                    link: None,
                     data: std::sync::Arc::new(img.to_png()),
                     pixels: Some((w, h)),
+                    ..Default::default()
                 }),
             );
             let mut it = Item::new(ItemId(out.alloc()), layer, Shape::Rectangle, designcraft_geom::shapes::rectangle(r));
@@ -533,13 +533,12 @@ fn rasterize_where(
         out.assets.insert(
             aid,
             std::sync::Arc::new(Asset {
-                page: 0,
                 id: aid,
                 name: format!("effects-{}.png", id.0),
                 mime: "image/png".into(),
-                link: None,
                 data: std::sync::Arc::new(img.to_png()),
                 pixels: Some((w, h)),
+                ..Default::default()
             }),
         );
         let mut img_item = Item::new(ItemId(out.alloc()), it.layer, Shape::Rectangle, designcraft_geom::shapes::rectangle(reach));
@@ -579,20 +578,23 @@ fn rasterize_layered(d: &designcraft_doc::Document) -> (Option<designcraft_doc::
         if !designcraft_render::is_pdf(&a.data) {
             continue;
         }
-        let side = (g.size.0.max(g.size.1) * 300.0 / 72.0).clamp(64.0, 8000.0) as u32;
-        let Some(png) = designcraft_render::pdf_page_png(&a.data, a.page as usize, side, &hidden) else { continue };
+        // The whole page at 300 ppi (the graphic may show only a box of it).
+        let shown = designcraft_render::shown_box(&a);
+        let [l, t, r, b] = shown.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let page_side = (g.size.0 / (r - l)).max(g.size.1 / (b - t));
+        let side = (page_side * 300.0 / 72.0).clamp(64.0, 8000.0) as u32;
+        let Some(png) = designcraft_render::pdf_page_png(&a.data, a.page as usize, side, &hidden, shown) else { continue };
         let px = designcraft_render::image_size(&png);
         let aid = designcraft_doc::AssetId(out.alloc());
         out.assets.insert(
             aid,
             std::sync::Arc::new(designcraft_doc::Asset {
-                page: 0,
                 id: aid,
                 name: format!("{}.png", a.name),
                 mime: "image/png".into(),
-                link: None,
                 data: std::sync::Arc::new(png),
                 pixels: px,
+                ..Default::default()
             }),
         );
         if let Some(designcraft_doc::Content::Graphic(gg)) = out.item_mut(id).map(|it| &mut it.content) {
@@ -631,6 +633,8 @@ fn export_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let base2: &designcraft_doc::Document = layered.as_ref().unwrap_or(base);
     let (fx_doc, fx_count) = rasterize_effects(base2, &s.cache);
     let doc: &designcraft_doc::Document = fx_doc.as_ref().unwrap_or(base2);
+    let boxed = super::interchange::with_pdf_boxes(doc);
+    let doc: &designcraft_doc::Document = &boxed;
     let r = designcraft_pdf::export_pdf_with_report(doc, &s.cache, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
     let mut r = r;
     // Transparency Blend Space: the page group of pages with transparency.

@@ -429,7 +429,7 @@ pub const LAYER_COLORS: &[(&str, [u8; 3])] = &[
 ];
 
 /// An embedded file (placed image / PDF). Bytes are stored next to the JSON in the native format.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
     pub id: AssetId,
@@ -446,6 +446,79 @@ pub struct Asset {
     /// The page shown from a multi-page PDF (0-based; Image Import Options).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub page: u32,
+    /// Image Import Options › Crop to: the page box a placed PDF shows.
+    #[serde(default, skip_serializing_if = "PdfCrop::is_crop")]
+    pub pdf_crop: PdfCrop,
+    /// Where the `pdf_crop` box sits on the page as rendered (its visible crop box, rotated as it
+    /// displays): left, top, right, bottom as fractions of the page's width and height. Graphic
+    /// space (0,0)-(w,h) spans this box. `None`: the whole page, or a Bounding Box crop not
+    /// measured yet (`designcraft_render::shown_box` measures it when the graphic is drawn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_box: Option<[f64; 4]>,
+}
+
+impl Asset {
+    /// The part of the page a placed PDF shows, when [`Asset::pdf_box`] holds a usable box.
+    pub fn shown_box(&self) -> Option<[f64; 4]> {
+        self.shown(self.pdf_box?)
+    }
+
+    /// `b` as the part of the page this asset shows: a usable box of a placed PDF.
+    pub fn shown(&self, b: [f64; 4]) -> Option<[f64; 4]> {
+        // A box under 1/10000 of the page, or far outside it, would blow the page up to sizes
+        // nothing can draw.
+        let usable = b.iter().all(|v| v.is_finite() && v.abs() <= 1e3) && b[2] - b[0] >= 1e-4 && b[3] - b[1] >= 1e-4;
+        (usable && self.mime == "application/pdf").then_some(b)
+    }
+
+    /// A Bounding Box crop ([`PdfCrop::ContentVisible`], [`PdfCrop::ContentAll`]) whose box isn't
+    /// stored yet: finding it needs the page's drawing interpreted.
+    pub fn content_box_pending(&self) -> bool {
+        self.pdf_box.is_none() && matches!(self.pdf_crop, PdfCrop::ContentVisible | PdfCrop::ContentAll) && self.mime == "application/pdf"
+    }
+}
+
+/// Image Import Options › Crop to: which box of a PDF page a placed PDF shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PdfCrop {
+    /// The crop box: the page as PDF readers show it.
+    #[default]
+    Crop,
+    Art,
+    Trim,
+    Bleed,
+    Media,
+    /// The bounds of what the page draws, with the layers the PDF shows by default.
+    ContentVisible,
+    /// The bounds of what the page draws, with every layer on.
+    ContentAll,
+}
+
+impl PdfCrop {
+    pub const ALL: [PdfCrop; 7] =
+        [PdfCrop::ContentVisible, PdfCrop::ContentAll, PdfCrop::Crop, PdfCrop::Art, PdfCrop::Trim, PdfCrop::Bleed, PdfCrop::Media];
+
+    /// The name commands and files use (`crop`, `trim`, `contentVisible`…).
+    pub fn name(self) -> &'static str {
+        match self {
+            PdfCrop::Crop => "crop",
+            PdfCrop::Art => "art",
+            PdfCrop::Trim => "trim",
+            PdfCrop::Bleed => "bleed",
+            PdfCrop::Media => "media",
+            PdfCrop::ContentVisible => "contentVisible",
+            PdfCrop::ContentAll => "contentAll",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<PdfCrop> {
+        PdfCrop::ALL.into_iter().find(|c| c.name() == name)
+    }
+
+    fn is_crop(&self) -> bool {
+        *self == PdfCrop::Crop
+    }
 }
 
 impl Asset {

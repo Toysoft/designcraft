@@ -33,9 +33,11 @@ fn export_idml(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// [`designcraft_idml::import_idml`] with the linked images read through [`crate::io`], so the
-/// automation read root applies to the paths the package names.
+/// automation read root applies to the paths the package names, and its PDF crops resolved.
 pub(crate) fn import_idml_confined(bytes: &[u8]) -> designcraft_idml::Result<Document> {
-    designcraft_idml::import_idml_with(bytes, &|path| crate::io::read_file(path).ok())
+    let mut d = designcraft_idml::import_idml_with(bytes, &|path| crate::io::read_file(path).ok())?;
+    resolve_pdf_crops(&mut d);
+    Ok(d)
 }
 
 /// Import IDML bytes; `dir` is the folder the package came from (for relative link lookup).
@@ -62,6 +64,8 @@ pub fn import_report(bytes: &[u8], dir: Option<&std::path::Path>) -> Result<(Doc
     };
     let designcraft_idml::Imported { document, warnings } =
         designcraft_idml::import_idml_report(bytes, &read).map_err(|e| EngineError::Other(e.to_string()))?;
+    let mut document = document;
+    resolve_pdf_crops(&mut document);
     #[cfg(not(target_arch = "wasm32"))]
     let document = {
         let mut document = document;
@@ -75,6 +79,82 @@ pub fn import_report(bytes: &[u8], dir: Option<&std::path::Path>) -> Result<(Doc
         document
     };
     Ok((document, warnings))
+}
+
+/// Placed PDFs read from IDML name their crop (`PDFCrop`): find where each box sits on its page,
+/// which the IDML reader can't (it doesn't parse PDFs). The box spans the graphic's
+/// `GraphicBounds`; a graphic without bounds takes the box's size. Bounding Box crops interpret
+/// the page's drawing to find the box, so they wait for drawing or export ([`designcraft_render::shown_box`],
+/// [`with_pdf_boxes`]) unless a graphic needs the box's size now.
+pub(crate) fn resolve_pdf_crops(d: &mut Document) {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    use designcraft_doc::{AssetId, Content, Item, PdfCrop};
+    let mut no_bounds: HashSet<AssetId> = HashSet::new();
+    for sp in d.spreads.iter().chain(&d.parents) {
+        for it in &sp.items {
+            it.walk(&mut |i| {
+                if let Content::Graphic(g) = &i.content
+                    && !(g.size.0 > 0.0 && g.size.1 > 0.0)
+                {
+                    no_bounds.insert(g.asset);
+                }
+            });
+        }
+    }
+    let mut sizes: HashMap<AssetId, (f64, f64)> = HashMap::new();
+    for a in d.assets.values_mut() {
+        if a.pdf_crop == PdfCrop::Crop || a.pdf_box.is_some() || (a.content_box_pending() && !no_bounds.contains(&a.id)) {
+            continue;
+        }
+        let a = Arc::make_mut(a);
+        if let Some(size) = super::file::crop_pdf(a) {
+            sizes.insert(a.id, size);
+        }
+    }
+    let no_size = |i: &Item| matches!(&i.content, Content::Graphic(g) if !(g.size.0 > 0.0 && g.size.1 > 0.0) && sizes.contains_key(&g.asset));
+    fn fix(it: &mut Arc<Item>, sizes: &HashMap<AssetId, (f64, f64)>, no_size: &dyn Fn(&Item) -> bool) {
+        let mut any = false;
+        it.walk(&mut |i| any |= no_size(i));
+        if !any {
+            return;
+        }
+        let it = Arc::make_mut(it);
+        if let Content::Graphic(g) = &mut it.content
+            && let Some(size) = sizes.get(&g.asset)
+            && !(g.size.0 > 0.0 && g.size.1 > 0.0)
+        {
+            g.size = *size;
+        }
+        for k in it.children_mut().into_iter().flatten() {
+            fix(k, sizes, no_size);
+        }
+    }
+    if sizes.is_empty() {
+        return;
+    }
+    for sp in d.spreads.iter_mut().chain(d.parents.iter_mut()) {
+        for it in &mut Arc::make_mut(sp).items {
+            fix(it, &sizes, &no_size);
+        }
+    }
+}
+
+/// `d` with the boxes of its Bounding Box crops measured ([`resolve_pdf_crops`] leaves them for
+/// later), for writers that don't render: PDF export places the page by the box.
+pub(crate) fn with_pdf_boxes(d: &Document) -> std::borrow::Cow<'_, Document> {
+    if !d.assets.values().any(|a| a.content_box_pending()) {
+        return std::borrow::Cow::Borrowed(d);
+    }
+    let mut out = d.clone();
+    for a in out.assets.values_mut() {
+        if a.content_box_pending() {
+            // No usable box: the whole page.
+            std::sync::Arc::make_mut(a).pdf_box = designcraft_render::shown_box(a);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

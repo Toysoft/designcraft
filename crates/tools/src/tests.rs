@@ -1162,7 +1162,7 @@ fn eyedropper_samples_a_placed_image_and_matches_other_objects() {
             link: None,
             data: std::sync::Arc::new(vec![]),
             pixels: Some((100, 100)),
-            page: 0,
+            ..Default::default()
         }),
     );
     d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
@@ -1228,7 +1228,7 @@ fn eyedropper_ignores_inactive_states_of_a_multi_state_object() {
             link: None,
             data: std::sync::Arc::new(vec![]),
             pixels: Some((100, 100)),
-            page: 0,
+            ..Default::default()
         }),
     );
     let area = Rect::new(100.0, 100.0, 200.0, 200.0);

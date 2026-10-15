@@ -116,10 +116,8 @@ pub struct FontScope(pub u32);
 #[derive(Clone, Copy, Debug)]
 pub struct LoadedGraphic {
     pub asset: designcraft_doc::AssetId,
-    /// Natural size in points.
+    /// Natural size in points (a placed PDF's: its Crop to box).
     pub size: (f64, f64),
-    /// Image Import Options › Crop to: the box of the graphic a new frame shows (x, y, w, h).
-    pub crop: Option<(f64, f64, f64, f64)>,
 }
 
 impl Drop for FontScope {

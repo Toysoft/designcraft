@@ -32,6 +32,7 @@ pub fn effect_outset(it: &Item) -> f64 {
     fx::outset(it)
 }
 pub mod glyphs;
+mod pdf_bounds;
 mod pdf_layers;
 pub use pdf_layers::{pdf_hide_layers, pdf_layers};
 pub mod images;
@@ -817,20 +818,26 @@ impl Renderer {
         let on_screen = if f.opts.quality == DisplayQuality::Typical { on_screen.min(1.0) } else { on_screen };
         let hidden = HIDDEN_LAYERS.with(|h| h.borrow().clone());
         let data = if !hidden.is_empty() && is_pdf(&asset.data) { pdf_layers::layered(&asset.data, &hidden) } else { asset.data.clone() };
-        let Some(pm) = images::mip(&data, asset.page, g.size.0, on_screen) else { return };
+        // A placed PDF cropped to a box: the whole page, placed so that the box spans graphic space.
+        let [l, t, r, b] = shown_box(asset).unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let (page_w, page_h) = (g.size.0 / (r - l), g.size.1 / (b - t));
+        let page = Rect::new(-l * page_w, -t * page_h, (1.0 - l) * page_w, (1.0 - t) * page_h);
+        let Some(pm) = images::mip(&data, asset.page, page_w, on_screen) else { return };
         let pm = match PLATE.with(|p| p.get()) {
             Some(plate) => plate_pixmap(&pm, plate),
             None => pm,
         };
-        let rect = Rect::new(0.0, 0.0, g.size.0, g.size.1);
+        // Only where the page is: a box reaching past it (a media box larger than the crop box)
+        // shows nothing there.
+        let rect = Rect::new(0.0, 0.0, g.size.0, g.size.1).intersect(page);
         ctx.set_transform(f.view * xf * g.xf);
-        let sx = g.size.0 / pm.width().max(1) as f64;
-        let sy = g.size.1 / pm.height().max(1) as f64;
+        let sx = page_w / pm.width().max(1) as f64;
+        let sy = page_h / pm.height().max(1) as f64;
         ctx.set_paint(vello_cpu::Image {
             image: vello_cpu::ImageSource::Pixmap(pm),
             sampler: peniko::ImageSampler::default().with_quality(peniko::ImageQuality::Medium),
         });
-        ctx.set_paint_transform(Affine::scale_non_uniform(sx, sy));
+        ctx.set_paint_transform(Affine::translate((page.x0, page.y0)) * Affine::scale_non_uniform(sx, sy));
         ctx.fill_rect(&rect);
         ctx.reset_paint_transform();
     }
@@ -1173,17 +1180,30 @@ pub fn pdf_page_size(bytes: &[u8], page: usize) -> Option<(f64, f64)> {
     Some((w as f64, h as f64))
 }
 
-/// PDF page `page` as PNG, its longer side about `max_side` pixels, with the `hidden` layers off.
-pub fn pdf_page_png(bytes: &[u8], page: usize, max_side: u32, hidden: &[String]) -> Option<Vec<u8>> {
+/// PDF page `page` as PNG, its longer side about `max_side` pixels, with the `hidden` layers off;
+/// only the `shown` part of it ([`designcraft_doc::Asset::shown_box`]) when given.
+pub fn pdf_page_png(bytes: &[u8], page: usize, max_side: u32, hidden: &[String], shown: Option<[f64; 4]>) -> Option<Vec<u8>> {
     let data = if hidden.is_empty() { bytes.to_vec() } else { pdf_hide_layers(bytes, hidden).unwrap_or_else(|| bytes.to_vec()) };
     let pm = render_pdf_page(&data, page, max_side)?;
+    let pm = match shown {
+        Some(frac) => crop_pixmap(&pm, frac)?,
+        None => pm,
+    };
     let pixels: Vec<u8> = pm.data().iter().flat_map(|p| [p.r, p.g, p.b, p.a]).collect();
     Some(Rendered { width: pm.width() as u32, height: pm.height() as u32, pixels }.to_png())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many PDF pages [`render_pdf_page`] rasterized on this thread.
+    static PDF_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Rasterize PDF page `page` so its longer side is about `max_side` pixels (screen display; PDF
 /// export embeds the page as vectors).
 pub fn render_pdf_page(bytes: &[u8], page: usize, max_side: u32) -> Option<Pixmap> {
+    #[cfg(test)]
+    PDF_RENDERS.with(|n| n.set(n.get() + 1));
     let pdf = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(bytes.to_vec())).ok()?;
     let p = pdf.pages().get(page)?;
     let (w, h) = p.render_dimensions();
@@ -1196,28 +1216,114 @@ pub fn render_pdf_page(bytes: &[u8], page: usize, max_side: u32) -> Option<Pixma
     Some(Pixmap::from_parts(data, pw, ph))
 }
 
-/// A page box of a PDF page (`crop`, `trim`, `bleed`, `art`, `media`) as (x, y, w, h) in points
-/// from the top-left of the page as rendered (its visible crop box); missing boxes fall back to the
-/// crop box, as PDF readers do.
-pub fn pdf_page_box(bytes: &[u8], page: usize, kind: &str) -> Option<(f64, f64, f64, f64)> {
+/// The part of PDF page `page` that `crop` shows: its left, top, right and bottom edges as
+/// fractions of the page as rendered (its visible crop box, rotated as it displays), and its size
+/// in points. A box the page doesn't define is its crop box, as PDF readers do. The content boxes
+/// are the bounds of what the page draws, found from its drawing operations without rendering it
+/// (the whole page when it draws nothing).
+pub fn pdf_crop_box(bytes: &[u8], page: usize, crop: designcraft_doc::PdfCrop) -> Option<([f64; 4], (f64, f64))> {
+    use designcraft_doc::PdfCrop;
     use hayro::hayro_syntax::object::{Rect as PRect, dict::keys};
+    const WHOLE: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
     let pdf = hayro::hayro_syntax::Pdf::new(std::sync::Arc::new(bytes.to_vec())).ok()?;
     let p = pdf.pages().get(page)?;
-    let visible = p.intersected_crop_box();
-    // The boxes are in user space units; `/UserUnit` is the size of one in points.
-    let unit = p.user_unit() as f64;
-    let key: &[u8] = match kind {
-        "trim" => keys::TRIM_BOX,
-        "bleed" => keys::BLEED_BOX,
-        "art" => keys::ART_BOX,
-        "media" => return Some(rel(visible, p.media_box(), unit)),
-        _ => return Some(rel(visible, visible, unit)),
-    };
-    let b = p.raw().get::<PRect>(key).map(|b| b.intersect(p.media_box())).unwrap_or(visible);
-    fn rel(v: PRect, b: PRect, unit: f64) -> (f64, f64, f64, f64) {
-        ((b.x0 - v.x0) * unit, (v.y1 - b.y1) * unit, b.width() * unit, b.height() * unit)
+    let (w, h) = p.render_dimensions();
+    let (w, h) = (f64::from(w), f64::from(h));
+    if !(w > 0.0 && h > 0.0) {
+        return None;
     }
-    Some(rel(visible, b, unit))
+    let frac = match crop {
+        PdfCrop::Crop => WHOLE,
+        PdfCrop::ContentVisible => pdf_bounds::page_content_bounds(bytes, page).unwrap_or(WHOLE),
+        PdfCrop::ContentAll => {
+            let all_on = pdf_hide_layers(bytes, &[]);
+            pdf_bounds::page_content_bounds(all_on.as_deref().unwrap_or(bytes), page).unwrap_or(WHOLE)
+        }
+        PdfCrop::Art | PdfCrop::Trim | PdfCrop::Bleed | PdfCrop::Media => {
+            let media = p.media_box();
+            let b = match crop {
+                PdfCrop::Media => media,
+                _ => {
+                    let key: &[u8] = match crop {
+                        PdfCrop::Trim => keys::TRIM_BOX,
+                        PdfCrop::Bleed => keys::BLEED_BOX,
+                        _ => keys::ART_BOX,
+                    };
+                    p.raw().get::<PRect>(key).map(|b| b.intersect(media)).unwrap_or_else(|| p.intersected_crop_box())
+                }
+            };
+            // Into rendered page space (y down, rotated, origin at the crop box).
+            let r = Affine::new(p.initial_transform(true).as_coeffs()).transform_rect_bbox(Rect::new(b.x0, b.y0, b.x1, b.y1));
+            [r.x0 / w, r.y0 / h, r.x1 / w, r.y1 / h]
+        }
+    };
+    let size = ((frac[2] - frac[0]) * w, (frac[3] - frac[1]) * h);
+    (frac.iter().all(|v| v.is_finite()) && size.0 > 0.0 && size.1 > 0.0).then_some((frac, size))
+}
+
+/// The part of the page a placed PDF shows ([`designcraft_doc::Asset::shown_box`]). A Bounding
+/// Box crop that import left unmeasured is measured here, once per file, page and crop: that
+/// interprets the page's drawing, which only drawing or exporting the graphic needs.
+pub fn shown_box(asset: &designcraft_doc::Asset) -> Option<[f64; 4]> {
+    if !asset.content_box_pending() {
+        return asset.shown_box();
+    }
+    asset.shown(content_box(&asset.data, asset.page, asset.pdf_crop)?)
+}
+
+type ContentBoxes = HashMap<(usize, u32, designcraft_doc::PdfCrop), (std::sync::Weak<Vec<u8>>, Option<[f64; 4]>)>;
+
+/// [`pdf_crop_box`]'s box, cached by the file's allocation. The weak reference keeps that address
+/// from naming another file while the entry lives.
+fn content_box(bytes: &Arc<Vec<u8>>, page: u32, crop: designcraft_doc::PdfCrop) -> Option<[f64; 4]> {
+    static CACHE: std::sync::Mutex<Option<ContentBoxes>> = std::sync::Mutex::new(None);
+    let key = (Arc::as_ptr(bytes) as usize, page, crop);
+    let cached = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|c| c.get(&key)).and_then(|(file, b)| {
+        let same = file.upgrade().is_some_and(|f| Arc::ptr_eq(&f, bytes));
+        same.then_some(*b)
+    });
+    if let Some(b) = cached {
+        return b;
+    }
+    // Render outside the lock: other graphics keep drawing meanwhile.
+    let b = pdf_crop_box(bytes, page as usize, crop).map(|(frac, _)| frac);
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = cache.get_or_insert_with(HashMap::new);
+    cache.retain(|_, (file, _)| file.strong_count() > 0);
+    cache.insert(key, (Arc::downgrade(bytes), b));
+    b
+}
+
+/// The part of `pm` inside `frac` (left, top, right, bottom as fractions of it); what lies outside
+/// `pm` is transparent.
+pub fn crop_pixmap(pm: &Pixmap, frac: [f64; 4]) -> Option<Pixmap> {
+    let (pw, ph) = (f64::from(pm.width()), f64::from(pm.height()));
+    let [l, t, r, b] = [frac[0] * pw, frac[1] * ph, frac[2] * pw, frac[3] * ph].map(f64::round);
+    let (w, h) = (r - l, b - t);
+    if !(w >= 1.0 && h >= 1.0 && w <= f64::from(u16::MAX) && h <= f64::from(u16::MAX)) {
+        return None;
+    }
+    let (w, h) = (w as u16, h as u16);
+    let mut out = Pixmap::new(w, h);
+    let src = pm.data();
+    let dst = out.data_mut();
+    for y in 0..usize::from(h) {
+        let sy = y as f64 + t;
+        if sy < 0.0 || sy >= ph {
+            continue;
+        }
+        for x in 0..usize::from(w) {
+            let sx = x as f64 + l;
+            if sx < 0.0 || sx >= pw {
+                continue;
+            }
+            let (Some(p), Some(q)) = (src.get(sy as usize * usize::from(pm.width()) + sx as usize), dst.get_mut(y * usize::from(w) + x)) else {
+                continue;
+            };
+            *q = *p;
+        }
+    }
+    Some(out)
 }
 
 /// Separations Preview on a rendered image: `plate` 0–3 shows that process plate (C, M, Y, K) as
@@ -1641,13 +1747,12 @@ mod tests {
         d.assets.insert(
             aid,
             Arc::new(designcraft_doc::Asset {
-                page: 0,
                 id: aid,
                 name: "red.png".into(),
                 mime: "image/png".into(),
-                link: None,
                 data: Arc::new(png),
                 pixels: Some((4, 4)),
+                ..Default::default()
             }),
         );
         let id = designcraft_doc::ItemId(d.alloc());
@@ -1728,5 +1833,44 @@ mod tests {
             .filter(|&(x, y)| img.pixel(x, y)[0] < 100)
             .count();
         assert!(dark > 30, "cell text pixels: {dark}");
+    }
+
+    /// A one-page PDF (612 x 792 pt) that draws `content`.
+    fn one_page_pdf(content: &str) -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for o in offsets {
+            out.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+        out
+    }
+
+    /// A Bounding Box crop is the exact extent of what the page draws, strokes included, found
+    /// without rasterizing the page: PDF export of a document that places a complex illustration
+    /// cropped that way spent seconds rendering it just to measure it.
+    #[test]
+    fn content_crop_box_is_measured_without_rendering_the_page() {
+        // A filled rectangle 100..300 x 532..592 (PDF y up) and a 10 pt horizontal line at
+        // y 100 from x 400 to 500, butt capped. Clipped away: a rectangle off to the left.
+        let pdf = one_page_pdf("0 0 0 rg 100 532 200 60 re f 10 w 400 100 m 500 100 l S q 0 0 50 50 re W n 100 0 10 10 re f Q");
+        let before = PDF_RENDERS.with(std::cell::Cell::get);
+        let (frac, size) = pdf_crop_box(&pdf, 0, designcraft_doc::PdfCrop::ContentVisible).unwrap();
+        assert_eq!(PDF_RENDERS.with(std::cell::Cell::get), before, "the page was rasterized");
+        let want = [100.0 / 612.0, 200.0 / 792.0, 500.0 / 612.0, 697.0 / 792.0];
+        assert!(frac.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{frac:?} vs {want:?}");
+        assert!((size.0 - 400.0).abs() < 1e-3 && (size.1 - 497.0).abs() < 1e-3, "{size:?}");
     }
 }

@@ -2506,7 +2506,7 @@ mod tests {
                             .to_vec(),
                     ),
                     pixels: Some((32, 32)),
-                    page: 0,
+                    ..Default::default()
                 }),
             );
             doc.item_mut(id).unwrap().content = Content::Graphic(Graphic {

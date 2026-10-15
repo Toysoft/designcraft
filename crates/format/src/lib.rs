@@ -312,13 +312,13 @@ mod tests {
     fn png_asset(d: &mut Document, data: &[u8]) -> AssetId {
         let aid = AssetId(d.alloc());
         let a = Asset {
-            page: 0,
             id: aid,
             name: "x.png".into(),
             mime: "image/png".into(),
             link: None,
             data: Arc::new(data.to_vec()),
             pixels: Some((1, 1)),
+            ..Default::default()
         };
         d.assets.insert(aid, Arc::new(a));
         aid

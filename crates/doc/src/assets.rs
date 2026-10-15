@@ -2,7 +2,7 @@
 //! compaction a save applies (duplicates merged, unused assets left out).
 //!
 //! An asset holds what is shared by every placement of a file (bytes, link, type, the PDF page
-//! shown); each placement's frame data (transform, crop, fitting) lives on its [`Graphic`].
+//! and crop shown); each placement's frame data (transform, crop, fitting) lives on its [`Graphic`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::BuildHasher;
@@ -16,12 +16,12 @@ use crate::{Asset, AssetId, Content, Document, Item};
 const MAX_DEPTH: usize = 64;
 
 impl Asset {
-    /// Whether `other` holds the same file: the same type, page, link and bytes. Files at
+    /// Whether `other` holds the same file: the same type, PDF page and crop, link and bytes. Files at
     /// different paths stay apart even with identical bytes, since each can be updated or
     /// relinked on its own. Assets without bytes (a link that couldn't be read) are the same only
     /// when they link to the same path.
     pub fn same_file(&self, other: &Asset) -> bool {
-        if self.mime != other.mime || self.page != other.page {
+        if self.mime != other.mime || self.page != other.page || self.pdf_crop != other.pdf_crop {
             return false;
         }
         if self.link != other.link {
@@ -287,7 +287,7 @@ mod tests {
     use designcraft_geom::{Affine, Rect, shapes};
 
     fn asset(id: u64, data: &[u8]) -> Asset {
-        Asset { id: AssetId(id), name: "p.png".into(), mime: "image/png".into(), link: None, data: Arc::new(data.to_vec()), pixels: None, page: 0 }
+        Asset { id: AssetId(id), name: "p.png".into(), mime: "image/png".into(), data: Arc::new(data.to_vec()), ..Default::default() }
     }
 
     #[test]
@@ -321,6 +321,19 @@ mod tests {
         }
         assert_eq!(d.merge_duplicate_assets(), 1);
         assert_eq!(d.assets.keys().copied().collect::<Vec<_>>(), (1..=7).map(AssetId).collect::<Vec<_>>());
+    }
+
+    /// Two crops of one PDF page are two assets: merging them would show one crop in both frames.
+    #[test]
+    fn pdf_assets_with_different_crops_stay_apart() {
+        let mut d = Document::new(&Default::default());
+        let pdf = |id: u64, pdf_crop: crate::PdfCrop| Asset { mime: "application/pdf".into(), pdf_crop, ..asset(id, b"%PDF-") };
+        let crop = d.add_asset(pdf(1, crate::PdfCrop::Crop));
+        let trim = d.add_asset(pdf(2, crate::PdfCrop::Trim));
+        assert_ne!(crop, trim);
+        assert_eq!(d.add_asset(pdf(3, crate::PdfCrop::Trim)), trim);
+        assert_eq!(d.merge_duplicate_assets(), 0);
+        assert_eq!(d.assets.len(), 2);
     }
 
     #[test]

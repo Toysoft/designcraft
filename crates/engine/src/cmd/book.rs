@@ -315,7 +315,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 // The chapter's own fonts, for this export (skipped font files are logged).
                 let _fonts = super::file::load_document_fonts(&mut d, path).0;
                 let cache = designcraft_compose::Cache::new();
-                let r = designcraft_pdf::export_pdf_with_report(&d, &cache, &designcraft_pdf::PdfOptions::default()).map_err(|e| EngineError::Other(e.to_string()))?;
+                let r = designcraft_pdf::export_pdf_with_report(&super::interchange::with_pdf_boxes(&d), &cache, &designcraft_pdf::PdfOptions::default()).map_err(|e| EngineError::Other(e.to_string()))?;
                 let n = designcraft_render::pdf_page_count(&r.bytes).unwrap_or(0);
                 let sizes: Vec<(f32, f32)> = (0..n).filter_map(|i| designcraft_render::pdf_page_size(&r.bytes, i)).map(|(w, h)| (w as f32, h as f32)).collect();
                 parts.push((r.bytes, sizes));

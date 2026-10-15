@@ -1519,13 +1519,13 @@ mod tests {
         d.assets.insert(
             aid,
             Arc::new(Asset {
-                page: 0,
                 id: aid,
                 name: "dot.png".into(),
                 mime: "image/png".into(),
                 link: None,
                 data: Arc::new(vec![7]),
                 pixels: Some((1, 1)),
+                ..Default::default()
             }),
         );
         let graphic = |d: &mut Document, alt: &str| {
@@ -1881,7 +1881,14 @@ mod tests {
             let aid = AssetId(d.alloc());
             d.assets.insert(
                 aid,
-                Arc::new(Asset { page: 0, id: aid, name: name.into(), mime: mime.into(), link: None, data: Arc::new(vec![1]), pixels: Some((1, 1)) }),
+                Arc::new(Asset {
+                    id: aid,
+                    name: name.into(),
+                    mime: mime.into(),
+                    data: Arc::new(vec![1]),
+                    pixels: Some((1, 1)),
+                    ..Default::default()
+                }),
             );
             let mut item = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(Rect::new(36.0, y, 72.0, y + 36.0)));
             item.alt_text = alt.into();
@@ -1988,13 +1995,12 @@ mod tests {
         d.assets.insert(
             aid,
             Arc::new(Asset {
-                page: 0,
                 id: aid,
                 name: "Cover & Notes".into(),
                 mime: "image/png; profile=screen".into(),
-                link: None,
                 data: Arc::new(vec![1]),
                 pixels: Some((1, 1)),
+                ..Default::default()
             }),
         );
         let mut item = Item::new(ItemId(d.alloc()), lid, Shape::Rectangle, shapes::rectangle(Rect::new(36.0, 120.0, 72.0, 156.0)));

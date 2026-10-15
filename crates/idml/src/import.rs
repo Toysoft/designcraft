@@ -263,9 +263,9 @@ struct Importer<'r> {
     page_index: HashMap<String, usize>,
     item_ids: HashMap<String, ItemId>,
     assets: BTreeMap<AssetId, Arc<Asset>>,
-    /// Assets read from a link path at a page, so later placements of that path and page reuse
-    /// them unread.
-    linked_assets: HashMap<(String, u32), AssetId>,
+    /// Assets read from a link path at a page and crop, so later placements of that path, page
+    /// and crop reuse them unread.
+    linked_assets: HashMap<(String, u32, designcraft_doc::PdfCrop), AssetId>,
     ctx: ItemCtx,
     sections: Vec<Section>,
     footnote_options: designcraft_doc::FootnoteOptions,
@@ -497,7 +497,7 @@ impl<'r> Importer<'r> {
                 .map(|c| designcraft_doc::cjk::CompositeFontEntry {
                     name: c.get("Name").unwrap_or("").into(),
                     characters: c.get("CustomCharacters").unwrap_or("").into(),
-                    family: c.prop("AppliedFont").unwrap_or_default(),
+                    family: c.prop("AppliedFont").as_deref().and_then(names::font_family_in).unwrap_or_default(),
                     style: c.get("FontStyle").unwrap_or("Regular").trim_start_matches("$ID/").into(),
                     relative_size: c.num("RelativeSize").unwrap_or(100.0) / 100.0,
                     horizontal_scale: c.num("HorizontalScale").unwrap_or(100.0) / 100.0,
@@ -1313,15 +1313,7 @@ impl<'r> Importer<'r> {
     }
 
     fn char_attrs(&mut self, e: &El) -> CharAttrs {
-        let mut a = CharAttrs::default();
-        if let Some(f) = e.prop("AppliedFont") {
-            let f = f.trim();
-            // Some writers append the style after a tab.
-            let fam = f.split('\t').next().unwrap_or(f);
-            if !fam.is_empty() && fam != "$ID/" {
-                a.font_family = Some(fam.to_string());
-            }
-        }
+        let mut a = CharAttrs { font_family: e.prop("AppliedFont").as_deref().and_then(names::font_family_in), ..Default::default() };
         a.font_style = e.prop("FontStyle");
         a.size = e.num("PointSize");
         a.leading = e.prop("Leading").and_then(|l| names::leading_in(l.trim()));
@@ -2556,22 +2548,16 @@ impl<'r> Importer<'r> {
             })
         };
         let mut data = g.prop_el("Contents").map(|c| base64_decode(&c.text_content())).unwrap_or_default();
-        // PDF Import Options: `PDFAttribute/@PageNumber` is 1-based; `Asset.page` is 0-based. A
-        // missing or malformed value means page 1, and an out-of-range page later fails to render
-        // rather than panicking.
-        let page = g
-            .find("PDFAttribute")
-            .or_else(|| g.prop_el("PDFAttribute"))
-            .and_then(|a| a.get("PageNumber"))
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .and_then(|n| u32::try_from(n.saturating_sub(1)).ok())
-            .unwrap_or(0);
+        let page = pdf_page_in(g);
+        // Where the box sits on the page needs the PDF parsed: the engine finds it after import.
+        let pdf_crop = pdf_attribute(g).and_then(|a| a.get("PDFCrop")).map_or(designcraft_doc::PdfCrop::Crop, names::pdf_crop_in);
         let mut read_from = None;
         if data.is_empty()
             && let Some(p) = &uri
         {
-            // Every placement of a linked file at one page shares one asset; read the file once.
-            let key = (p.clone(), page);
+            // Every placement of a linked file with one page and crop shares one asset; read the
+            // file once.
+            let key = (p.clone(), page, pdf_crop);
             if let Some(id) = self.linked_assets.get(&key) {
                 let size = self.assets.get(id).and_then(|a| svg_viewbox_size(&a.data)).unwrap_or(size);
                 return graphic(*id, size);
@@ -2600,8 +2586,10 @@ impl<'r> Importer<'r> {
             uri.as_deref().and_then(|p| p.rsplit(['/', '\\']).next()).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| "image".into());
         let fresh = AssetId(self.alloc());
         let link_path = uri.filter(|p| p.contains('/') || p.contains('\\'));
-        let id =
-            designcraft_doc::insert_asset(&mut self.assets, Asset { page, id: fresh, name, mime, link: link_path, data: Arc::new(data), pixels });
+        let id = designcraft_doc::insert_asset(
+            &mut self.assets,
+            Asset { page, id: fresh, name, mime, link: link_path, data: Arc::new(data), pixels, pdf_crop, ..Default::default() },
+        );
         if let Some(key) = read_from {
             self.linked_assets.insert(key, id);
         }
@@ -2987,6 +2975,21 @@ fn path_of(pg: &El) -> PathData {
         }
     }
     PathData::new(subs)
+}
+
+/// A placed PDF's `PDFAttribute` (Image Import Options), as a child or a property.
+fn pdf_attribute(g: &El) -> Option<&El> {
+    g.find("PDFAttribute").or_else(|| g.prop_el("PDFAttribute"))
+}
+
+/// The page a placed PDF shows (0-based), from `PDFAttribute/@PageNumber` (1-based). A missing or
+/// malformed value means page 1; a page the PDF lacks draws nothing and is left out of PDF export.
+fn pdf_page_in(g: &El) -> u32 {
+    pdf_attribute(g)
+        .and_then(|a| a.get("PageNumber"))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .and_then(|n| u32::try_from(n.saturating_sub(1)).ok())
+        .unwrap_or(0)
 }
 
 /// IDML link URI → file system path (`file:/a%20b` → `/a b`, `file:///C:/x` → `C:/x`).

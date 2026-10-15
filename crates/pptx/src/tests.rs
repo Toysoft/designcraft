@@ -204,7 +204,7 @@ fn pictures_are_cropped_to_their_frames() {
             link: None,
             data: Arc::new(png(200, 100)),
             pixels: Some((200, 100)),
-            page: 0,
+            ..Default::default()
         }),
     );
     let id = rect_item(&mut d, Rect::new(100.0, 100.0, 200.0, 200.0), Shape::Rectangle);
