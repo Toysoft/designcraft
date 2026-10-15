@@ -347,6 +347,9 @@ pub enum Overlay {
         pins: [bool; 4],
         resize: [bool; 2],
     },
+    /// The whole content of this frame drawn faintly, the part outside the frame included (while
+    /// the content moves inside it).
+    ContentGhost(ItemId),
 }
 
 /// Correction from a snap, in spread coordinates for `delta`.
