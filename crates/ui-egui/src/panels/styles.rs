@@ -116,6 +116,11 @@ fn style_row(app: &mut DesignApp, ui: &mut egui::Ui, para: bool, n: &str, curren
             let _ = app.run(cmd, json!({"name": n}));
             ui.close();
         }
+        if editable && current == Some(n) && ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Redefine Style"))).clicked() {
+            let command = if para { "style.paragraph.redefine" } else { "style.character.redefine" };
+            let _ = app.run(command, json!({"name":n}));
+            ui.close();
+        }
         if current == Some(n) && ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Break Link to Style"))).clicked() {
             let _ = app.run("style.breakLink", json!({"kind": kind}));
             ui.close();
@@ -170,6 +175,34 @@ mod tests {
     use egui_kittest::{Harness, kittest::Queryable};
 
     use super::*;
+
+    #[test]
+    fn selected_style_context_menu_redefines_its_format() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let frame = app.run("frame.create", json!({"rect":[36,36,300,200],"content":"text","text":"Headline"})).unwrap();
+        app.run("text.select", json!({"story":frame["story"],"anchor":0,"focus":8})).unwrap();
+        app.run("style.paragraph.create", json!({"name":"Header","chars":{"size":18}})).unwrap();
+        app.run("style.paragraph.apply", json!({"name":"Header"})).unwrap();
+        app.run("type.char", json!({"size":24})).unwrap();
+        let mut h = Harness::builder().with_size(vec2(360.0, 240.0)).build_ui_state(
+            |ui, app: &mut DesignApp| {
+                let tokens = Tokens::get(ui.ctx());
+                style_row(app, ui, true, "Header", Some("Header"), &[], &tokens);
+            },
+            app,
+        );
+        h.run_steps(3);
+        let at = egui::pos2(30.0, 15.0);
+        h.event(egui::Event::PointerMoved(at));
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+            h.run_steps(2);
+        }
+        h.get_by_label("Redefine Style").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.doc().unwrap().doc.styles.para("Header").unwrap().chars.size, Some(24.0));
+    }
 
     #[test]
     fn character_style_plus_captures_selection_for_reuse() {
