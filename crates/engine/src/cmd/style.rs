@@ -181,8 +181,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Color",
             [],
             None,
-            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255)|{model: cmyk|rgb|gray, …}(0..1), target?: fill|stroke, text?: bool, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection; `text`: on the selected text, or the text of the selected frames (Formatting Affects Text)",
-            has_text_or_selection,
+            "{color: \"#rrggbb\"|{c,m,y,k}(0..100)|[r,g,b](0..255)|{model: cmyk|rgb|gray, …}(0..1), target?: fill|stroke, text?: bool, ids?} — an unnamed colour (not in the Swatches panel until Add to Swatches) on the selection (with nothing selected, the colour of new shapes); `text`: on the selected text, or the text of the selected frames (Formatting Affects Text)",
+            has_doc,
             apply_color
         ),
         cmd!(
@@ -1054,6 +1054,19 @@ fn apply_color(s: &mut Session, p: &Value) -> Result<Value> {
     let named = p.get("ids").is_some() || p.get("id").is_some();
     let text = !named
         && (p.get("text").and_then(Value::as_bool).unwrap_or(false) || s.doc()?.selection.text.is_some() || s.doc()?.selection.cells.is_some());
+    // Nothing selected: the colour of new shapes (InDesign's document defaults).
+    if !text && super::object::nothing_targeted(s, p)? {
+        return s.edit(|d, _| {
+            let name = color_swatch(d, color);
+            let c = &mut d.settings.new_object;
+            if stroke {
+                (c.stroke, c.stroke_tint) = (name.clone(), 1.0);
+            } else {
+                (c.fill, c.fill_tint) = (name.clone(), 1.0);
+            }
+            Ok(json!({"swatch": name, "newObject": true}))
+        });
+    }
     let (ids, texts) = if text { (vec![], super::text::format_targets_pub(s)) } else { (super::targets(s, p)?, vec![]) };
     if text && texts.is_empty() {
         return Err(bad("object.color", "select the text to colour"));

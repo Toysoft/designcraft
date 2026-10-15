@@ -185,8 +185,8 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fill",
             [],
             None,
-            "{swatch? (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?} — at least one; a tint alone keeps each object's own swatch (the Swatches panel's Tint field)",
-            has_selection,
+            "{swatch? (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?} — at least one; a tint alone keeps each object's own swatch (the Swatches panel's Tint field). With nothing selected: the fill of new shapes",
+            has_doc,
             |s, p| {
                 let sw = str_param(p, "swatch").map(str::to_string);
                 let tint = match p.get("tint") {
@@ -197,6 +197,15 @@ pub fn specs() -> Vec<CommandSpec> {
                     Some(sw) => known_swatch(&s.doc()?.doc, sw, "object.fill", "swatch")?,
                     None if tint.is_none() => return Err(bad("object.fill", "missing swatch")),
                     None => {}
+                }
+                if nothing_targeted(s, p)? {
+                    return set_new_object(s, |c| {
+                        if let Some(sw) = &sw {
+                            c.fill = sw.clone();
+                            c.fill_tint = 1.0;
+                        }
+                        c.fill_tint = tint.unwrap_or(c.fill_tint);
+                    });
                 }
                 set_flag(
                     s,
@@ -214,18 +223,33 @@ pub fn specs() -> Vec<CommandSpec> {
             "Swap Fill and Stroke",
             [],
             None,
-            "{ids?} — each object's fill and stroke colours (and tints) trade places; locked objects stay as they are",
-            has_editable_selection,
-            |s, p| edit_unlocked(s, p, swap_fill_stroke)
+            "{ids?} — each object's fill and stroke colours (and tints) trade places; locked objects stay as they are. With nothing selected: those of new shapes",
+            has_doc,
+            |s, p| {
+                if nothing_targeted(s, p)? {
+                    return set_new_object(s, |c| {
+                        std::mem::swap(&mut c.fill, &mut c.stroke);
+                        std::mem::swap(&mut c.fill_tint, &mut c.stroke_tint);
+                    });
+                }
+                has_editable_selection(s).map_err(|e| bad("object.swapFillStroke", e))?;
+                edit_unlocked(s, p, swap_fill_stroke)
+            }
         ),
         cmd!(
             "object.defaultFillStroke",
             "Default Fill and Stroke",
             [],
             None,
-            "{ids?} — no fill and a black stroke; locked objects stay as they are",
-            has_editable_selection,
-            |s, p| edit_unlocked(s, p, default_fill_stroke)
+            "{ids?} — no fill and a black stroke; locked objects stay as they are. With nothing selected: for new shapes",
+            has_doc,
+            |s, p| {
+                if nothing_targeted(s, p)? {
+                    return set_new_object(s, |c| *c = designcraft_doc::NewObjectColors::default());
+                }
+                has_editable_selection(s).map_err(|e| bad("object.defaultFillStroke", e))?;
+                edit_unlocked(s, p, default_fill_stroke)
+            }
         ),
         cmd!(
             "object.stroke",
@@ -233,12 +257,27 @@ pub fn specs() -> Vec<CommandSpec> {
             [],
             None,
             "{swatch?, tint?, weight?, align?: center|inside|outside, type?: {kind:…}, cap?: butt|round|projecting, join?: miter|round|bevel, miterLimit?, start?, end?: none|simple|simpleWide|triangle|triangleWide|barbed|curved|circle|circleSolid|square|squareSolid|bar, gapSwatch?, gapTint?, gapOverprint?: bool, ids?}",
-            has_selection,
+            has_doc,
             |s, p| {
                 for key in ["swatch", "gapSwatch"] {
                     if let Some(name) = p.get(key).and_then(Value::as_str) {
                         known_swatch(&s.doc()?.doc, name, "object.stroke", key)?;
                     }
+                }
+                // With nothing selected, the swatch and tint are those of new shapes.
+                if nothing_targeted(s, p)? {
+                    let sw = str_param(p, "swatch").map(str::to_string);
+                    let tint = p.get("tint").and_then(Value::as_f64).map(|t| t.clamp(0.0, 1.0) as f32);
+                    if sw.is_none() && tint.is_none() {
+                        return Err(bad("object.stroke", super::NOTHING_SELECTED));
+                    }
+                    return set_new_object(s, |c| {
+                        if let Some(sw) = &sw {
+                            c.stroke = sw.clone();
+                            c.stroke_tint = 1.0;
+                        }
+                        c.stroke_tint = tint.unwrap_or(c.stroke_tint);
+                    });
                 }
                 let p2 = p.clone();
                 // A tint alone (the Swatches panel's Tint field) recolours strokes, it doesn't add one.
@@ -897,6 +936,39 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
+/// No objects named and none selected (and no text): fill and stroke go to new shapes.
+pub(crate) fn nothing_targeted(s: &Session, p: &Value) -> Result<bool> {
+    let st = s.doc()?;
+    Ok(p.get("ids").is_none()
+        && p.get("id").is_none()
+        && st.selection.items.is_empty()
+        && st.selection.text.is_none()
+        && st.selection.cells.is_none())
+}
+
+/// Change the colours new shapes are drawn with (one undo step).
+pub(crate) fn set_new_object(s: &mut Session, f: impl FnOnce(&mut designcraft_doc::NewObjectColors)) -> Result<Value> {
+    s.edit(|d, _| {
+        f(&mut d.settings.new_object);
+        let c = &d.settings.new_object;
+        Ok(json!({"newObject": {"fill": c.fill, "fillTint": c.fill_tint, "stroke": c.stroke, "strokeTint": c.stroke_tint}}))
+    })
+}
+
+/// A new shape's fill and stroke: the document's colours for new objects (a swatch deleted
+/// since leaves the shape's own).
+fn new_object_colors(d: &designcraft_doc::Document, it: &mut Item) {
+    let c = &d.settings.new_object;
+    let known = |sw: &str| sw == designcraft_color::swatch::NONE || d.swatches.iter().any(|w| w.name == sw);
+    if known(&c.fill) {
+        it.fill = Fill { swatch: c.fill.clone(), tint: c.fill_tint, ..it.fill.clone() };
+    }
+    if known(&c.stroke) {
+        it.stroke.swatch = c.stroke.clone();
+        it.stroke.tint = c.stroke_tint;
+    }
+}
+
 fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
     let rect = rect_param(p, "rect").ok_or_else(|| bad("frame.create", "missing rect"))?;
     let shape = str_param(p, "shape").unwrap_or("rectangle");
@@ -937,8 +1009,10 @@ fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {
         if content == "graphic" {
             it.object_style = d.styles.default_graphic_frame.clone();
         } else {
-            // Shapes drawn with Rectangle/Ellipse/Polygon get the default 1 pt black stroke.
+            // Shapes drawn with Rectangle/Ellipse/Polygon get a 1 pt stroke in the document's
+            // colours for new objects (no fill and black at first).
             it.stroke = Stroke::default();
+            new_object_colors(d, &mut it);
         }
         d.insert_item(sr, it, None)?;
         *sel = Selection::items(vec![id]);
@@ -970,6 +1044,7 @@ fn line_create(s: &mut Session, p: &Value) -> Result<Value> {
         let id = ItemId(d.alloc());
         let mut it = Item::new(id, lid, Shape::GraphicLine, shapes::line(a, b));
         it.stroke = Stroke::default();
+        new_object_colors(d, &mut it);
         d.insert_item(sr, it, None)?;
         *sel = Selection::items(vec![id]);
         Ok(json!({"id": id.0}))
@@ -2593,6 +2668,56 @@ mod arrange_tests {
 #[cfg(test)]
 mod step_repeat_tests {
     use super::*;
+
+    /// With nothing selected, fill and stroke set the colours new shapes are drawn with, as
+    /// InDesign's document defaults; frames for graphics and text keep theirs.
+    #[test]
+    fn with_nothing_selected_fill_and_stroke_are_for_new_shapes() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let colors = |s: &Session, id: u64| {
+            let it = s.doc().unwrap().doc.item(ItemId(id)).unwrap();
+            (it.fill.swatch.clone(), it.stroke.swatch.clone(), it.stroke.weight)
+        };
+        let rect = |s: &mut Session| {
+            let id = s.execute("frame.create", &json!({"rect": [72, 72, 144, 144], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+            s.execute("selection.set", &json!({"ids": []})).unwrap();
+            id
+        };
+        // New documents: no fill and a 1 pt black stroke.
+        let a = rect(&mut s);
+        assert_eq!(colors(&s, a), ("[None]".into(), "[Black]".into(), 1.0));
+        // A picked colour and Apply None, with nothing selected.
+        let r = s.execute("object.color", &json!({"color": "#7c1315"})).unwrap();
+        let red = r["swatch"].as_str().unwrap().to_string();
+        s.execute("object.stroke", &json!({"swatch": "[None]"})).unwrap();
+        let b = rect(&mut s);
+        assert_eq!(colors(&s, b), (red.clone(), "[None]".into(), 1.0), "the next shape has them");
+        assert_eq!(colors(&s, a).0, "[None]", "shapes drawn before keep theirs");
+        let line = s.execute("line.create", &json!({"a": [0, 0], "b": [100, 0]})).unwrap()["id"].as_u64().unwrap();
+        assert_eq!(colors(&s, line).1, "[None]");
+        s.execute("selection.set", &json!({"ids": []})).unwrap();
+        // A graphics frame keeps its object style's.
+        let g = s.execute("frame.create", &json!({"rect": [200, 72, 300, 144]})).unwrap()["id"].as_u64().unwrap();
+        assert_ne!(colors(&s, g).0, red);
+        s.execute("selection.set", &json!({"ids": []})).unwrap();
+        // Swap and Default.
+        s.execute("object.swapFillStroke", &json!({})).unwrap();
+        let c = &s.doc().unwrap().doc.settings.new_object;
+        assert_eq!((c.fill.as_str(), c.stroke.as_str()), ("[None]", red.as_str()));
+        s.execute("object.fill", &json!({"swatch": "[Paper]"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.settings.new_object.fill, "[Paper]");
+        s.execute("object.defaultFillStroke", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.settings.new_object, designcraft_doc::NewObjectColors::default());
+        // One undo step each.
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.settings.new_object.fill, "[Paper]");
+        // With a selection, they still colour it and leave the defaults.
+        s.execute("selection.set", &json!({"ids": [a]})).unwrap();
+        s.execute("object.fill", &json!({"swatch": "[Black]"})).unwrap();
+        assert_eq!(colors(&s, a).0, "[Black]");
+        assert_eq!(s.doc().unwrap().doc.settings.new_object.fill, "[Paper]");
+    }
 
     #[test]
     fn swap_and_default_fill_stroke_are_one_undo_step_per_object() {

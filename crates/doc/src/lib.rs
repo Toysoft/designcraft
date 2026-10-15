@@ -349,6 +349,26 @@ pub struct DocSettings {
     /// Documents saved before the setting existed read as on, the way they were drawn.
     #[serde(default = "yes")]
     pub glyph_fallback: bool,
+    /// The fill and stroke new shapes are drawn with: what the Tools panel's proxy shows and sets
+    /// with nothing selected (InDesign's document defaults).
+    pub new_object: NewObjectColors,
+}
+
+/// The colours of new shapes (see [`DocSettings::new_object`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NewObjectColors {
+    pub fill: String,
+    pub fill_tint: f32,
+    pub stroke: String,
+    pub stroke_tint: f32,
+}
+
+impl Default for NewObjectColors {
+    /// No fill and a black stroke, as new documents have.
+    fn default() -> Self {
+        NewObjectColors { fill: "[None]".into(), fill_tint: 1.0, stroke: "[Black]".into(), stroke_tint: 1.0 }
+    }
 }
 
 impl Default for DocSettings {
@@ -381,6 +401,7 @@ impl Default for DocSettings {
             overprint_black: true,
             track_changes: false,
             glyph_fallback: false,
+            new_object: NewObjectColors::default(),
         }
     }
 }

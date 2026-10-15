@@ -208,7 +208,10 @@ fn fill_stroke_proxy(app: &mut DesignApp, ui: &mut egui::Ui, width: f32, cols: u
     let text_mode = crate::panels::colors_affect_text(app) || app.ui.formatting_affects_text;
     let (fill_sw, stroke_sw) = match &target {
         Some((fill, _, stroke, _)) => (fill.clone(), stroke.clone()),
-        None => ("[None]".to_string(), "[Black]".to_string()),
+        // Nothing selected: the colours new shapes are drawn with.
+        None => doc
+            .as_ref()
+            .map_or(("[None]".to_string(), "[Black]".to_string()), |d| (d.settings.new_object.fill.clone(), d.settings.new_object.stroke.clone())),
     };
     let x0 = ui.max_rect().min.x + (width - 30.0) / 2.0;
     // Row 1: default colours + swap.
@@ -765,6 +768,48 @@ mod tests {
         for (id, sc) in [("color.applyColor", ","), ("color.applyGradient", ".")] {
             assert_eq!(crate::menus::ui_label(id).and_then(|c| c.1), Some(sc));
         }
+    }
+
+    /// With nothing selected, the Color Picker and Apply None set the colours of the next shape
+    /// (the course's poster: a scarlet fill picked before drawing), and the proxy shows them.
+    #[test]
+    fn with_nothing_selected_the_proxy_sets_the_next_shapes_colours() {
+        use serde_json::json;
+        let mut app = app(false);
+        app.run("file.new", json!({})).unwrap();
+        // Frames 1 ms apart, so two clicks make a double-click.
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).with_step_dt(0.001).build_ui_state(
+            |ui, app: &mut crate::DesignApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(6);
+        // Double-click the Fill box: the picker opens; OK with nothing selected keeps the colour.
+        let at = h.get_by_label(FILL).rect().center();
+        h.hover_at(at);
+        h.step();
+        for pressed in [true, false, true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(3);
+        let app = h.state_mut();
+        assert_eq!(app.ui.dialog.as_ref().map(|d| d.id.as_str()), Some("colorPicker"));
+        app.ui.dialog.as_mut().unwrap().fields.insert("hex".into(), json!("#7c1315"));
+        crate::dialogs::confirm(app).unwrap();
+        // Apply None with the stroke in front.
+        app.ui.stroke_front = true;
+        app.run("color.applyNone", json!({})).unwrap();
+        let red = app.session.active().unwrap().doc.settings.new_object.fill.clone();
+        assert_eq!(app.session.active().unwrap().doc.resolve_color(&red, 1.0).unwrap().to_hex(), "#7c1315");
+        // The next rectangle has them.
+        let id = app.run("frame.create", json!({"rect": [72, 72, 200, 200], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+        let st = app.session.active().unwrap();
+        let it = st.doc.item(designcraft_doc::ItemId(id)).unwrap();
+        assert_eq!((it.fill.swatch.as_str(), it.stroke.swatch.as_str()), (red.as_str(), "[None]"));
     }
 
     /// The Fill/Stroke proxy's keys run on the selection and stay out of text being typed.
