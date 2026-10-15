@@ -346,7 +346,10 @@ impl Document {
                 let odd = parity.get(i).copied().unwrap_or(i % 2 == 0);
                 p.side = if odd != rtl { PageSide::Right } else { PageSide::Left };
                 let starts = if rtl { PageSide::Right } else { PageSide::Left };
-                if p.side == starts && !cur.is_empty() {
+                // A right page closes its spread, so two right pages in a row (a section restart
+                // at an even position) never share one.
+                let after_ending = cur.last().is_some_and(|(q, _)| q.side != starts);
+                if (p.side == starts || after_ending) && !cur.is_empty() {
                     let id = SpreadId(self.alloc());
                     flush(&mut cur, &mut spreads, id);
                 }

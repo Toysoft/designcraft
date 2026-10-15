@@ -262,6 +262,29 @@ fn page_names_follow_sections() {
     assert_eq!(d.page_name(5), "4");
 }
 
+/// A section restarting at 1 on page 2 leaves two odd (right) pages in a row; each gets its own
+/// spread instead of sharing one with the odd page on the left.
+#[test]
+fn consecutive_right_pages_get_separate_spreads() {
+    let mut d = Document::new(&NewDocument { pages: 4, ..Default::default() });
+    d.sections.push(Section {
+        start: 1,
+        start_number: Some(1),
+        style: NumberStyle::Arabic,
+        prefix: String::new(),
+        marker: String::new(),
+        include_prefix: false,
+    });
+    d.repaginate();
+    let sides: Vec<Vec<PageSide>> = d.spreads.iter().map(|s| s.pages.iter().map(|p| p.side).collect()).collect();
+    assert_eq!(sides, vec![vec![PageSide::Right], vec![PageSide::Right], vec![PageSide::Left, PageSide::Right]]);
+    let flat: Vec<PageSide> = sides.into_iter().flatten().collect();
+    for (i, side) in flat.iter().enumerate() {
+        assert_eq!(*side == PageSide::Right, d.page_number(i) % 2 == 1, "page {i}");
+    }
+    d.check().unwrap();
+}
+
 #[test]
 fn document_serde_roundtrip() {
     let mut d = doc();
