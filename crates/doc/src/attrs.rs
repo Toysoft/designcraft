@@ -43,6 +43,10 @@ macro_rules! attr_set {
             pub fn count(&self) -> usize {
                 0 $( + self.$field.is_some() as usize )*
             }
+            /// Remove local values already supplied by the applied style, keeping real differences.
+            pub fn retain_differences(&mut self, base: &$props) {
+                $( if self.$field.as_ref() == Some(&base.$field) { self.$field = None; } )*
+            }
             /// Field names that are set (camelCase).
             pub fn keys(&self) -> Vec<&'static str> {
                 let mut v = Vec::new();

@@ -61,6 +61,13 @@ context menus, typing at a caret) are things a layout artist does every minute, 
 
 ## Remaining effort
 
+Applying a paragraph or character style now removes local values equal to the applied style,
+so text used to capture a style follows later edits to that style. Different local formatting
+and named character styles stay intact. Paragraph-style application treats selection endpoints
+as exclusive; Clear Overrides removes character formatting only inside a nonempty selection.
+Regressions cover the capture/edit workflow at 2:16 and 6:02 in
+[Jessica Garrity's styles tutorial](https://www.youtube.com/watch?v=pG9JkAPLgs8).
+
 | Work | Opus 5.5 h |
 |---|---|
 | Copy/paste, context menus, threading clicks, caret formatting on every platform, with control-channel regression tests | 30–50 |

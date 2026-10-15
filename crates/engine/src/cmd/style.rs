@@ -1,5 +1,104 @@
 //! Paragraph / character styles and swatches.
 
+#[cfg(test)]
+mod application_inheritance_tests {
+    use super::*;
+
+    fn setup(text: &str) -> (Session, Value) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let f = s.execute("frame.create", &json!({"rect": [36,36,300,300], "content": "text", "text": text})).unwrap();
+        (s, f["story"].clone())
+    }
+    fn select(s: &mut Session, story: &Value, start: usize, end: usize) {
+        s.execute("text.select", &json!({"story": story, "anchor": start, "focus": end})).unwrap();
+    }
+    fn attrs(s: &mut Session) -> Value {
+        s.execute("type.selectionAttrs", &json!({})).unwrap()
+    }
+
+    #[test]
+    fn paragraph_capture_source_follows_later_style_edits_and_undo() {
+        let (mut s, story) = setup("First\nSecond");
+        select(&mut s, &story, 0, 5);
+        s.execute("type.char", &json!({"size": 18, "fill": "[Paper]"})).unwrap();
+        s.execute("type.para", &json!({"spaceAfter": 6})).unwrap();
+        s.execute("style.paragraph.create", &json!({"name": "Header", "fromSelection": true})).unwrap();
+        let before = s.doc().unwrap().doc.clone();
+        let undo = s.doc().unwrap().history.undo.len();
+        s.execute("style.paragraph.apply", &json!({"name": "Header"})).unwrap();
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc().unwrap().doc, before);
+        s.execute("edit.redo", &json!({})).unwrap();
+        select(&mut s, &story, 6, 6);
+        s.execute("style.paragraph.apply", &json!({"name": "Header"})).unwrap();
+        s.execute("style.paragraph.edit", &json!({"name": "Header", "chars": {"size": 20, "fill": "[Black]"}, "para": {"spaceAfter": 12}})).unwrap();
+        for pos in [0, 6] {
+            select(&mut s, &story, pos, pos + 1);
+            let a = attrs(&mut s);
+            assert_eq!(a["chars"]["size"], 20.0);
+            assert_eq!(a["chars"]["fill"], "[Black]");
+            assert_eq!(a["para"]["spaceAfter"], 12.0);
+        }
+    }
+
+    #[test]
+    fn applying_styles_keeps_different_overrides_and_named_character_styles() {
+        let (mut s, story) = setup("First\nSecond");
+        select(&mut s, &story, 0, 5);
+        s.execute("type.char", &json!({"size": 14})).unwrap();
+        s.execute("type.para", &json!({"spaceAfter": 9})).unwrap();
+        s.execute("style.character.create", &json!({"name": "Emphasis", "chars": {"underline": true}})).unwrap();
+        s.execute("style.character.apply", &json!({"name": "Emphasis"})).unwrap();
+        s.execute("style.paragraph.create", &json!({"name": "Body", "chars": {"size": 10}, "para": {"spaceAfter": 6}})).unwrap();
+        s.execute("style.paragraph.apply", &json!({"name": "Body"})).unwrap();
+        let a = attrs(&mut s);
+        assert_eq!(a["chars"]["size"], 14.0);
+        assert_eq!(a["para"]["spaceAfter"], 9.0);
+        assert_eq!(a["characterStyle"], "Emphasis");
+        assert_eq!(a["chars"]["underline"], true);
+    }
+
+    #[test]
+    fn character_capture_source_remains_sparse_and_follows_style_edits() {
+        let (mut s, story) = setup("First\nSecond");
+        select(&mut s, &story, 0, 5);
+        s.execute("type.char", &json!({"underline": true})).unwrap();
+        s.execute("style.character.create", &json!({"name": "Emphasis", "fromSelection": true})).unwrap();
+        s.execute("style.character.apply", &json!({"name": "Emphasis"})).unwrap();
+        s.execute("style.character.edit", &json!({"name": "Emphasis", "chars": {"underline": false}})).unwrap();
+        assert_eq!(attrs(&mut s)["chars"]["underline"], false);
+        assert!(s.doc().unwrap().doc.styles.char_style("Emphasis").unwrap().chars.size.is_none());
+        s.execute("style.paragraph.edit", &json!({"name": designcraft_doc::BASIC_PARAGRAPH, "chars": {"size": 20}})).unwrap();
+        assert_eq!(attrs(&mut s)["chars"]["size"], 20.0);
+    }
+
+    #[test]
+    fn paragraph_selection_excludes_the_next_paragraph_at_its_start() {
+        let (mut s, story) = setup("é\nNext");
+        select(&mut s, &story, 0, 3);
+        s.execute("style.paragraph.create", &json!({"name": "Header"})).unwrap();
+        s.execute("style.paragraph.apply", &json!({"name": "Header", "clearOverrides": true})).unwrap();
+        select(&mut s, &story, 3, 4);
+        assert_eq!(attrs(&mut s)["paragraphStyle"], designcraft_doc::BASIC_PARAGRAPH);
+        select(&mut s, &story, 0, 2);
+        assert_eq!(attrs(&mut s)["paragraphStyle"], "Header");
+    }
+
+    #[test]
+    fn clearing_a_partial_selection_preserves_character_overrides_outside_it() {
+        let (mut s, story) = setup("First Second");
+        select(&mut s, &story, 0, 12);
+        s.execute("type.char", &json!({"size": 18})).unwrap();
+        select(&mut s, &story, 0, 5);
+        s.execute("style.paragraph.apply", &json!({"name": designcraft_doc::BASIC_PARAGRAPH, "clearOverrides": true})).unwrap();
+        assert_ne!(attrs(&mut s)["chars"]["size"], 18.0);
+        select(&mut s, &story, 6, 12);
+        assert_eq!(attrs(&mut s)["chars"]["size"], 18.0);
+    }
+}
+
 use designcraft_color::{Swatch, SwatchValue};
 use designcraft_doc::{CharAttrs, CharacterStyle, ParaAttrs, ParagraphStyle, Styles};
 use serde_json::{Value, json};
@@ -405,19 +504,39 @@ fn apply_para(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let targets = super::text::format_targets_pub(s);
     s.edit(|d, _| {
+        let styles = d.styles.clone();
+        let (style_para, style_chars) = styles.resolve_para_style(&name);
         for t in &targets {
             let r = &t.range;
             if let Some(st) = d.text_story_mut(t.story, t.cell) {
-                st.format_paras(r.clone(), |f| {
+                // Text selections are half-open: a selection ending at the next paragraph's
+                // start must not apply a style to that paragraph too.
+                let end = if r.is_empty() { r.start } else { r.end.saturating_sub(1) };
+                let (first, last) = (st.para_at(r.start), st.para_at(end));
+                st.format_paras(r.start..end, |f| {
                     f.style = name.clone();
                     if clear {
                         f.para = ParaAttrs::default();
                         f.chars = CharAttrs::default();
+                    } else {
+                        f.para.retain_differences(&style_para);
+                        f.chars.retain_differences(&style_chars);
                     }
                 });
-                if clear {
-                    let (a, b) = (st.para_ranges()[st.para_at(r.start)].start, st.para_ranges()[st.para_at(r.end)].end);
-                    st.format_chars(a..b, |f| f.over = CharAttrs::default());
+                for (pi, range) in st.para_ranges().into_iter().enumerate().take(last.saturating_add(1)).skip(first) {
+                    let Some(pf) = st.paras.get(pi) else { continue };
+                    let (_, base) = styles.resolve_para(pf);
+                    let end = range.end.saturating_add(1).min(st.len());
+                    let range = if clear && !r.is_empty() { range.start.max(r.start)..end.min(r.end) } else { range.start..end };
+                    st.format_chars(range, |f| {
+                        if clear {
+                            f.over = CharAttrs::default();
+                        } else {
+                            let mut inherited = base.clone();
+                            inherited.apply(&styles.char_style_attrs(&f.style));
+                            f.over.retain_differences(&inherited);
+                        }
+                    });
                 }
             }
         }
@@ -432,9 +551,22 @@ fn apply_char(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let targets = super::text::format_targets_pub(s);
     s.edit(|d, _| {
+        let styles = d.styles.clone();
         for t in &targets {
             if let Some(st) = d.text_story_mut(t.story, t.cell) {
-                st.format_chars(t.range.clone(), |f| f.style = name.clone());
+                for (pi, range) in st.para_ranges().into_iter().enumerate() {
+                    let range = range.start.max(t.range.start)..range.end.saturating_add(1).min(st.len()).min(t.range.end);
+                    if range.is_empty() {
+                        continue;
+                    }
+                    let Some(pf) = st.paras.get(pi) else { continue };
+                    let (_, mut inherited) = styles.resolve_para(pf);
+                    inherited.apply(&styles.char_style_attrs(&name));
+                    st.format_chars(range, |f| {
+                        f.style = name.clone();
+                        f.over.retain_differences(&inherited);
+                    });
+                }
             }
         }
         ok()
