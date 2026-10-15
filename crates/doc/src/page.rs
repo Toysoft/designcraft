@@ -293,6 +293,20 @@ impl Spread {
     pub fn bounds(&self) -> Rect {
         self.pages.iter().map(Page::bounds).reduce(|a, b| a.union(b)).unwrap_or(Rect::ZERO)
     }
+    /// The bleed guide: one rectangle around the spread. `bleed` is the document's top, bottom,
+    /// inside, outside; the inside value applies only at an outer edge on the spine side (a lone
+    /// left page's right edge). None without pages or without any bleed.
+    pub fn bleed_rect(&self, bleed: [f64; 4]) -> Option<Rect> {
+        let (first, last) = (self.pages.first()?, self.pages.last()?);
+        if !bleed.iter().any(|v| *v > 0.0) {
+            return None;
+        }
+        let [top, bottom, inside, outside] = bleed;
+        let l = if first.side == PageSide::Left { outside } else { inside };
+        let r = if matches!(last.side, PageSide::Right | PageSide::Single) { outside } else { inside };
+        let b = self.bounds();
+        Some(Rect::new(b.x0 - l, b.y0 - top, b.x1 + r, b.y1 + bottom))
+    }
     /// x of the spine (between left and right pages) or the page centre for single pages.
     pub fn spine_x(&self) -> f64 {
         match self.pages.iter().position(|p| p.side == PageSide::Right) {

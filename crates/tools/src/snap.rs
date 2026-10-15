@@ -1127,6 +1127,18 @@ fn pass_guides(cx: &ToolContext, req: &SnapRequest<'_>, axis: Axis, tol: f64) ->
             }
         }
     }
+    // The bleed guide's four sides, like InDesign's bleed guides.
+    if let Some(bleed) = sp.bleed_rect(cx.doc.settings.bleed) {
+        let (range_lo, range_hi) = perp_ends(bleed, axis);
+        if ranges_overlap(moving_lo, moving_hi, range_lo, range_hi) {
+            let (a, b) = match axis {
+                Axis::X => (bleed.x0, bleed.x1),
+                Axis::Y => (bleed.y0, bleed.y1),
+            };
+            offer_line(&mut best, req.rect, flags, axis, a, tol);
+            offer_line(&mut best, req.rect, flags, axis, b, tol);
+        }
+    }
     best.map(|b| b.hit)
 }
 
@@ -1543,6 +1555,41 @@ mod tests {
             angle: None,
             radius: 0.0,
             pointer: Point::new(0.0, 0.0),
+        }
+    }
+
+    /// The bleed guide attracts like a ruler guide: a top edge 2 pt below the top bleed line
+    /// snaps up to it; with no bleed there is nothing there to snap to.
+    #[test]
+    fn bleed_guide_is_a_snap_target() {
+        let far = Rect::new(300.0, 300.0, 320.0, 320.0);
+        for (bleed, expected) in [([9.0, 9.0, 9.0, 9.0], -2.0), ([0.0; 4], 0.0)] {
+            let (mut doc, moving, _other) = doc_with_items(Rect::new(80.0, 100.0, 100.0, 140.0), far, 500.0);
+            doc.settings.bleed = bleed;
+            let top = doc.spreads[0].bounds().y0 - 9.0;
+            let rect = Rect::new(80.0, top + 2.0, 100.0, top + 40.0);
+            let cache = Cache::new();
+            let layout = CanvasLayout::new(&doc, false);
+            let sel = Selection::default();
+            let mut cx = ctx_on(&doc, &sel, &cache, &layout);
+            cx.snap.zone_px = 4.0;
+            let hit = snap(
+                &cx,
+                SnapRequest {
+                    spread: SpreadRef::Doc(0),
+                    gesture: Gesture::Move,
+                    rect,
+                    x_edges: [false, false, false],
+                    y_edges: [true, true, true],
+                    exclude: &[moving],
+                    copying: false,
+                    lengths: [None, None],
+                    angle: None,
+                    radius: 0.0,
+                    pointer: Point::new(0.0, 0.0),
+                },
+            );
+            assert!((hit.delta.y - expected).abs() < 1e-6, "bleed {bleed:?}: {:?}", hit.delta);
         }
     }
 
