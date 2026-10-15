@@ -57,12 +57,20 @@ fn local(n: &[u8]) -> String {
     s.rsplit(':').next().unwrap_or(&s).to_string()
 }
 
+/// How deep elements may nest. Word's own XML stays well under a hundred levels; the tree is read
+/// recursively afterwards (`El::text`, the block walk) and dropped recursively, so a document
+/// nested without bound must be refused here, not run into the stack (#712).
+pub(crate) const MAX_DEPTH: usize = 256;
+
 pub(crate) fn parse(xml: &str) -> Result<El, ImportError> {
     let mut r = quick_xml::Reader::from_str(xml);
     let mut stack: Vec<El> = vec![El::default()];
     loop {
         match r.read_event().map_err(|e| ImportError::Corrupt(e.to_string()))? {
             Event::Start(e) => {
+                if stack.len() > MAX_DEPTH {
+                    return Err(ImportError::Corrupt(format!("XML elements nested deeper than {MAX_DEPTH} levels")));
+                }
                 let el = El {
                     name: local(e.name().as_ref()),
                     attrs: e
@@ -542,6 +550,17 @@ pub fn import(bytes: &[u8]) -> Result<Imported, ImportError> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Issue #712: nesting past the budget is an error from the parser, not a stack overflow later.
+    #[test]
+    fn nesting_past_the_budget_is_refused() {
+        let nested = |n: usize| format!("{}{}", "<w:p>".repeat(n), "</w:p>".repeat(n));
+        let ok = parse(&nested(MAX_DEPTH)).expect("the budget itself parses");
+        assert_eq!(ok.name, "p");
+        let err = parse(&nested(MAX_DEPTH + 1)).expect_err("one level more is refused");
+        assert!(err.to_string().contains("nested deeper"), "{err}");
+        assert!(parse(&nested(100_000)).is_err());
+    }
 
     pub(crate) fn docx(document: &str, styles: &str, footnotes: &str) -> Vec<u8> {
         docx_parts(&[("word/document.xml", document), ("word/styles.xml", styles), ("word/footnotes.xml", footnotes)])
