@@ -14,10 +14,13 @@ fn u32le(b: &[u8], at: usize) -> Option<usize> {
 }
 
 /// The PostScript section and the TIFF preview (DOS EPS).
+///
+/// The binary header is 22 bytes: the magic (0xC5D0, 0xD3C6), `psStart`, `psLength`,
+/// `tiffStart`, `tiffLength`, then a two-byte checksum.
 fn sections(bytes: &[u8]) -> (&[u8], Option<&[u8]>) {
     if bytes.starts_with(&[0xC5, 0xD0, 0xD3, 0xC6]) {
         let ps = u32le(bytes, 4).zip(u32le(bytes, 8)).and_then(|(o, l)| bytes.get(o..o.checked_add(l)?)).unwrap_or(&[]);
-        let tiff = u32le(bytes, 20).zip(u32le(bytes, 24)).filter(|(o, l)| *o > 0 && *l > 0).and_then(|(o, l)| bytes.get(o..o.checked_add(l)?));
+        let tiff = u32le(bytes, 12).zip(u32le(bytes, 16)).filter(|(o, l)| *o > 0 && *l > 0).and_then(|(o, l)| bytes.get(o..o.checked_add(l)?));
         return (ps, tiff);
     }
     (bytes, None)
@@ -224,15 +227,16 @@ mod tests {
         let (png, size) = eps_proxy(eps).unwrap();
         assert_eq!(size, (100.5, 50.25));
         assert_eq!(crate::pixel_size(&png), Some((201, 101)));
-        // DOS EPS with a TIFF preview: the preview is the proxy.
+        // DOS EPS with a TIFF preview: the preview is the proxy. The binary header is 22 bytes:
+        // the magic, psStart, psLength, tiffStart, tiffLength, then a two-byte checksum.
         let mut tiff = Vec::new();
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(10, 5, image::Rgba([255, 0, 0, 255])))
             .write_to(&mut std::io::Cursor::new(&mut tiff), image::ImageFormat::Tiff)
             .unwrap();
         let mut dos = vec![0xC5, 0xD0, 0xD3, 0xC6];
-        let ps_off = 30usize;
+        let ps_off = 22usize;
         let tiff_off = ps_off + eps.len();
-        for v in [ps_off, eps.len(), 0, 0, tiff_off, tiff.len()] {
+        for v in [ps_off, eps.len(), tiff_off, tiff.len()] {
             dos.extend((v as u32).to_le_bytes());
         }
         dos.extend([0xFF, 0xFF]);
