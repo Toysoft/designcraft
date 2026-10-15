@@ -480,6 +480,10 @@ struct PanelContent<'a>(&'a mut DesignApp);
 impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
     fn body(&mut self, ui: &mut egui::Ui, id: &String) {
         egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            if crate::dock::scrolls_itself(id) {
+                crate::dock::panel_body(self.0, ui, id);
+                return;
+            }
             egui::ScrollArea::vertical()
                 .id_salt(("shared-panel-body", id))
                 .auto_shrink([false, false])

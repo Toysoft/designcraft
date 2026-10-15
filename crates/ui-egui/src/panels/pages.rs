@@ -51,6 +51,12 @@ enum PageDrag {
     Parent(Option<String>),
 }
 
+/// The footer: page count and buttons, always at the panel's bottom.
+const FOOTER_H: f32 = 28.0;
+/// The draggable rule between the parents and the pages.
+const DIVIDER_H: f32 = 9.0;
+/// Parent rows shown at first; the divider shows more.
+const PARENTS_DEFAULT_ROWS: f32 = 4.5;
 /// Selected-page tint (multiplied over the thumbnail).
 const SELECTED_TINT: Color32 = Color32::from_rgb(0x88, 0xc7, 0xfb);
 /// Page-number badge of the selected page.
@@ -86,111 +92,150 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         let label = p.parent.as_ref().map(|i| i.label()).unwrap_or_default();
         rows.push((label, p.parent.as_ref().map(|i| i.prefix.clone()), p.pages.len()));
     }
-    for (label, prefix, n) in rows {
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
-        let active = editing_parents && prefix.is_some();
-        if active {
-            ui.painter().rect_filled(r, 0.0, t.row_selected);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(r, 0.0, t.hover);
-        }
-        ui.painter().text(r.left_center() + vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, &label, egui::FontId::proportional(11.5), t.text_strong);
-        blank_spread(ui.painter(), egui::pos2(r.max.x - 10.0, r.center().y), n, aspect, &t);
-        resp.dnd_set_drag_payload(PageDrag::Parent(prefix.clone()));
-        if resp.double_clicked() && prefix.is_some() {
-            let _ = app.run("layout.parents.edit", json!({"on": true}));
-            app.views.clear();
-        }
-        if resp.dragged() {
-            drag_ghost(ui, &label, &t);
-        }
+    // As in InDesign: parents above, pages below, each scrolling on its own; a divider between
+    // them resizes the parents' part; the footer stays at the bottom.
+    let total = {
+        let h = ui.available_height();
+        if h.is_finite() && h < 4000.0 { h } else { 480.0 }
     }
-    ui.add_space(4.0);
-    let r = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(r.min.x - 10.0, r.min.y), vec2(r.width() + 20.0, 1.5)), 0.0, t.section_divider);
-    ui.add_space(12.0);
+    .max(160.0);
+    let natural = rows.len() as f32 * ROW_H;
+    let parents_max = (total - FOOTER_H - DIVIDER_H - 2.0 * ROW_H).max(ROW_H);
+    let parents_h =
+        app.ui.pages_parents_height.unwrap_or(natural.min(PARENTS_DEFAULT_ROWS * ROW_H)).clamp(ROW_H.min(natural), parents_max).min(natural);
+    egui::ScrollArea::vertical().id_salt("pages_parents").max_height(parents_h).min_scrolled_height(parents_h).auto_shrink([false, true]).show(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (label, prefix, n) in rows {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
+                let active = editing_parents && prefix.is_some();
+                if active {
+                    ui.painter().rect_filled(r, 0.0, t.row_selected);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, 0.0, t.hover);
+                }
+                ui.painter().text(
+                    r.left_center() + vec2(3.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &label,
+                    egui::FontId::proportional(11.5),
+                    t.text_strong,
+                );
+                blank_spread(ui.painter(), egui::pos2(r.max.x - 10.0, r.center().y), n, aspect, &t);
+                resp.dnd_set_drag_payload(PageDrag::Parent(prefix.clone()));
+                if resp.double_clicked() && prefix.is_some() {
+                    let _ = app.run("layout.parents.edit", json!({"on": true}));
+                    app.views.clear();
+                }
+                if resp.dragged() {
+                    drag_ghost(ui, &label, &t);
+                }
+            }
+        },
+    );
+    // The divider: drag it to show more or fewer parents.
+    let (dr, dresp) = ui.allocate_exact_size(vec2(ui.available_width(), DIVIDER_H), Sense::drag());
+    let line = egui::Rect::from_center_size(dr.center(), vec2(dr.width() + 20.0, 1.5));
+    ui.painter().rect_filled(line, 0.0, if dresp.hovered() || dresp.dragged() { t.text_dim } else { t.section_divider });
+    let dresp = dresp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    if dresp.dragged() {
+        app.ui.pages_parents_height = Some((parents_h + dresp.drag_delta().y).clamp(ROW_H.min(natural), parents_max));
+    }
+    dresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Parents and pages divider"));
     // ---- Document spreads.
     let cur = crate::canvas::current_page(app).unwrap_or(0);
     let cur_spread = doc.page_loc(cur).map(|l| l.0);
     let center = ui.available_width() / 2.0;
     let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
     let tallest = doc.spreads.iter().flat_map(|sp| sp.pages.iter().map(|p| p.height)).fold(doc.settings.page_height, f64::max).max(1.0);
-    for (si, sp) in doc.spreads.iter().enumerate() {
-        let first = doc.first_page_of_spread(si);
-        // One scale for the whole document (pages of their own size show in proportion): the
-        // document's page size at the usual height, unless a taller page would pass 1.8 times it.
-        // Each row is as tall as its spread's tallest page.
-        let scale = (THUMB_H / doc.settings.page_height.max(1.0) as f32).min(1.8 * THUMB_H / tallest as f32);
-        let row_h = sp.pages.iter().map(|p| p.height as f32 * scale).fold(0.0, f32::max).max(THUMB_H * 0.25);
-        let spine = sp.spine_x() as f32;
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0 + row_h + 22.0), Sense::hover());
-        let top = row.min.y + 8.0;
-        // Marker above the current spread.
-        if cur_spread == Some(si) && !editing_parents {
-            let c = egui::pos2(row.min.x + center, row.min.y + 3.5);
-            ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-5.0, -3.0), c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)], t.icon, Stroke::NONE));
-        }
-        for (pi, p) in sp.pages.iter().enumerate() {
-            let abs = first + pi;
-            let x0 = row.min.x + center + (p.x as f32 - spine) * scale;
-            let pr = egui::Rect::from_min_size(egui::pos2(x0, top), vec2(p.width as f32 * scale, p.height as f32 * scale));
-            let resp = ui.interact(pr, ui.id().with(("page", abs)), Sense::click_and_drag());
-            let selected = abs == cur && !editing_parents;
-            let tint = if selected { SELECTED_TINT } else { Color32::WHITE };
-            if let Some(tex) = thumb(app, ui.ctx(), abs, THUMB_H) {
-                ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
-            } else {
-                ui.painter().rect_filled(pr, 0.0, tint);
-            }
-            ui.painter().rect_stroke(pr, 0.0, Stroke::new(0.5, Color32::from_gray(0x4a)), StrokeKind::Outside);
-            // Parent prefix in the outer top corner (black on white).
-            if let Some(pid) = p.parent
-                && let Some(pp) = doc.parents.iter().find(|x| x.id == pid)
-            {
-                let prefix = pp.parent.as_ref().map(|i| i.prefix.clone()).unwrap_or_default();
-                let g = ui.painter().layout_no_wrap(prefix, crate::theme::semibold(9.5), Color32::BLACK);
-                let w = g.size().x + 2.0;
-                let br = if p.side == designcraft_doc::PageSide::Left {
-                    egui::Rect::from_min_size(pr.left_top(), vec2(w, 10.0))
-                } else {
-                    egui::Rect::from_min_size(pr.right_top() - vec2(w, 0.0), vec2(w, 10.0))
-                };
-                ui.painter().rect_filled(br, 0.0, Color32::WHITE);
-                ui.painter().galley(br.min + vec2(1.0, -0.5), g, Color32::BLACK);
-            }
-            // Drag and drop: pages reorder, parents apply.
-            resp.dnd_set_drag_payload(PageDrag::Page(abs));
-            if resp.dragged() {
-                drag_ghost(ui, &app.session.page_label(abs), &t);
-            }
-            if dragging && resp.contains_pointer() {
-                ui.painter().rect_stroke(pr.expand(1.5), 0.0, Stroke::new(2.0, BADGE), StrokeKind::Outside);
-            }
-            if let Some(payload) = resp.dnd_release_payload::<PageDrag>() {
-                drop = Some(((*payload).clone(), abs));
-            }
-            if resp.clicked() || resp.double_clicked() {
-                if editing_parents {
-                    let _ = app.run("layout.parents.edit", json!({"on": false}));
-                    app.views.clear();
+    let pages_h = (ui.available_height().min(total) - FOOTER_H).max(ROW_H);
+    egui::ScrollArea::vertical().id_salt("pages_spreads").max_height(pages_h).min_scrolled_height(pages_h).auto_shrink([false, false]).show(
+        ui,
+        |ui| {
+            ui.add_space(4.0);
+            for (si, sp) in doc.spreads.iter().enumerate() {
+                let first = doc.first_page_of_spread(si);
+                // One scale for the whole document (pages of their own size show in proportion): the
+                // document's page size at the usual height, unless a taller page would pass 1.8 times it.
+                // Each row is as tall as its spread's tallest page.
+                let scale = (THUMB_H / doc.settings.page_height.max(1.0) as f32).min(1.8 * THUMB_H / tallest as f32);
+                let row_h = sp.pages.iter().map(|p| p.height as f32 * scale).fold(0.0, f32::max).max(THUMB_H * 0.25);
+                let spine = sp.spine_x() as f32;
+                let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0 + row_h + 22.0), Sense::hover());
+                let top = row.min.y + 8.0;
+                // Marker above the current spread.
+                if cur_spread == Some(si) && !editing_parents {
+                    let c = egui::pos2(row.min.x + center, row.min.y + 3.5);
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        vec![c + vec2(-5.0, -3.0), c + vec2(5.0, -3.0), c + vec2(0.0, 3.0)],
+                        t.icon,
+                        Stroke::NONE,
+                    ));
                 }
-                crate::canvas::go_to_page(app, abs);
+                for (pi, p) in sp.pages.iter().enumerate() {
+                    let abs = first + pi;
+                    let x0 = row.min.x + center + (p.x as f32 - spine) * scale;
+                    let pr = egui::Rect::from_min_size(egui::pos2(x0, top), vec2(p.width as f32 * scale, p.height as f32 * scale));
+                    let resp = ui.interact(pr, ui.id().with(("page", abs)), Sense::click_and_drag());
+                    let selected = abs == cur && !editing_parents;
+                    let tint = if selected { SELECTED_TINT } else { Color32::WHITE };
+                    if let Some(tex) = thumb(app, ui.ctx(), abs, THUMB_H) {
+                        ui.painter().image(tex.id(), pr, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+                    } else {
+                        ui.painter().rect_filled(pr, 0.0, tint);
+                    }
+                    ui.painter().rect_stroke(pr, 0.0, Stroke::new(0.5, Color32::from_gray(0x4a)), StrokeKind::Outside);
+                    // Parent prefix in the outer top corner (black on white).
+                    if let Some(pid) = p.parent
+                        && let Some(pp) = doc.parents.iter().find(|x| x.id == pid)
+                    {
+                        let prefix = pp.parent.as_ref().map(|i| i.prefix.clone()).unwrap_or_default();
+                        let g = ui.painter().layout_no_wrap(prefix, crate::theme::semibold(9.5), Color32::BLACK);
+                        let w = g.size().x + 2.0;
+                        let br = if p.side == designcraft_doc::PageSide::Left {
+                            egui::Rect::from_min_size(pr.left_top(), vec2(w, 10.0))
+                        } else {
+                            egui::Rect::from_min_size(pr.right_top() - vec2(w, 0.0), vec2(w, 10.0))
+                        };
+                        ui.painter().rect_filled(br, 0.0, Color32::WHITE);
+                        ui.painter().galley(br.min + vec2(1.0, -0.5), g, Color32::BLACK);
+                    }
+                    // Drag and drop: pages reorder, parents apply.
+                    resp.dnd_set_drag_payload(PageDrag::Page(abs));
+                    if resp.dragged() {
+                        drag_ghost(ui, &app.session.page_label(abs), &t);
+                    }
+                    if dragging && resp.contains_pointer() {
+                        ui.painter().rect_stroke(pr.expand(1.5), 0.0, Stroke::new(2.0, BADGE), StrokeKind::Outside);
+                    }
+                    if let Some(payload) = resp.dnd_release_payload::<PageDrag>() {
+                        drop = Some(((*payload).clone(), abs));
+                    }
+                    if resp.clicked() || resp.double_clicked() {
+                        if editing_parents {
+                            let _ = app.run("layout.parents.edit", json!({"on": false}));
+                            app.views.clear();
+                        }
+                        crate::canvas::go_to_page(app, abs);
+                    }
+                    resp.context_menu(|ui| page_menu(app, ui, &doc, abs, si));
+                    // Page number under the page: white on a blue badge when selected.
+                    let name = app.session.page_label(abs);
+                    let g = ui.painter().layout_no_wrap(name, crate::theme::semibold(11.0), Color32::WHITE);
+                    let c = egui::pos2(pr.center().x, pr.max.y + 11.0);
+                    if selected {
+                        let br = egui::Rect::from_center_size(c, vec2(g.size().x.max(7.0) + 7.0, 12.5));
+                        ui.painter().rect_filled(br, 0.0, BADGE);
+                    }
+                    ui.painter().galley(c - g.size() / 2.0, g, Color32::WHITE);
+                }
             }
-            resp.context_menu(|ui| page_menu(app, ui, &doc, abs, si));
-            // Page number under the page: white on a blue badge when selected.
-            let name = app.session.page_label(abs);
-            let g = ui.painter().layout_no_wrap(name, crate::theme::semibold(11.0), Color32::WHITE);
-            let c = egui::pos2(pr.center().x, pr.max.y + 11.0);
-            if selected {
-                let br = egui::Rect::from_center_size(c, vec2(g.size().x.max(7.0) + 7.0, 12.5));
-                ui.painter().rect_filled(br, 0.0, BADGE);
-            }
-            ui.painter().galley(c - g.size() / 2.0, g, Color32::WHITE);
-        }
-    }
-    ui.add_space(6.0);
+        },
+    );
     ui.spacing_mut().item_spacing.y = 4.0;
     ui.horizontal(|ui| {
+        ui.set_min_height(FOOTER_H - 4.0);
         crate::rtl::label(
             ui,
             egui::RichText::new(
@@ -436,6 +481,42 @@ mod tests {
         h.get_by_label("Delete Page").click();
         h.run_steps(3);
         assert_eq!(h.state().session.doc().unwrap().doc.page_count(), 4, "only the clicked page");
+    }
+
+    /// As InDesign's: the footer stays at the bottom however many pages there are, and the
+    /// divider between parents and pages shows more or fewer parents.
+    #[test]
+    fn the_footer_stays_put_and_the_divider_resizes_the_parents() {
+        use egui::{Event, Modifiers, PointerButton};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 60, "facingPages": true})).unwrap();
+        for prefix in ["B", "C", "D", "E", "F", "G"] {
+            app.run("layout.parents.new", json!({"prefix": prefix})).unwrap();
+        }
+        app.ui.dock_tab = "pages".into();
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1400.0, 900.0));
+        for label in ["60 Pages in 31 Spreads", "Create new page", "Delete selected pages"] {
+            assert!(window.contains_rect(h.get_by_label(label).rect()), "{label} is on screen");
+        }
+        // Seven parent rows: four and a half show at first; the rest scroll.
+        let divider = h.get_by_label("Parents and pages divider").rect();
+        let before = divider.center().y;
+        assert!(h.query_by_label("G-Parent").is_none_or(|n| n.rect().top() > divider.top()), "the last parent is scrolled away");
+        let (a, b) = (divider.center(), divider.center() + vec2(0.0, 80.0));
+        h.input_mut().events.push(Event::PointerMoved(a));
+        h.input_mut().events.push(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for k in 1..=4 {
+            h.input_mut().events.push(Event::PointerMoved(a + (b - a) * (k as f32 / 4.0)));
+            h.step();
+        }
+        h.input_mut().events.push(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        let after = h.get_by_label("Parents and pages divider").rect().center().y;
+        assert!(after > before + 40.0, "the divider moved down: {before} → {after}");
+        assert!(h.state().app.ui.pages_parents_height.is_some());
+        assert!(window.contains_rect(h.get_by_label("Create new page").rect()), "the footer is still there");
     }
 
     #[test]
