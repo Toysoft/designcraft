@@ -729,10 +729,6 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             painter.rect_stroke(rect(br), 0.0, Stroke::new(hair(painter), c32(s.bleed_color)), StrokeKind::Middle);
         }
         let pasteboard = m.inverse().transform_rect_bbox(layout.pasteboard);
-        let first_abs = match slot.spread {
-            SpreadRef::Doc(si) => Some(doc.first_page_of_spread(si)),
-            _ => None,
-        };
         for (pi, p) in sp.pages.iter().enumerate() {
             let pr = p.bounds();
             // Page tool › Show Parent Page Overlay: the parent page's size over the page.
@@ -748,8 +744,6 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             if !app.ui.guides {
                 continue;
             }
-            // Guides set on the applied parent page show on this page too.
-            let inherited = first_abs.map(|f| doc.inherited_guides(f + pi)).unwrap_or_default();
             // Baseline grid.
             if app.ui.baseline_grid && xf.zoom >= s.baseline_grid.view_threshold {
                 let g = &s.baseline_grid;
@@ -774,7 +768,8 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
                     }
                 }
             }
-            for g in p.guides.iter().chain(inherited.iter()).filter(|g| g.visible_in(doc)) {
+            // The page's own guides, then those it shows from its parent page.
+            for g in p.guides.iter().cloned().chain(doc.parent_guides(p)).filter(|g| g.visible_in(doc)) {
                 // Spread guides cross the pasteboard; page guides their page.
                 let span = if g.spread { pasteboard } else { pr };
                 let (a, bb) = match g.orientation {
@@ -2479,6 +2474,26 @@ mod tests {
                 assert_eq!(app.session.doc().unwrap().selection, selection);
             }
         }
+    }
+
+    #[test]
+    fn parent_guides_on_a_page_are_not_picked_there() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        // 100 pt into A's right page, which page 1 (a right page at x = 0) shows.
+        let parent_guide = json!({"spread": {"kind": "parent", "index": 0}, "page": 1, "orientation": "vertical", "position": 712});
+        app.run("guide.add", parent_guide).unwrap();
+        let mut h = harness(app);
+        let at = |app: &DesignApp| {
+            let xf = Xf::new(app.canvas_rect.unwrap(), app.view().unwrap());
+            let layout = CanvasLayout::new(&app.session.active().unwrap().doc, false);
+            let slot = layout.slots.iter().find(|s| s.spread == SpreadRef::Doc(0)).unwrap();
+            guide_at(app, &xf, xf.to_screen(slot.xf * Point::new(100.0, 300.0)))
+        };
+        assert_eq!(at(h.state()), None, "the parent's guide is edited on the parent");
+        h.state_mut().run("guide.add", json!({"orientation": "vertical", "position": 100})).unwrap();
+        h.run_steps(2);
+        assert!(matches!(at(h.state()), Some((SpreadRef::Doc(0), 0, 0, _))), "the page's own guide is");
     }
 
     #[test]

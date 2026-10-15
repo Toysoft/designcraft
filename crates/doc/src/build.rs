@@ -218,6 +218,7 @@ impl Document {
             x: 0.0,
             margins,
             columns: Columns { count: columns.max(1), gutter, positions: None },
+            local_margins: false,
             parent,
             side: PageSide::Single,
             overridden: vec![],
@@ -376,6 +377,8 @@ impl Document {
             out.insert(at, sp);
         }
         self.spreads = out;
+        // Pages can change sides, and so parent pages.
+        self.sync_parent_margins();
     }
 
     /// Insert `count` pages after absolute page `after` (None = at the start), using `parent`.
@@ -551,40 +554,82 @@ impl Document {
             let (si, pi) = self.page_loc(abs).ok_or(DocError::NoPage(abs))?;
             Arc::make_mut(&mut self.spreads[si]).pages[pi].parent = parent;
         }
+        self.sync_parent_margins();
         Ok(())
     }
 
     /// Parent page (spread index, page index) to show behind document page `abs`.
     pub fn parent_page_for(&self, abs: usize) -> Option<(usize, usize)> {
-        let page = self.page(abs)?;
+        self.parent_page_of(self.page(abs)?)
+    }
+
+    /// Parent page (spread index, page index) applied to `page`: the page on its side of its
+    /// parent spread.
+    pub fn parent_page_of(&self, page: &Page) -> Option<(usize, usize)> {
         let pi = self.parent_index(page.parent?)?;
-        let ps = &self.parents[pi];
         // A parent spread can come without pages from a file.
-        // A single-sided page takes the parent's first page, like a left-hand page.
-        let first = ps.pages.len() >= 2 && matches!(page.side, PageSide::Left | PageSide::Single);
-        let idx = if first { 0 } else { ps.pages.len().checked_sub(1)? };
+        let idx = self.parents.get(pi)?.parent_page_index(page.side)?;
         Some((pi, idx))
     }
 
-    /// Ruler guides document page `abs` inherits from its applied parent page. They are stored on
-    /// the parent page only: positions are moved from the parent page's place in its spread to
-    /// this page's place in its own, so they draw and snap where the page is. Editing them
-    /// happens on the parent page.
-    pub fn inherited_guides(&self, abs: usize) -> Vec<Guide> {
-        let (Some(page), Some((pi, qi))) = (self.page(abs), self.parent_page_for(abs)) else { return Vec::new() };
-        let Some(parent) = self.parents.get(pi).and_then(|ps| ps.pages.get(qi)) else { return Vec::new() };
-        let dx = page.x - parent.x;
-        parent
-            .guides
-            .iter()
-            .map(|g| {
-                let mut g = g.clone();
-                if g.orientation == Orientation::Vertical {
-                    g.position += dx;
+    /// The parent page applied to `page`.
+    pub fn parent_page(&self, page: &Page) -> Option<&Page> {
+        let (pi, qi) = self.parent_page_of(page)?;
+        self.parents.get(pi)?.pages.get(qi)
+    }
+
+    /// Ruler guides `page` shows from its parent page, moved from the parent page's place in its
+    /// spread to `page`'s place in its own. They stay stored on the parent page.
+    pub fn parent_guides<'a>(&'a self, page: &Page) -> impl Iterator<Item = Guide> + 'a {
+        let src = self.parent_page(page);
+        let dx = src.map_or(0.0, |q| page.x - q.x);
+        src.into_iter().flat_map(|q| q.guides.iter()).map(move |g| {
+            let mut g = g.clone();
+            if g.orientation == Orientation::Vertical {
+                g.position += dx;
+            }
+            g
+        })
+    }
+
+    /// Give every document page without local margins its parent page's margins and columns.
+    pub fn sync_parent_margins(&mut self) {
+        for si in 0..self.spreads.len() {
+            for pi in 0..self.spreads[si].pages.len() {
+                let Some(page) = self.spreads[si].pages.get(pi) else { continue };
+                if page.local_margins {
+                    continue;
                 }
-                g
-            })
-            .collect()
+                let Some(src) = self.parent_page(page).filter(|q| !q.same_margins(page)).map(|q| (q.margins, q.columns.clone())) else {
+                    continue;
+                };
+                if let Some(page) = Arc::make_mut(&mut self.spreads[si]).pages.get_mut(pi) {
+                    (page.margins, page.columns) = src;
+                }
+            }
+        }
+    }
+
+    /// Ruler guides document page `abs` inherits from its applied parent page (see
+    /// [`Document::parent_guides`]).
+    pub fn inherited_guides(&self, abs: usize) -> Vec<Guide> {
+        self.page(abs).map(|p| self.parent_guides(p).collect()).unwrap_or_default()
+    }
+
+    /// Mark document pages whose margins or columns differ from their parent page's as local, so
+    /// that a later sync keeps them (documents saved before pages tracked local margins).
+    pub fn mark_differing_margins_local(&mut self) {
+        for si in 0..self.spreads.len() {
+            for pi in 0..self.spreads[si].pages.len() {
+                let Some(page) = self.spreads[si].pages.get(pi) else { continue };
+                if page.local_margins || self.parent_page(page).is_none_or(|q| q.same_margins(page)) {
+                    continue;
+                }
+                if let Some(page) = Arc::make_mut(&mut self.spreads[si]).pages.get_mut(pi) {
+                    page.local_margins = true;
+                }
+            }
+        }
     }
 }
 
@@ -616,6 +661,19 @@ mod tests {
         d.check().unwrap();
         assert_eq!(d.parent_page_for(0), None);
         assert_eq!(d.parent_page_for(1), None);
+    }
+
+    /// Files saved before pages tracked local margins: pages that differ from their parent keep
+    /// their margins; the rest follow the parent.
+    #[test]
+    fn differing_margins_from_older_files_stay_local() {
+        let mut d = Document::new(&NewDocument { pages: 2, ..Default::default() });
+        Arc::make_mut(&mut d.spreads[1]).pages[0].margins = Margins::uniform(90.0);
+        d.mark_differing_margins_local();
+        Arc::make_mut(&mut d.parents[0]).pages.iter_mut().for_each(|p| p.margins = Margins::uniform(12.0));
+        d.sync_parent_margins();
+        assert_eq!(d.page(0).map(|p| (p.margins.top, p.local_margins)), Some((12.0, false)));
+        assert_eq!(d.page(1).map(|p| (p.margins.top, p.local_margins)), Some((90.0, true)));
     }
 
     /// A single-sided page applying a two-page parent shows the parent's first page.

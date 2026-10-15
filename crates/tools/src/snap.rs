@@ -1083,8 +1083,8 @@ fn push_parent_length_chain(
 /// Ruler guides, margins, and column sides. No overlay.
 ///
 /// A page guide attracts when the moving rect overlaps that page on the other axis. A spread
-/// guide uses the spread bounds. Locked guides are included. A guide is a target only when
-/// `Guide::visible_in` accepts it.
+/// guide uses the spread bounds. Locked guides are included, and so are the guides a page shows
+/// from its parent page. A guide is a target only when `Guide::visible_in` accepts it.
 fn pass_guides(cx: &ToolContext, req: &SnapRequest<'_>, axis: Axis, tol: f64) -> Option<AxisHit> {
     if !cx.snap.snap_to_guides || !cx.snap.show_guides {
         return None;
@@ -1094,15 +1094,10 @@ fn pass_guides(cx: &ToolContext, req: &SnapRequest<'_>, axis: Axis, tol: f64) ->
     let flags = axis_flags(req, axis);
     let (moving_lo, moving_hi) = perp_ends(req.rect, axis);
     let mut best: Option<Best> = None;
-    let first_abs = match req.spread {
-        SpreadRef::Doc(si) => Some(cx.doc.first_page_of_spread(si)),
-        _ => None,
-    };
-    for (pidx, page) in sp.pages.iter().enumerate() {
+    for page in &sp.pages {
         let page_bounds = page.bounds();
-        // Guides set on the applied parent page count as this page's guides.
-        let inherited = first_abs.map(|f| cx.doc.inherited_guides(f + pidx)).unwrap_or_default();
-        for guide in page.guides.iter().chain(inherited.iter()) {
+        // The page's own guides, then those it shows from its parent page.
+        for guide in page.guides.iter().cloned().chain(cx.doc.parent_guides(page)) {
             if !guide.visible_in(cx.doc) || !guide.position.is_finite() || guide.orientation != axis_orientation(axis) {
                 continue;
             }
@@ -1734,6 +1729,32 @@ mod tests {
             },
         );
         assert!((hit.delta.x - -1.0).abs() < 1e-6, "delta.x = {}", hit.delta.x);
+    }
+
+    #[test]
+    fn parent_page_guides_snap_on_the_document_page() {
+        // Facing document: page 1 is a right page at x = 0; its parent page is A's right page at
+        // x = 612 in the parent spread.
+        let mut doc = Document::new(&NewDocument::default());
+        let layer = doc.default_layer();
+        let id = ItemId(doc.alloc());
+        let item = Item::new(id, layer, Shape::Rectangle, shapes::rectangle(Rect::new(80.0, 100.0, 100.5, 140.0)));
+        doc.insert_item(SpreadRef::Doc(0), item, None).unwrap();
+        Arc::make_mut(&mut doc.parents[0]).pages[1].guides.push(Guide {
+            orientation: Orientation::Vertical,
+            position: 612.0 + 104.0,
+            spread: false,
+            locked: false,
+            layer: None,
+            liquid: false,
+        });
+        let cache = Cache::new();
+        let layout = CanvasLayout::new(&doc, false);
+        let sel = Selection::default();
+        let mut cx = ctx_on(&doc, &sel, &cache, &layout);
+        cx.snap.zone_px = 4.0;
+        let hit = snap(&cx, move_req(Rect::new(80.0, 100.0, 100.5, 140.0), &[id]));
+        assert!((hit.delta.x - 3.5).abs() < 1e-6, "snaps to the parent guide at x = 104: {:?}", hit.delta);
     }
 
     #[test]

@@ -98,6 +98,10 @@ pub struct Page {
     pub x: f64,
     pub margins: Margins,
     pub columns: Columns,
+    /// Margins and columns set on this page itself. Without them a document page takes its
+    /// parent page's margins and columns and follows their changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_margins: bool,
     /// Applied parent spread (`None` = [None]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SpreadId>,
@@ -229,6 +233,10 @@ impl Page {
     pub fn bounds(&self) -> Rect {
         Rect::new(self.x, 0.0, self.x + self.width, self.height)
     }
+    /// Same margins and columns as `other`.
+    pub fn same_margins(&self, other: &Page) -> bool {
+        self.margins == other.margins && self.columns == other.columns
+    }
     /// Left and right margins resolved for the page side (inside is at the spine).
     pub fn left_right_margins(&self) -> (f64, f64) {
         match self.side {
@@ -302,6 +310,13 @@ impl Spread {
             None => self.bounds().center().x,
         }
     }
+    /// Index of this parent spread's page shown behind a document page on `side`: the first page
+    /// for left and single-sided pages, else the last page. `None` for a parent spread without
+    /// pages.
+    pub fn parent_page_index(&self, side: PageSide) -> Option<usize> {
+        let first = self.pages.len() >= 2 && matches!(side, PageSide::Left | PageSide::Single);
+        if first { Some(0) } else { self.pages.len().checked_sub(1) }
+    }
     /// Index of the page under spread x (nearest page for the pasteboard).
     pub fn page_at_x(&self, x: f64) -> Option<usize> {
         if self.pages.is_empty() {
@@ -365,6 +380,7 @@ mod tests {
             x,
             margins: Margins { top: 36.0, bottom: 36.0, inside: 54.0, outside: 36.0 },
             columns: Columns { count: 2, gutter: 12.0, positions: None },
+            local_margins: false,
             parent: None,
             side,
             overridden: vec![],

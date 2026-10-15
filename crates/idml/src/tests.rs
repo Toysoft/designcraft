@@ -2549,6 +2549,8 @@ mod liquid_page_rules {
             let mut source = baseline.clone();
             let pages = &mut Arc::make_mut(&mut source.spreads[0]).pages;
             pages[0].parent = None;
+            // Without a parent there are no margins to follow, so they aren't local either.
+            pages[0].local_margins = false;
             pages[0].liquid = R::ControlledByParent;
             pages[1].liquid = rule;
             Arc::make_mut(&mut source.parents[0]).pages[1].liquid = R::ReCenter;

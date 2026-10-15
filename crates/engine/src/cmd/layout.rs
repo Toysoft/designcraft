@@ -258,51 +258,37 @@ pub fn specs() -> Vec<CommandSpec> {
             "Margins and Columns…",
             ["Layout"],
             None,
-            "{pages?: [index] (default all), parent?: index (edit that parent spread instead; `pages` then index its pages), margins?: number|{top,bottom,inside,outside}, columns?, gutter?, adjustLayout?: bool (objects follow the margins)}",
+            "{pages?: [index] (default all), margins?: number|{top,bottom,inside,outside}, columns?, gutter?, adjustLayout?: bool (objects follow the margins)} — document pages take these as their own margins; with `parent` (a parent's prefix, label or index) the parent's pages change instead (`pages` then indexes them), and so do the document pages without their own",
             has_doc,
             |s, p| {
                 let pages: Option<Vec<usize>> =
                     p.get("pages").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect());
+                let parent = match p.get("parent") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(parent_spread_index(&s.doc()?.doc, v).ok_or_else(|| bad("layout.marginsAndColumns", "no such parent"))?),
+                };
                 let p = p.clone();
                 let adjust = p.get("adjustLayout").and_then(Value::as_bool).unwrap_or(false);
-                let parent = p.get("parent").and_then(Value::as_u64).map(|v| v as usize);
                 s.edit(|d, _| {
                     let before = adjust.then(|| margin_boxes(d));
                     if let Some(pi) = parent {
-                        // A parent spread: its own pages change, and so do the document pages based
-                        // on it that still have the parent's old margins and columns (not overridden).
-                        let Some(ps) = d.parents.get(pi) else {
-                            return Err(bad("layout.marginsAndColumns", format!("no parent spread {pi}")));
-                        };
-                        let idxs: Vec<usize> = pages.clone().unwrap_or_else(|| (0..ps.pages.len()).collect());
-                        let old: Vec<(usize, Margins, designcraft_doc::Columns)> =
-                            idxs.iter().filter_map(|&qi| ps.pages.get(qi).map(|pg| (qi, pg.margins, pg.columns.clone()))).collect();
-                        if let Some(ps) = d.parents.get_mut(pi) {
-                            let ps = std::sync::Arc::make_mut(ps);
-                            for &qi in &idxs {
-                                if let Some(pg) = ps.pages.get_mut(qi) {
+                        let n = d.parents.get(pi).map_or(0, |sp| sp.pages.len());
+                        let sp = d.parents.get_mut(pi).map(std::sync::Arc::make_mut);
+                        if let Some(sp) = sp {
+                            for qi in pages.clone().unwrap_or_else(|| (0..n).collect()) {
+                                if let Some(pg) = sp.pages.get_mut(qi) {
                                     set_margins_columns(pg, &p);
                                 }
                             }
                         }
-                        for abs in 0..d.page_count() {
-                            let Some((ppi, qi)) = d.parent_page_for(abs) else { continue };
-                            if ppi != pi {
-                                continue;
-                            }
-                            let Some((_, om, oc)) = old.iter().find(|o| o.0 == qi) else { continue };
-                            let Some((si, pj)) = d.page_loc(abs) else { continue };
-                            let Some(pg) = d.spreads.get_mut(si).and_then(|sp| std::sync::Arc::make_mut(sp).pages.get_mut(pj)) else { continue };
-                            if pg.margins == *om && pg.columns == *oc {
-                                set_margins_columns(pg, &p);
-                            }
-                        }
+                        d.sync_parent_margins();
                     } else {
                         let all: Vec<usize> = pages.clone().unwrap_or_else(|| (0..d.page_count()).collect());
                         for abs in all {
                             let Some((si, pi)) = d.page_loc(abs) else { continue };
-                            let Some(pg) = d.spreads.get_mut(si).and_then(|sp| std::sync::Arc::make_mut(sp).pages.get_mut(pi)) else { continue };
+                            let Some(pg) = d.spreads.get_mut(si).map(std::sync::Arc::make_mut).and_then(|sp| sp.pages.get_mut(pi)) else { continue };
                             set_margins_columns(pg, &p);
+                            pg.local_margins = true;
                         }
                     }
                     if let Some(b) = before {
@@ -739,6 +725,15 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
+/// A parent spread named by prefix, label (`A-Parent`) or index.
+fn parent_spread_index(d: &designcraft_doc::Document, v: &Value) -> Option<usize> {
+    match v {
+        Value::Number(n) => n.as_u64().and_then(|i| usize::try_from(i).ok()).filter(|i| *i < d.parents.len()),
+        Value::String(s) => d.parents.iter().position(|p| p.parent.as_ref().is_some_and(|i| i.prefix == *s || i.label() == *s)),
+        _ => None,
+    }
+}
+
 /// `"A"` → that parent's id; `null` → Some(None) (= [None]); missing → None (use default).
 fn parent_ref(d: &designcraft_doc::Document, v: Option<&Value>) -> Option<Option<SpreadId>> {
     match v? {
@@ -1146,7 +1141,7 @@ mod adjust_tests {
         // The parent page itself changed (this is what was drawn on screen).
         assert_eq!(d.parents[0].pages[0].margins, Margins::uniform(60.0));
         assert_eq!(d.parents[0].pages[0].columns.count, 2);
-        // Pages that matched the parent follow; the overridden page keeps its margins.
+        // Pages without their own margins follow; the page given its own keeps them.
         assert_eq!(d.page(0).unwrap().margins, Margins::uniform(60.0));
         assert_eq!(d.page(1).unwrap().margins, Margins::uniform(60.0));
         assert_eq!(d.page(2).unwrap().margins, Margins::uniform(100.0));
@@ -1262,5 +1257,81 @@ mod spread_rotation_input_tests {
         assert_eq!(rotation(&s), 2);
         s.execute("layout.rotateSpreadView", &json!({"angle": 0})).unwrap();
         assert_eq!(rotation(&s), 0, "zero resets the spread view");
+    }
+}
+
+#[cfg(test)]
+mod parent_margin_tests {
+    use designcraft_doc::{Document, Margins};
+    use serde_json::json;
+
+    use crate::Session;
+
+    fn margins(d: &Document) -> Vec<(Margins, u32, bool)> {
+        (0..d.page_count()).filter_map(|i| d.page(i)).map(|p| (p.margins, p.columns.count, p.local_margins)).collect()
+    }
+
+    #[test]
+    fn pages_follow_their_parent_pages_margins_unless_set_locally() {
+        let mut s = Session::new();
+        // Facing: [1] [2 3]; page 3 gets its own margins.
+        s.execute("file.new", &json!({"pages": 3})).unwrap();
+        s.execute("layout.marginsAndColumns", &json!({"pages": [2], "margins": 100})).unwrap();
+        // A's left page: only the left document page follows.
+        let left = json!({"top": 10, "bottom": 20, "inside": 30, "outside": 40});
+        s.execute("layout.marginsAndColumns", &json!({"parent": "A", "pages": [0], "margins": left, "columns": 2})).unwrap();
+        let l = Margins { top: 10.0, bottom: 20.0, inside: 30.0, outside: 40.0 };
+        let m = margins(&s.doc().unwrap().doc);
+        assert_eq!(m, vec![(Margins::uniform(36.0), 1, false), (l, 2, false), (Margins::uniform(100.0), 1, true)]);
+        // A's right page: page 1 follows, page 3 keeps its own.
+        s.execute("layout.marginsAndColumns", &json!({"parent": "A-Parent", "pages": [1], "margins": 50})).unwrap();
+        let m = margins(&s.doc().unwrap().doc);
+        assert_eq!(m, vec![(Margins::uniform(50.0), 1, false), (l, 2, false), (Margins::uniform(100.0), 1, true)]);
+        // A page inserted after page 1 pushes page 2 to the right: it takes the right parent page's.
+        s.execute("layout.pages.insert", &json!({"after": 0, "count": 1, "parent": "A"})).unwrap();
+        let m = margins(&s.doc().unwrap().doc);
+        assert_eq!(m[1], (l, 2, false), "the new left page");
+        assert_eq!(m[2], (Margins::uniform(50.0), 1, false), "old page 2, now a right page");
+        assert_eq!(m[3], (Margins::uniform(100.0), 1, true));
+        assert!(s.execute("layout.marginsAndColumns", &json!({"parent": "Z", "margins": 10})).is_err());
+    }
+
+    #[test]
+    fn applying_a_parent_gives_its_margins_and_local_margins_stay_local() {
+        let mut s = Session::new();
+        // Facing: [1] [2 3].
+        s.execute("file.new", &json!({"pages": 3})).unwrap();
+        s.execute("layout.parents.new", &json!({"prefix": "B"})).unwrap();
+        s.execute("layout.marginsAndColumns", &json!({"parent": "B", "margins": 70, "columns": 3})).unwrap();
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "B"})).unwrap();
+        let m = margins(&s.doc().unwrap().doc);
+        assert_eq!(m[1], (Margins::uniform(70.0), 3, false), "the page takes B's margins");
+        // Page 3 is given margins equal to A's: they are its own all the same.
+        s.execute("layout.marginsAndColumns", &json!({"pages": [2], "margins": 36})).unwrap();
+        s.execute("layout.marginsAndColumns", &json!({"parent": "A", "margins": 20})).unwrap();
+        let m = margins(&s.doc().unwrap().doc);
+        assert_eq!(m[0], (Margins::uniform(20.0), 1, false));
+        assert_eq!(m[1], (Margins::uniform(70.0), 3, false), "B's page is not A's");
+        assert_eq!(m[2], (Margins::uniform(36.0), 1, true));
+        // Back to A: page 2 follows A again.
+        s.execute("layout.pages.applyParent", &json!({"pages": [1], "parent": "A"})).unwrap();
+        assert_eq!(margins(&s.doc().unwrap().doc)[1], (Margins::uniform(20.0), 1, false));
+    }
+
+    #[test]
+    fn parent_guides_show_on_pages_but_stay_on_the_parent() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"pages": 2})).unwrap();
+        // A vertical guide 100 pt into A's right page (x = 612 in the parent spread).
+        s.execute("guide.add", &json!({"spread": {"kind": "parent", "index": 0}, "page": 1, "orientation": "vertical", "position": 712})).unwrap();
+        let d = &s.doc().unwrap().doc;
+        let right = d.page(0).unwrap();
+        let shown: Vec<f64> = d.parent_guides(right).map(|g| g.position).collect();
+        assert_eq!(shown, vec![100.0], "moved to the document page's place");
+        assert_eq!(d.parent_guides(d.page(1).unwrap()).count(), 0, "the left page shows A's left page's guides");
+        // Not the document page's own: not listed, moved or deleted from there.
+        assert_eq!(s.execute("guide.list", &json!({"spread": 0})).unwrap(), json!([]));
+        assert!(s.execute("guide.move", &json!({"spread": 0, "page": 0, "index": 0, "position": 50})).is_err());
+        assert!(s.execute("guide.delete", &json!({"spread": 0, "page": 0, "index": 0})).is_err());
     }
 }

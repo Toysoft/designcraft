@@ -394,3 +394,22 @@ fn table_of_contents_definition_round_trips_through_idml_and_updates() {
     s.execute("toc.update", &json!({})).unwrap();
     assert_eq!(toc_text(&s), text);
 }
+
+#[test]
+fn parent_and_page_margins_round_trip_through_idml() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"pages": 3})).unwrap();
+    s.execute("layout.marginsAndColumns", &json!({"parent": "A", "margins": 48, "columns": 2})).unwrap();
+    s.execute("layout.marginsAndColumns", &json!({"pages": [2], "margins": 100})).unwrap();
+    let back = designcraft_idml::import_idml(&designcraft_idml::export_idml(&s.doc().unwrap().doc)).unwrap();
+    let pages: Vec<(f64, u32, bool)> =
+        (0..back.page_count()).filter_map(|i| back.page(i)).map(|p| (p.margins.top, p.columns.count, p.local_margins)).collect();
+    assert_eq!(pages, vec![(48.0, 2, false), (48.0, 2, false), (100.0, 2, true)]);
+    assert!(back.parents[0].pages.iter().all(|p| p.margins.top == 48.0 && p.columns.count == 2));
+    // The imported pages still follow their parent.
+    let mut d = back;
+    std::sync::Arc::make_mut(&mut d.parents[0]).pages[1].margins.top = 60.0;
+    d.sync_parent_margins();
+    assert_eq!(d.page(0).unwrap().margins.top, 60.0);
+    assert_eq!(d.page(2).unwrap().margins.top, 100.0);
+}

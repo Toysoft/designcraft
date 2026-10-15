@@ -2156,10 +2156,6 @@ impl<'r> Importer<'r> {
             {
                 self.page_index.insert(s.to_string(), first_abs + i);
             }
-            let (margins, columns) = match p.find("MarginPreference") {
-                Some(m) => margins_of(m),
-                None => self.default_margins.clone().unwrap_or((Margins::uniform(36.0), Columns::default())),
-            };
             let side = if !facing {
                 PageSide::Single
             } else if r.x1 <= 1e-6 {
@@ -2168,6 +2164,22 @@ impl<'r> Importer<'r> {
                 PageSide::Right
             };
             let parent = p.get("AppliedMaster").and_then(|m| self.parent_ids.get(m)).copied();
+            // A document page's margins are local when they differ from its parent page's; a
+            // page without its own takes the parent page's.
+            let from_parent = if master {
+                None
+            } else {
+                parent
+                    .and_then(|id| self.parents.iter().find(|sp| sp.id == id))
+                    .and_then(|sp| sp.pages.get(sp.parent_page_index(side)?))
+                    .map(|q| (q.margins, q.columns.clone()))
+            };
+            let (margins, columns) = match (p.find("MarginPreference"), &from_parent) {
+                (Some(m), _) => margins_of(m),
+                (None, Some(own)) => own.clone(),
+                (None, None) => self.default_margins.clone().unwrap_or((Margins::uniform(36.0), Columns::default())),
+            };
+            let local_margins = from_parent.is_some_and(|(m, c)| m != margins || c != columns);
             out_pages.push(Page {
                 id: pid,
                 width: r.width(),
@@ -2175,6 +2187,7 @@ impl<'r> Importer<'r> {
                 x: r.x0 - min_x,
                 margins,
                 columns,
+                local_margins,
                 parent,
                 side,
                 overridden: vec![],
