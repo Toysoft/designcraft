@@ -665,6 +665,12 @@ impl DesignApp {
         self.ui.status = s.into();
     }
 
+    /// "<feature>: <error>" in the status bar: the feature name is translated, the engine's own
+    /// error text stays as the engine wrote it.
+    pub fn status_error(&mut self, feature: &str, error: impl std::fmt::Display) {
+        self.ui.status = format!("{}: {error}", crate::i18n::tr(&self.ui.language, feature));
+    }
+
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
         if let Some(r) = menus::run_ui(self, id, &params) {
@@ -828,7 +834,7 @@ impl DesignApp {
     pub(crate) fn activate_import_target(&mut self, request: &ImportRequest) -> Result<(), String> {
         let Some(index) = request.target.and_then(|uid| self.session.documents().iter().position(|d| d.uid == uid)) else {
             let message = "Import cancelled: the originating document has closed";
-            self.status(message);
+            self.status(crate::i18n::tr(&self.ui.language, message));
             return Err(message.into());
         };
         self.run("file.activate", json!({"index": index}))?;
@@ -859,7 +865,7 @@ impl DesignApp {
                     if owns_dialog {
                         self.ui.dialog = None;
                     }
-                    self.status("PDF import cancelled: the originating document has closed");
+                    self.status(crate::i18n::tr(&self.ui.language, "PDF import cancelled: the originating document has closed"));
                 }
             }
         }
@@ -867,7 +873,10 @@ impl DesignApp {
         let files = std::mem::take(&mut *inbox.lock().unwrap_or_else(|e| e.into_inner()));
         for file in files {
             if self.ui.dialog.is_some() {
-                self.status(format!("{}: import cancelled while a dialog is open; choose the file again", file.name));
+                self.status(
+                    crate::i18n::tr(&self.ui.language, "{name}: import cancelled while a dialog is open; choose the file again")
+                        .replace("{name}", &file.name),
+                );
                 continue;
             }
             let name = file.name.clone();
@@ -958,7 +967,7 @@ impl DesignApp {
             if self.session.documents().iter().any(|d| d.is_dirty())
                 && let Err(e) = self.session.execute("file.recovery.save", &json!({}))
             {
-                self.status(format!("Couldn't write recovery data: {e}"));
+                self.status(crate::i18n::tr(&self.ui.language, "Couldn't write recovery data: {error}").replace("{error}", &e.to_string()));
             }
         }
         let dt = now - self.last_time;
@@ -2096,6 +2105,16 @@ mod tests {
         for name in ["a.png", "b.pdf", "idml.txt", "c.idml.zip"] {
             assert!(!opens_as_document(name), "{name}");
         }
+    }
+
+    #[test]
+    fn status_messages_follow_the_interface_language_but_engine_errors_stay_english() {
+        let mut app = DesignApp::new(Session::new(), Services::default());
+        app.status_error("Table", "No table selected");
+        assert_eq!(app.ui.status, "Table: No table selected");
+        app.ui.language = "cs".into();
+        app.status_error("Table", "No table selected");
+        assert_eq!(app.ui.status, "Tabulka: No table selected");
     }
 
     #[test]

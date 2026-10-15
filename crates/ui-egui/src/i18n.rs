@@ -4,6 +4,7 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 mod ar;
+mod cs;
 mod de;
 mod it;
 mod ja;
@@ -24,6 +25,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("it", "Italiano"),
     ("uk", "Українська"),
     ("ka", "ქართული"),
+    ("cs", "Čeština"),
 ];
 
 /// English → [German, French, Spanish, Japanese, Simplified Chinese].
@@ -3140,6 +3142,7 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     static PORTUGUESE_BR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static ITALIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static GEORGIAN: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    static CZECH: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     if lang == "ar" {
         return ARABIC.get_or_init(|| ar::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
@@ -3167,6 +3170,9 @@ pub fn tr<'a>(lang: &str, s: &'a str) -> &'a str {
     if lang == "uk" {
         return UKRAINIAN.get_or_init(|| uk::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
     }
+    if lang == "cs" {
+        return CZECH.get_or_init(|| cs::TABLE.iter().copied().collect()).get(s).copied().unwrap_or(s);
+    }
     let Some(c) = column(lang) else { return s };
     TRANSLATIONS.get_or_init(|| TABLE.iter().copied().collect()).get(s).and_then(|row| row.get(c)).copied().unwrap_or(s)
 }
@@ -3176,6 +3182,9 @@ pub fn tr_context<'a>(lang: &str, s: &'a str, context: &str) -> &'a str {
     if lang == "uk" {
         return uk::CONTEXT.iter().find(|(key, scope, _)| *key == s && *scope == context).map_or_else(|| tr(lang, s), |(_, _, text)| text);
     }
+    if lang == "cs" {
+        return cs::CONTEXT.iter().find(|(key, scope, _)| *key == s && *scope == context).map_or_else(|| tr(lang, s), |(_, _, text)| text);
+    }
     tr(lang, s)
 }
 
@@ -3184,11 +3193,24 @@ pub(crate) fn ukrainian_catalog() -> Vec<&'static str> {
     uk::TABLE.iter().map(|(_, text)| *text).chain(uk::CONTEXT.iter().map(|(_, _, text)| *text)).collect()
 }
 
-/// Count captions in Ukrainian and Georgian put the category before the value so every count
-/// uses one grammatical form (Georgian nouns stay singular after numerals: `გვერდი: 5`); other
-/// languages keep the existing value-first caption.
+/// Count captions in Ukrainian and Georgian put the category before the value so every
+/// count uses one grammatical form. Czech picks the plural form for the count (1, 2–4,
+/// other); other languages keep the existing value-first caption.
 pub fn count_label(lang: &str, noun: &str, count: usize) -> String {
-    if matches!(lang, "uk" | "ka") { format!("{}: {count}", tr(lang, noun)) } else { format!("{count} {}", tr(lang, noun)) }
+    if matches!(lang, "uk" | "ka") {
+        return format!("{}: {count}", tr(lang, noun));
+    }
+    if lang == "cs"
+        && let Some((_, [one, few, other])) = cs::PLURALS.iter().find(|(key, _)| *key == noun)
+    {
+        let form = match count {
+            1 => one,
+            2..=4 => few,
+            _ => other,
+        };
+        return format!("{count} {form}");
+    }
+    format!("{count} {}", tr(lang, noun))
 }
 
 /// Localize reserved built-in style names only; user-defined names are document data.
@@ -3247,8 +3269,11 @@ mod tests {
         for (key, expected) in ka::TABLE {
             assert_eq!(tr("ka", key), *expected, "ka: {key}");
         }
+        for (key, expected) in cs::TABLE {
+            assert_eq!(tr("cs", key), *expected, "cs: {key}");
+        }
         let unknown = String::from("A user-defined untranslated label");
-        for lang in ["uk", "ar", "pt-br", "it", "ka", "zh", "ja", "de", "fr", "es", "", "unknown"] {
+        for lang in ["cs", "uk", "ar", "pt-br", "it", "ka", "zh", "ja", "de", "fr", "es", "", "unknown"] {
             assert!(std::ptr::eq(tr(lang, &unknown), unknown.as_str()));
         }
     }
@@ -3366,6 +3391,173 @@ mod tests {
             assert_eq!(pages, format!("Сторінок: {n}; розворотів: {n}"));
         }
         assert_eq!(count_label("", "objects", 2), "2 objects");
+    }
+
+    #[test]
+    fn czech_catalog_has_no_stale_keys_and_keeps_placeholders_and_markers() {
+        let catalog: HashMap<_, _> = cs::TABLE.iter().copied().collect();
+        assert_eq!(catalog.len(), cs::TABLE.len(), "duplicate Czech keys");
+        let mut keys = std::collections::HashSet::new();
+        keys.extend(TABLE.iter().map(|(key, _)| *key));
+        for table in [ar::TABLE, it::TABLE, ja::TABLE, ka::TABLE, pt_br::TABLE, uk::TABLE] {
+            keys.extend(table.iter().map(|(key, _)| *key));
+        }
+        let missing: Vec<_> = keys.iter().filter(|key| !catalog.contains_key(**key)).collect();
+        assert!(missing.is_empty(), "Czech catalog is missing keys from the other catalogs: {missing:?}");
+        // Command labels and menu names reach `tr` from the engine and the UI command table.
+        for spec in designcraft_engine::command_specs() {
+            keys.insert(spec.label);
+            keys.extend(spec.menu.iter().copied());
+        }
+        keys.extend(crate::menus::UI_COMMANDS.iter().map(|(_, label, _, _)| *label));
+        // Tool names reach `tr` from the Tools panel.
+        keys.extend(designcraft_tools::TOOL_GROUPS.iter().flat_map(|group| group.iter()).map(|tool| tool.label));
+        // So do the About window's tab names, app descriptions and the credits' column and sort labels.
+        keys.extend(crate::about::ABOUT_TABS);
+        keys.extend(crate::about::SIBLINGS.iter().map(|(_, _, what)| *what));
+        keys.extend(crate::credits::NameMode::ALL.iter().map(|mode| mode.label()));
+        keys.extend(crate::credits::SortKey::ALL.iter().flat_map(|key| [key.label().0, key.label().1]));
+        // UI labels passed to `tr` that no other catalog has yet.
+        keys.extend([
+            "(any)",
+            "(unchanged)",
+            "[No Language]",
+            "Cell Number:",
+            "Change fill to:",
+            "Chinese: Simplified",
+            "Chinese: Traditional",
+            "Don't Save",
+            "Email Address:",
+            "Email:",
+            "Find fill:",
+            "Group with",
+            "H:",
+            "Message:",
+            "Organization:",
+            "Phone:",
+            "W:",
+            "Resize panel window",
+            "Resize panels",
+            "Subject:",
+            "Text:",
+            "Unsaved Changes",
+            "“{}” has changes that are not saved. Save them before closing?",
+            "% of all commits",
+            "{count} conflict(s): {names}",
+            "{count} match(es)",
+            "{count} replacement(s) made",
+            "{contributors} contributors · {commits} commits",
+            "{label}: {name} (double-click: Color Picker)",
+            "All",
+            "Align To",
+            "Auto Rename",
+            "Character Style",
+            "Company",
+            "DesignCraft page",
+            "Equal fixed heights for the selected rows; cell text may become overset.",
+            "Found",
+            "Grab bag",
+            "Key Object",
+            "layer",
+            "layers",
+            "Lines +/−",
+            "New Cell Style",
+            "New Table Style",
+            "No contributor data was built into this copy.",
+            "No matches",
+            "No model credits were built into this copy.",
+            "Object Style",
+            "Paragraph Style",
+            "Press keys…",
+            "Range:",
+            "Redefine Document Style",
+            "Report an issue",
+            "Reverse the order",
+            "Story {story} ← story {parent}",
+            "Story Editor — {count} words",
+            "Text Anchor",
+            "Use Document Style Definition",
+            // Status-bar messages.
+            "Couldn't write recovery data: {error}",
+            "Export a PDF, IDML or package to share — no cloud account needed.",
+            "Import cancelled: the originating document has closed",
+            "Invalid panel layout; restored the default dock",
+            "PDF import cancelled: the originating document has closed",
+            "Packaged {count} files into {dir}",
+            "Relinked {count}",
+            "Sent {count} page(s) to {printer}",
+            "the default printer",
+            "{name}: import cancelled while a dialog is open; choose the file again",
+            "{name}: {count} step(s) done",
+        ]);
+        // Czech-only entries must still be used by a command or UI label after upstream changes.
+        let stale: Vec<_> = catalog.keys().filter(|k| !keys.contains(*k)).collect();
+        assert!(stale.is_empty(), "Czech entries for unknown keys: {stale:?}");
+        let placeholders =
+            |s: &str| s.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name.to_owned())).collect::<Vec<_>>();
+        for (key, translation) in cs::TABLE {
+            assert!(!translation.trim().is_empty(), "empty {key}");
+            let mut source = placeholders(key);
+            let mut translated = placeholders(translation);
+            source.sort();
+            translated.sort();
+            assert_eq!(source, translated, "placeholders: {key}");
+            // Dialog ellipses, label colons and padded button captions stay as in English.
+            assert_eq!(key.ends_with('…'), translation.ends_with('…'), "ellipsis: {key}");
+            assert_eq!(key.ends_with(':'), translation.ends_with(':'), "colon: {key}");
+            assert_eq!(key.starts_with(' '), translation.starts_with(' '), "leading space: {key}");
+            assert_eq!(key.ends_with(' '), translation.ends_with(' '), "trailing space: {key}");
+        }
+        assert!(!is_rtl("cs"));
+        assert_eq!(tr("cs", "File"), "Soubor");
+        assert_eq!(tr("cs", "New Document…"), "Nový dokument…");
+        assert_eq!(tr("cs", "Spread"), "Dvoustrana");
+        assert_eq!(tr("cs", "Bleed"), "Spadávka");
+        assert_eq!(tr("cs", "Leading"), "Proklad");
+        assert_eq!(tr("cs", "Edit/Interface Language"), "Úpravy/Jazyk rozhraní");
+        assert_eq!(tr("cs", "Unknown label"), "Unknown label");
+        assert_eq!(tr_context("cs", "Group", "selection"), "Skupina");
+        assert_eq!(tr_context("cs", "Name", "contributors"), "Jméno");
+        assert_eq!(tr_context("cs", "Name", "unknown"), "Název");
+        assert_eq!(tr("cs", "Group"), "Seskupit");
+        assert_eq!(tr_context("cs", "Columns", "table"), tr("cs", "Columns"));
+        assert_eq!(style_name("cs", "[Basic Paragraph]"), "[Základní odstavec]");
+        assert_eq!(style_name("cs", "My layout style"), "My layout style");
+        assert_eq!(workspace_name("cs", "Essentials"), "Základní");
+        assert_eq!(workspace_name("cs", "My workspace"), "My workspace");
+    }
+
+    #[test]
+    fn czech_counts_use_the_plural_form_for_the_number() {
+        for (n, form) in [(0, "chyb"), (1, "chyba"), (2, "chyby"), (4, "chyby"), (5, "chyb"), (11, "chyb"), (22, "chyb")] {
+            assert_eq!(count_label("cs", "errors", n), format!("{n} {form}"));
+        }
+        // The status bar passes the singular noun for one error.
+        assert_eq!(count_label("cs", "error", 1), "1 chyba");
+        assert_eq!(count_label("cs", "pages", 1), "1 stránka");
+        assert_eq!(count_label("cs", "pages", 3), "3 stránky");
+        assert_eq!(count_label("cs", "pages", 5), "5 stránek");
+        assert_eq!(count_label("cs", "stories", 2), "2 články");
+        assert_eq!(count_label("cs", "items", 1), "1 položka");
+        assert_eq!(count_label("cs", "objects", 7), "7 objektů");
+        assert_eq!(count_label("cs", "warnings", 3), "3 varování");
+        assert_eq!(count_label("cs", "layer", 1), "1 vrstva");
+        assert_eq!(count_label("cs", "layers", 3), "3 vrstvy");
+        assert_eq!(count_label("cs", "layers", 8), "8 vrstev");
+        // A noun without plural forms keeps the plain translation.
+        assert_eq!(count_label("cs", "a new noun", 3), "3 a new noun");
+        for (noun, forms) in cs::PLURALS {
+            assert!(forms.iter().all(|form| !form.is_empty()), "{noun}");
+            assert!(forms.contains(&tr("cs", noun)), "{noun}: the catalog row is one of the plural forms");
+        }
+    }
+
+    #[test]
+    fn czech_translates_every_tool_name() {
+        for tool in designcraft_tools::TOOL_GROUPS.iter().flat_map(|group| group.iter()) {
+            assert_ne!(tr("cs", tool.label), tool.label, "{}", tool.id);
+            assert_eq!(tr("", tool.label), tool.label);
+        }
     }
 
     #[test]

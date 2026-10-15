@@ -23,7 +23,8 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
     let overset = cs.overset_at;
     let mut open = true;
     let mut edit: Option<(usize, usize, String)> = None;
-    egui::Window::new(format!("Story Editor — {} words", story.text.split_whitespace().count()))
+    let words = story.text.split_whitespace().count().to_string();
+    egui::Window::new(crate::i18n::tr(&app.ui.language, "Story Editor — {count} words").replace("{count}", &words))
         .id(egui::Id::new("story_editor"))
         .open(&mut open)
         .default_size(vec2(560.0, 520.0))

@@ -321,7 +321,11 @@ pub fn color_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             if k == stroke {
                 ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
             }
-            let resp = resp.on_hover_text(format!("{label}: {n} (double-click: Color Picker)"));
+            let resp = resp.on_hover_text(
+                crate::i18n::tr(&app.ui.language, "{label}: {name} (double-click: Color Picker)")
+                    .replace("{label}", crate::i18n::tr(&app.ui.language, label))
+                    .replace("{name}", n),
+            );
             if resp.clicked() {
                 stroke = k;
             }

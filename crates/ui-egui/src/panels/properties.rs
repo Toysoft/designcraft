@@ -655,7 +655,11 @@ fn appearance_section(app: &mut DesignApp, ui: &mut Ui, i: &SelInfo) {
     let chip = sub(b, 4.0, 2.0, 17.0, 17.0);
     widgets::paint_chip(ui.painter(), chip, fc, fg);
     ui.painter().rect_stroke(chip, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
-    let resp = ui.interact(chip, ui.id().with("fillchip"), Sense::click()).on_hover_text(format!("Fill: {}", i.fill));
+    let resp = ui.interact(chip, ui.id().with("fillchip"), Sense::click()).on_hover_text(format!(
+        "{}: {}",
+        crate::i18n::tr(&app.ui.language, "Fill"),
+        i.fill
+    ));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Fill swatch"));
     swatch_menu(app, &resp, &doc, &i.fill, |app, n| {
         let _ = app.run("object.fill", json!({"swatch": n}));
@@ -675,7 +679,11 @@ fn appearance_section(app: &mut DesignApp, ui: &mut Ui, i: &SelInfo) {
     let chip = sub(b, 4.0, 2.0, 17.0, 17.0);
     widgets::paint_stroke_chip(ui.painter(), chip, sc, egui::Color32::from_gray(20));
     ui.painter().rect_stroke(chip, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
-    let resp = ui.interact(chip, ui.id().with("strokechip"), Sense::click()).on_hover_text(format!("Stroke: {}", i.stroke));
+    let resp = ui.interact(chip, ui.id().with("strokechip"), Sense::click()).on_hover_text(format!(
+        "{}: {}",
+        crate::i18n::tr(&app.ui.language, "Stroke"),
+        i.stroke
+    ));
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Stroke swatch"));
     swatch_menu(app, &resp, &doc, &i.stroke, |app, n| {
         let _ = app.run("object.stroke", json!({"swatch": n}));
@@ -764,7 +772,16 @@ fn align_row(app: &mut DesignApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let to = app.ui.align_to.clone();
-        let resp = icon_toggle(ui, "align-to", false, &format!("Align To: {to}"));
+        let to_label = match to.as_str() {
+            "selection" => "Selection",
+            "keyObject" => "Key Object",
+            "margins" => "Margins",
+            "page" => "Page",
+            "spread" => "Spread",
+            other => other,
+        };
+        let tip = format!("{}: {}", crate::i18n::tr(&app.ui.language, "Align To"), crate::i18n::tr(&app.ui.language, to_label));
+        let resp = icon_toggle(ui, "align-to", false, &tip);
         egui::Popup::menu(&resp).show(|ui| {
             for (label, id) in [
                 ("Align to Selection", "selection"),
@@ -854,7 +871,7 @@ fn convert_shape_menu(app: &mut DesignApp, resp: &egui::Response) {
         ] {
             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, label))).clicked() {
                 if let Err(e) = app.run("object.convertShape", json!({"to": to})) {
-                    app.status(format!("Convert Shape: {e}"));
+                    app.status_error("Convert Shape", e);
                 }
                 ui.close();
             }
@@ -2040,7 +2057,12 @@ pub fn links_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         for l in &stories {
             let out = l["outOfDate"].as_bool().unwrap_or(false);
             ui.horizontal(|ui| {
-                crate::rtl::label(ui, format!("Story {} ← story {}", l["story"], l["parent"]));
+                crate::rtl::label(
+                    ui,
+                    crate::i18n::tr(&app.ui.language, "Story {story} ← story {parent}")
+                        .replace("{story}", &l["story"].to_string())
+                        .replace("{parent}", &l["parent"].to_string()),
+                );
                 if out {
                     crate::rtl::label(
                         ui,
@@ -2199,7 +2221,7 @@ pub fn links_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
         {
             let r = app.run("links.relinkFolder", json!({"dir": dir.to_string_lossy()}));
             if let Ok(v) = r {
-                app.status(format!("Relinked {}", v["relinked"]));
+                app.status(crate::i18n::tr(&app.ui.language, "Relinked {count}").replace("{count}", &v["relinked"].to_string()));
             }
         }
     });

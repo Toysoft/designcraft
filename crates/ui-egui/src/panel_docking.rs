@@ -300,7 +300,7 @@ pub(crate) fn show(app: &mut DesignApp, ui: &mut egui::Ui) -> bool {
     let Some(layout) = app.ui.docking.as_ref() else { return false };
     if !valid(layout) {
         app.ui.docking = None;
-        app.status("Invalid panel layout; restored the default dock");
+        app.status(crate::i18n::tr(&app.ui.language, "Invalid panel layout; restored the default dock"));
         return false;
     }
     let mut layout = layout.clone();

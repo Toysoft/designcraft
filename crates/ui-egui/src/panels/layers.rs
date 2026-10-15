@@ -272,10 +272,10 @@ pub fn show(app: &mut DesignApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!(
-                "Page: {}, {} Layer{}",
+                "{}: {}, {}",
+                crate::i18n::tr(&app.ui.language, "Page"),
                 app.session.page_label(cur),
-                doc.layers.len(),
-                if doc.layers.len() == 1 { "" } else { "s" }
+                crate::i18n::count_label(&app.ui.language, if doc.layers.len() == 1 { "layer" } else { "layers" }, doc.layers.len())
             ))
             .size(11.0)
             .color(t.text_dim),

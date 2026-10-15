@@ -132,7 +132,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
                 st.recent.insert(0, c);
                 st.recent.truncate(12);
             }
-            Err(e) => app.status(format!("Glyphs: {e}")),
+            Err(e) => app.status_error("Glyphs", e),
         }
     }
     crate::rtl::label(

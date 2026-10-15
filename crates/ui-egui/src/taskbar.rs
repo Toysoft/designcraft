@@ -164,7 +164,7 @@ fn text_controls(app: &mut DesignApp, ui: &mut Ui, in_text: bool) {
     if let Some(doc) = app.session.active().map(|d| d.doc.clone()) {
         let sw = c["fill"].as_str().unwrap_or("[Black]").to_string();
         let (col, g) = widgets::swatch_colors(&doc, &sw, 1.0);
-        let resp = widgets::swatch_chip(ui, 17.0, col, g).on_hover_text(format!("Fill: {sw}"));
+        let resp = widgets::swatch_chip(ui, 17.0, col, g).on_hover_text(format!("{}: {sw}", crate::i18n::tr(&app.ui.language, "Fill")));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Task Bar fill"));
         let mut picked = None;
         egui::Popup::menu(&resp).show(|ui| {

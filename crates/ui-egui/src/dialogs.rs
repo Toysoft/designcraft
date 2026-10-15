@@ -155,7 +155,7 @@ fn user_dictionary(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
                     Ok(_) => {
                         d.fields.insert("word".into(), json!(""));
                     }
-                    Err(e) => app.status(format!("User Dictionary: {e}")),
+                    Err(e) => app.status_error("User Dictionary", e),
                 }
             }
         }
@@ -231,7 +231,7 @@ fn keyboard_shortcuts(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
                 crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, label.trim_end_matches('…')))
                     .on_hover_text(format!("{id}{}", if menu.is_empty() { String::new() } else { format!("  ({menu})") }));
                 let cur = crate::menus::shortcut_of(app, id).map(|s| crate::menus::shortcut_text(&s)).unwrap_or_else(|| "—".into());
-                let text = if recording == *id { "Press keys…".to_string() } else { cur };
+                let text = if recording == *id { crate::i18n::tr(&app.ui.language, "Press keys…").to_string() } else { cur };
                 if ui.add(egui::Button::new(text).min_size(egui::vec2(110.0, 0.0))).clicked() {
                     d.fields.insert("recording".into(), json!(id));
                     d.fields.insert("message".into(), json!(""));
@@ -310,11 +310,11 @@ fn print_dialog(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Pages:"));
         ui.vertical(|ui| {
             let range = d.s("range");
-            if ui.radio(range == "all", "All").clicked() {
+            if ui.radio(range == "all", crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "All"))).clicked() {
                 d.fields.insert("range".into(), json!("all"));
             }
             ui.horizontal(|ui| {
-                if ui.radio(range == "range", "Range:").clicked() {
+                if ui.radio(range == "range", crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Range:"))).clicked() {
                     d.fields.insert("range".into(), json!("range"));
                 }
                 text_field(ui, d, "pages", 120.0);
@@ -1388,12 +1388,12 @@ fn preferences(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog, max_he
                         ui.end_row();
                     });
                     ui.add_space(6.0);
-                    check(ui, d, "snap.alignEdges", "Align to Object Edges");
-                    check(ui, d, "snap.alignCenters", "Align to Object Centers");
-                    check(ui, d, "snap.dimensions", "Smart Dimensions");
-                    check(ui, d, "snap.spacing", "Smart Spacing");
+                    check(ui, d, "snap.alignEdges", crate::i18n::tr(&app.ui.language, "Align to Object Edges"));
+                    check(ui, d, "snap.alignCenters", crate::i18n::tr(&app.ui.language, "Align to Object Centers"));
+                    check(ui, d, "snap.dimensions", crate::i18n::tr(&app.ui.language, "Smart Dimensions"));
+                    check(ui, d, "snap.spacing", crate::i18n::tr(&app.ui.language, "Smart Spacing"));
                     ui.horizontal(|ui| {
-                        ui.label("Snap to Zone");
+                        crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Snap to Zone"));
                         let mut zone = d.n("snap.zone").filter(|z| z.is_finite()).unwrap_or(4.0);
                         if ui.add(egui::DragValue::new(&mut zone).speed(0.1)).changed() {
                             d.fields.insert("snap.zone".into(), json!(zone));
@@ -1699,7 +1699,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                                 crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, label));
                                 let cur = d.s(key);
                                 egui::ComboBox::from_id_salt(key)
-                                    .selected_text(if cur.is_empty() { any } else { cur.as_str() })
+                                    .selected_text(if cur.is_empty() { crate::i18n::tr(&app.ui.language, any) } else { cur.as_str() })
                                     .width(180.0)
                                     .show_ui(ui, |ui| {
                                         if ui
@@ -1718,9 +1718,9 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                             }
                             crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Kind:"));
                             let cur = d.s("objKind");
-                            egui::ComboBox::from_id_salt("objKind").selected_text(if cur.is_empty() { "(any)" } else { cur.as_str() }).show_ui(
-                                ui,
-                                |ui| {
+                            egui::ComboBox::from_id_salt("objKind")
+                                .selected_text(if cur.is_empty() { crate::i18n::tr(&app.ui.language, "(any)") } else { cur.as_str() })
+                                .show_ui(ui, |ui| {
                                     for v in ["", "text", "graphic", "shape", "line", "group"] {
                                         if ui
                                             .selectable_label(
@@ -1732,8 +1732,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                                             d.fields.insert("objKind".into(), json!(v));
                                         }
                                     }
-                                },
-                            );
+                                });
                             ui.end_row();
                         });
                         let mut crit = json!({});
@@ -1791,22 +1790,25 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Find Next"))).clicked() {
                                 let r = app.run("find.next", params());
                                 let msg = match r {
-                                    Ok(Value::Null) => "No matches".to_string(),
-                                    Ok(_) => "Found".to_string(),
+                                    Ok(Value::Null) => crate::i18n::tr(&app.ui.language, "No matches").to_string(),
+                                    Ok(_) => crate::i18n::tr(&app.ui.language, "Found").to_string(),
                                     Err(e) => e,
                                 };
                                 d.fields.insert("status".into(), json!(msg));
                             }
                             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Change All"))).clicked() {
                                 let msg = match app.run("find.change", params()) {
-                                    Ok(v) => format!("{} replacement(s) made", v["count"]),
+                                    Ok(v) => {
+                                        crate::i18n::tr(&app.ui.language, "{count} replacement(s) made").replace("{count}", &v["count"].to_string())
+                                    }
                                     Err(e) => e,
                                 };
                                 d.fields.insert("status".into(), json!(msg));
                             }
                             if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Count"))).clicked() {
                                 let msg = match app.run("find.find", params()) {
-                                    Ok(v) => format!("{} match(es)", v.as_array().map(|a| a.len()).unwrap_or(0)),
+                                    Ok(v) => crate::i18n::tr(&app.ui.language, "{count} match(es)")
+                                        .replace("{count}", &v.as_array().map_or(0, |a| a.len()).to_string()),
                                     Err(e) => e,
                                 };
                                 d.fields.insert("status".into(), json!(msg));
@@ -1916,7 +1918,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                                 let f = app.session.execute("color.settings", &json!({})).unwrap_or_default();
                                 d.fields.insert("profiles".into(), f["profiles"].clone());
                             }
-                            Err(e) => app.status(format!("Color Settings: {e}")),
+                            Err(e) => app.status_error("Color Settings", e),
                         }
                     }
                 }
@@ -1961,7 +1963,9 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                         ui.label(if conflicts.is_empty() {
                             crate::i18n::tr(&app.ui.language, "No conflicts").to_string()
                         } else {
-                            format!("{} conflict(s): {}", conflicts.len(), conflicts.join(", "))
+                            crate::i18n::tr(&app.ui.language, "{count} conflict(s): {names}")
+                                .replace("{count}", &conflicts.len().to_string())
+                                .replace("{names}", &conflicts.join(", "))
                         });
                         let cur = d.s("styleConflicts");
                         ui.horizontal(|ui| {
@@ -1970,7 +1974,7 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
                                 ("redefine", "Redefine Document Style"),
                                 ("autoRename", "Auto Rename"),
                             ] {
-                                if ui.radio(cur == v, l).clicked() {
+                                if ui.radio(cur == v, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, l))).clicked() {
                                     d.fields.insert("styleConflicts".into(), json!(v));
                                 }
                             }
@@ -2489,7 +2493,8 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 json!({"printer": if printer.is_empty() { Value::Null } else { json!(printer) }, "copies": d.n("copies").unwrap_or(1.0).max(1.0) as u64,
                     "pages": pages, "spreads": d.b("spreads"), "marks": d.b("marks"), "bleed": d.b("bleed")}),
             )?;
-            app.status(format!("Sent {} page(s) to {}", r["pages"], r["printer"].as_str().unwrap_or("the default printer")));
+            let printer = r["printer"].as_str().unwrap_or_else(|| crate::i18n::tr(&app.ui.language, "the default printer"));
+            app.status(crate::i18n::tr(&app.ui.language, "Sent {count} page(s) to {printer}").replace("{count}", &r["pages"].to_string()).replace("{printer}", printer));
             Ok(r)
         }
         "pdfExport" => {
@@ -4631,7 +4636,7 @@ fn insert_xref(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
     let all = "[All Paragraphs]";
     ui.horizontal(|ui| {
         crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, "Link To:"));
-        combo(ui, d, "linkTo", &[("paragraph", "Paragraph"), ("anchor", "Text Anchor")]);
+        translated_combo(&app.ui.language, ui, d, "linkTo", &[("paragraph", "Paragraph"), ("anchor", "Text Anchor")]);
     });
     ui.add_space(6.0);
     let dim = crate::theme::Tokens::get(ui.ctx()).text_dim;

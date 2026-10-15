@@ -40,7 +40,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "app.language",
         "Interface Language",
         None,
-        "{lang: \"\"|de|fr|es|ja|zh|ar|pt-br|it|uk|ka} — menus and panel names (the macOS menu bar follows on the next launch)",
+        "{lang: \"\"|de|fr|es|ja|zh|ar|pt-br|it|uk|ka|cs} — menus and panel names (the macOS menu bar follows on the next launch)",
     ),
     (
         "app.flattener",
@@ -308,6 +308,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "ui:app.language|Italiano|{\"lang\": \"it\"}",
             "ui:app.language|Українська|{\"lang\": \"uk\"}",
             "ui:app.language|ქართული|{\"lang\": \"ka\"}",
+            "ui:app.language|Čeština|{\"lang\": \"cs\"}",
             "<",
             ">Transparency Flattener Presets",
             "ui:app.flattener|None (keep transparency)|{\"preset\": \"\"}",
@@ -988,11 +989,11 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 Some(dir) => {
                     let r = app.run("file.package", json!({"dir": dir}));
                     if let Ok(v) = &r {
-                        app.status(format!(
-                            "Packaged {} files into {}",
-                            v["files"].as_array().map_or(0, |f| f.len()),
-                            v["dir"].as_str().unwrap_or("")
-                        ));
+                        app.status(
+                            crate::i18n::tr(&app.ui.language, "Packaged {count} files into {dir}")
+                                .replace("{count}", &v["files"].as_array().map_or(0, |f| f.len()).to_string())
+                                .replace("{dir}", v["dir"].as_str().unwrap_or("")),
+                        );
                     }
                     r
                 }
@@ -2443,7 +2444,7 @@ pub fn palette(app: &mut DesignApp, ctx: &egui::Context) {
                 if let Some(sc) = &it.shortcut {
                     b = b.shortcut_text(shortcut_text(sc));
                 } else if !it.kind.is_empty() {
-                    b = b.shortcut_text(it.kind);
+                    b = b.shortcut_text(crate::i18n::tr(&app.ui.language, it.kind));
                 }
                 // The button aligns its label by the layout it's in: left, like the rows with a shortcut.
                 let size = egui::vec2(460.0, 22.0);
@@ -3068,6 +3069,31 @@ mod tests {
     }
 
     #[test]
+    fn czech_language_is_selectable_persisted_and_keeps_document_data() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 4, "facingPages": true})).unwrap();
+        app.run("frame.create", json!({"rect": [36, 36, 200, 200], "content": "text", "text": "My words · Příliš žluťoučký kůň"})).unwrap();
+        let before = serde_json::to_value(&app.session.doc().unwrap().doc).unwrap();
+        run_ui(&mut app, "app.language", &json!({"lang": "cs"})).unwrap().unwrap();
+        assert_eq!(app.ui.language, "cs");
+        assert_eq!(checked(&app, "app.language", &json!({"lang": "cs"})), Some(true));
+        assert_eq!(before, serde_json::to_value(&app.session.doc().unwrap().doc).unwrap());
+        for (title, _) in menu_tree() {
+            assert_ne!(crate::i18n::tr("cs", title), title, "{title}");
+        }
+        let bytes = serde_json::to_vec(&app.ui).unwrap();
+        let restored: crate::UiState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.language, "cs");
+        assert_eq!(crate::i18n::tr(&restored.language, "File"), "Soubor");
+        assert_eq!(crate::i18n::tr(&restored.language, "A custom name"), "A custom name");
+        assert!(menu_tree().iter().flat_map(|(_, entries)| entries.iter()).any(|entry| {
+            matches!(entry, Item::Sub(label, children) if label == "Interface Language" && children.iter().any(|child| {
+                matches!(child, Item::Cmd { label, id, params, .. } if label == "Čeština" && id == "app.language" && params["lang"] == "cs")
+            }))
+        }));
+    }
+
+    #[test]
     fn arabic_dialog_and_language_switch_keep_finite_widget_geometry() {
         let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
@@ -3094,7 +3120,7 @@ mod tests {
         crate::dialogs::confirm(&mut app).unwrap();
         frame(&mut app);
         assert_eq!(app.session.documents().len(), 1);
-        for lang in ["uk", "zh", "", "ar", "pt-br", "it", "ka"] {
+        for lang in ["uk", "zh", "", "ar", "pt-br", "it", "ka", "cs"] {
             app.run("app.language", json!({"lang": lang})).unwrap();
             frame(&mut app);
         }

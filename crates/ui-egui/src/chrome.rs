@@ -116,7 +116,7 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                         );
                         ui.add_space(6.0);
                         if icons::button(ui, "share", 22.0, false, crate::i18n::tr(&app.ui.language, "Share")).clicked() {
-                            app.status("Export a PDF, IDML or package to share — no cloud account needed.");
+                            app.status(crate::i18n::tr(&app.ui.language, "Export a PDF, IDML or package to share — no cloud account needed."));
                         }
                         ui.add_space(8.0);
                         // Always one click away: the ArtCraft community Discord.
@@ -152,7 +152,7 @@ pub fn app_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
 
 impl DesignApp {
     fn session_home(&mut self) {
-        self.ui.status = "Home".into();
+        self.ui.status = crate::i18n::tr(&self.ui.language, "Home").into();
     }
 }
 
