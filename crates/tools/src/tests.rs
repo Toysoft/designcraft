@@ -1092,6 +1092,32 @@ fn pen_continues_an_open_path_from_either_end_point() {
 }
 
 #[test]
+fn pen_over_a_selected_open_paths_end_point_continues_it() {
+    let mut d = Document::new(&NewDocument::default());
+    let lid = d.default_layer();
+    let id = ItemId(d.alloc());
+    let anchors = vec![
+        designcraft_geom::Anchor::corner(Point::new(100.0, 100.0)),
+        designcraft_geom::Anchor::corner(Point::new(200.0, 100.0)),
+        designcraft_geom::Anchor::corner(Point::new(200.0, 200.0)),
+    ];
+    let mut it = Item::new(id, lid, Shape::Path, designcraft_geom::PathData::single(designcraft_geom::SubPath::new(anchors, false)));
+    it.stroke = Stroke::default();
+    d.insert_item(SpreadRef::Doc(0), it, None).unwrap();
+    let (s, c, l) = (Selection::items(vec![id]), Cache::new(), CanvasLayout::new(&d, false));
+    let cx = ctx(&d, &s, &c, &l);
+    let off = l.xf(SpreadRef::Doc(0)).translation();
+    let at = |x: f64, y: f64| Point::new(x + off.x, y + off.y);
+    let mut t = create("pen");
+    // The end point wins over deleting the selected path's anchor; a middle anchor still deletes.
+    assert_eq!(t.cursor(&cx, at(200.0, 200.0), Mods::default()), Cursor::PenContinue);
+    assert_eq!(t.cursor(&cx, at(200.0, 100.0), Mods::default()), Cursor::PenDelete);
+    let p = at(200.0, 200.0);
+    assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Down, p.x, p.y)).is_empty(), "no anchor is deleted");
+    assert!(t.busy(), "the path is being continued");
+}
+
+#[test]
 fn the_selection_tool_drags_a_path_type_bracket_along_its_path() {
     let mut d = Document::new(&NewDocument::default());
     let lid = d.default_layer();

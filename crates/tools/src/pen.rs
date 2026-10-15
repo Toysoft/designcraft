@@ -1,6 +1,8 @@
-//! InDesign. Clicking an end point of an open path (the cursor shows it) continues that path from
-//! there; dragging from it first reshapes its direction lines. Between paths, a click on a selected
-//! path's anchor deletes it and a click on its outline adds an anchor; the cursor shows which.
+//! Pen tool (P): click for corner points, drag for smooth points, click the first point to close,
+//! Enter/Esc (or switching tools) to finish an open path. Each anchor is its own undo step.
+//! Between paths, a click on a selected path's anchor deletes it and a click on its outline adds an
+//! anchor; clicking an end point of an open path continues that path from there (dragging from it
+//! first reshapes its direction lines). The cursor shows which.
 
 use designcraft_doc::{ItemId, SpreadRef};
 use designcraft_geom::{BezPath, Point};
@@ -76,6 +78,8 @@ enum Hover {
     Delete(u64, usize, usize),
     /// Add an anchor on a selected path's outline.
     Add(ItemId),
+    /// Continue subpath `.1` of open path `.0` from its last (`.2`) or first anchor.
+    Continue(ItemId, usize, bool),
 }
 
 impl PenTool {
@@ -92,6 +96,9 @@ impl PenTool {
         }
         if !self.anchors.is_empty() {
             return Hover::Place;
+        }
+        if let Some((id, si, at_end)) = endpoint_at(cx, p) {
+            return Hover::Continue(id, si, at_end);
         }
         let ids = &cx.selection.items;
         if let Some((id, si, ai, None)) = anchor_at_in(cx, ids, p) {
@@ -208,6 +215,7 @@ impl Tool for PenTool {
                         self.finish();
                         return out;
                     }
+                    Hover::Continue(id, si, at_end) => return self.continue_from(cx, id, si, at_end),
                     Hover::Delete(id, si, ai) => {
                         return vec![Action::Exec("path.deleteAnchor".into(), json!({"id": id, "subpath": si, "anchor": ai}))];
                     }
@@ -215,12 +223,6 @@ impl Tool for PenTool {
                         return vec![Action::Exec("path.addAnchor".into(), json!({"id": id.0, "at": [sp.x, sp.y], "tolerance": cx.tol(5.0)}))];
                     }
                     Hover::Place => {}
-                }
-                // On an open path's end point: continue that path.
-                if self.anchors.is_empty()
-                    && let Some((id, si, at_end)) = endpoint_at(cx, ev.pos)
-                {
-                    return self.continue_from(cx, id, si, at_end);
                 }
                 let p = self.snap_click(cx, snap_spread, sp, ev.mods.shift);
                 if self.anchors.is_empty() {
@@ -301,12 +303,10 @@ impl Tool for PenTool {
     }
 
     fn cursor(&self, cx: &ToolContext, p: Point, _m: Mods) -> Cursor {
-        if self.anchors.is_empty() && endpoint_at(cx, p).is_some() {
-            return Cursor::PenContinue;
-        }
         match self.hover_at(cx, p) {
             Hover::Place => Cursor::Pen,
             Hover::Close => Cursor::PenClose,
+            Hover::Continue(..) => Cursor::PenContinue,
             Hover::Delete(..) => Cursor::PenDelete,
             Hover::Add(_) => Cursor::PenAdd,
         }
