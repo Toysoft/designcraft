@@ -61,6 +61,17 @@ context menus, typing at a caret) are things a layout artist does every minute, 
 
 ## Remaining effort
 
+Style Preview rejects conflicting scalar/nested automation fields without a panic. Replacing a
+previewing dialog through the control channel cancels its transaction, restoring the original
+document and normal undo recording before the replacement opens.
+
+Paragraph and Character Style Options now preview edits to existing styles. Preview updates
+every use, remains outside undo history, and restores the starting document when disabled or
+cancelled. OK applies the final edit once. The color-preview step at about 4:00 in
+[Jessica Garrity's styles tutorial](https://www.youtube.com/watch?v=pG9JkAPLgs8) is reproducible
+offscreen. New-style creation, renaming and export tagging are committed on OK; they are not
+included in the visual preview.
+
 | Work | Opus 5.5 h |
 |---|---|
 | Copy/paste, context menus, threading clicks, caret formatting on every platform, with control-channel regression tests | 30–50 |

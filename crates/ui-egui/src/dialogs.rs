@@ -2208,6 +2208,10 @@ pub fn show(app: &mut DesignApp, ctx: &egui::Context) {
             _ => "  OK  ",
         };
         ui.horizontal(|ui| {
+            if matches!(d.id.as_str(), "paragraphStyleOptions" | "characterStyleOptions") && !d.b("new") {
+                check(ui, &mut d, "preview", crate::i18n::tr(&app.ui.language, "Preview"));
+                style_options_preview(app, &mut d);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(
@@ -2270,6 +2274,10 @@ fn find_change_params(d: &Dialog) -> Value {
 /// Apply the open dialog.
 pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
     let Some(d) = app.ui.dialog.take() else { return Err("no dialog open".into()) };
+    if matches!(d.id.as_str(), "paragraphStyleOptions" | "characterStyleOptions") && d.fields.contains_key(PREVIEWED) {
+        // Restore the original before the ordinary command commits one undoable edit.
+        app.session.cancel_interaction();
+    }
     if d.id != "pdfImport" || !d.b("async") {
         app.cancel_pdf_import();
     }
@@ -2797,6 +2805,64 @@ fn regex_ok(p: &str) -> Result<(), ()> {
         return Ok(());
     }
     regex::Regex::new(p).map(|_| ()).map_err(|_| ())
+}
+
+/// Preview the changed style attributes through the same engine commands as OK. Renaming and
+/// export tagging have no visual effect and wait for OK, so the dialog can keep looking up the
+/// original style while the preview is visible. The interaction restores its starting document
+/// before each update, including after a field is cleared or Preview is switched off.
+fn style_options_preview(app: &mut DesignApp, d: &mut Dialog) {
+    let shown = d.fields.get(PREVIEWED).cloned();
+    if !d.b("preview") || d.b("new") {
+        if shown.is_some() {
+            app.session.cancel_interaction();
+            d.fields.remove(PREVIEWED);
+            d.fields.remove("status");
+        }
+        return;
+    }
+    let paragraph = d.id == "paragraphStyleOptions";
+    let mut params = json!({"name": d.s("name"), "chars": {}});
+    if paragraph {
+        params["para"] = json!({});
+    }
+    for (key, value) in &d.fields {
+        if let Some(attr) = key.strip_prefix("c.") {
+            params["chars"][attr] = value.clone();
+        } else if paragraph && let Some(attr) = key.strip_prefix("p.") {
+            if let Some((attr, field)) = attr.split_once('.') {
+                if params["para"][attr].is_null() {
+                    params["para"][attr] = json!({});
+                }
+                if let Some(fields) = params["para"][attr].as_object_mut() {
+                    fields.insert(field.into(), value.clone());
+                }
+            } else {
+                params["para"][attr] = value.clone();
+            }
+        }
+    }
+    if let Some(based) = d.fields.get("basedOn") {
+        params["basedOn"] = match based.as_str() {
+            Some(designcraft_doc::NO_PARA_STYLE | designcraft_doc::NO_CHAR_STYLE) => Value::Null,
+            _ => based.clone(),
+        };
+    }
+    if shown.as_ref() == Some(&params) {
+        return;
+    }
+    if shown.is_none()
+        && let Err(error) = app.session.begin_interaction("Style Options")
+    {
+        d.fields.insert("status".into(), json!(error.to_string()));
+        return;
+    }
+    let command = if paragraph { "style.paragraph.edit" } else { "style.character.edit" };
+    match app.session.preview(command, params.clone()) {
+        Ok(()) => d.fields.remove("status"),
+        Err(error) => d.fields.insert("status".into(), json!(error.to_string())),
+    };
+    d.fields.insert(PREVIEWED.into(), params);
 }
 
 fn paragraph_style_options(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
@@ -4808,6 +4874,107 @@ fn find_font(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn style_options_preview_updates_all_uses_cancels_and_commits_once() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        for paragraph in [true, false] {
+            let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({})).unwrap();
+            let f = app.run("frame.create", json!({"rect":[36,36,300,300],"content":"text","text":"First\nSecond"})).unwrap();
+            app.run("text.select", json!({"story":f["story"],"anchor":0,"focus":12})).unwrap();
+            let kind = if paragraph { "paragraph" } else { "character" };
+            app.run(&format!("style.{kind}.create"), json!({"name":"Tutorial","chars":{"size":10}})).unwrap();
+            app.run(&format!("style.{kind}.apply"), json!({"name":"Tutorial"})).unwrap();
+            let before = app.session.doc().unwrap().doc.clone();
+            let undo = app.session.doc().unwrap().history.undo.len();
+            let journal = app.session.journal.len();
+            open_style_options(&mut app, paragraph, "Tutorial");
+            let mut h = Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+                |ui, app: &mut DesignApp| {
+                    let key = egui::Id::new("style_preview_test_fonts");
+                    if ui.data(|d| d.get_temp::<bool>(key)).is_none() {
+                        crate::theme::install_fonts(ui.ctx(), "");
+                        ui.data_mut(|d| d.insert_temp(key, true));
+                        return;
+                    }
+                    show(app, ui.ctx());
+                },
+                app,
+            );
+            h.run_steps(3);
+            h.get_by_label("Preview").click();
+            h.run_steps(3);
+            h.state_mut().ui.dialog.as_mut().unwrap().fields.insert("c.size".into(), json!(18));
+            h.run_steps(3);
+            let app = h.state_mut();
+            assert_eq!(app.run("type.selectionAttrs", json!({})).unwrap()["chars"]["size"], 18.0);
+            assert_eq!(app.session.doc().unwrap().history.undo.len(), undo);
+            assert_eq!(app.session.journal.len(), journal);
+            // Repeated previews replace each other, never accumulate undo entries.
+            app.ui.dialog.as_mut().unwrap().fields.insert("c.size".into(), json!(20));
+            h.run_steps(3);
+            assert_eq!(h.state_mut().run("type.selectionAttrs", json!({})).unwrap()["chars"]["size"], 20.0);
+            h.get_by_label("Preview").click();
+            h.run_steps(3);
+            assert_eq!(h.state().session.doc().unwrap().doc, before);
+            h.get_by_label("Preview").click();
+            h.run_steps(3);
+            cancel(h.state_mut());
+            assert_eq!(h.state().session.doc().unwrap().doc, before);
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo);
+            open_style_options(h.state_mut(), paragraph, "Tutorial");
+            let d = h.state_mut().ui.dialog.as_mut().unwrap();
+            d.fields.insert("preview".into(), json!(true));
+            d.fields.insert("c.size".into(), json!(24));
+            h.run_steps(3);
+            confirm(h.state_mut()).unwrap();
+            assert_eq!(h.state().session.doc().unwrap().history.undo.len(), undo + 1);
+            // Both paragraphs/character runs still use the globally edited definition.
+            for pos in [0, 6] {
+                h.state_mut().run("text.select", json!({"story":f["story"],"anchor":pos,"focus":pos+1})).unwrap();
+                assert_eq!(h.state_mut().run("type.selectionAttrs", json!({})).unwrap()["chars"]["size"], 24.0);
+            }
+            h.state_mut().run("edit.undo", json!({})).unwrap();
+            assert_eq!(h.state().session.doc().unwrap().doc, before);
+        }
+    }
+
+    #[test]
+    fn invalid_style_preview_leaves_the_starting_document_and_can_be_cancelled() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.run("style.character.create", json!({"name":"Emphasis"})).unwrap();
+        let before = app.session.doc().unwrap().doc.clone();
+        let mut d = Dialog::new("characterStyleOptions", json!({"name":"Emphasis","preview":true,"basedOn":"Emphasis"}));
+        style_options_preview(&mut app, &mut d);
+        assert!(d.fields.contains_key("status"));
+        assert_eq!(app.session.doc().unwrap().doc, before);
+        app.ui.dialog = Some(d);
+        cancel(&mut app);
+        assert_eq!(app.session.doc().unwrap().doc, before);
+        assert!(app.session.doc().unwrap().interaction.is_none());
+    }
+
+    #[test]
+    fn style_preview_rejects_conflicting_scalar_and_nested_rule_fields_without_panicking() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        let before = app.session.doc().unwrap().doc.clone();
+        let mut dialog = Dialog::new(
+            "paragraphStyleOptions",
+            json!({
+                "name": designcraft_doc::BASIC_PARAGRAPH, "preview": true,
+                "p.ruleAbove": false, "p.ruleAbove.weight": 2
+            }),
+        );
+        style_options_preview(&mut app, &mut dialog);
+        assert!(dialog.fields.contains_key("status"));
+        assert_eq!(app.session.doc().unwrap().doc, before);
+        app.ui.dialog = Some(dialog);
+        cancel(&mut app);
+        assert!(app.session.doc().unwrap().interaction.is_none());
+    }
 
     #[test]
     fn step_and_repeat_dialog_previews_and_makes_the_copies_as_one_undo_step() {
