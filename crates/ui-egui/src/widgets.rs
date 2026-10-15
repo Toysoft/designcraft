@@ -5,7 +5,7 @@
 //! section headers and 1.5 pt section rules.
 
 use designcraft_geom::Unit;
-use designcraft_geom::units::{format_measure_prec, parse_measure};
+use designcraft_geom::units::{format_measure, parse_measure};
 use egui::{Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::theme::Tokens;
@@ -35,7 +35,7 @@ pub enum NumKind<'a> {
 impl NumKind<'_> {
     pub fn format(&self, v: f64) -> String {
         match *self {
-            NumKind::Measure(u) => format_measure_prec(v, u, 3),
+            NumKind::Measure(u) => format_measure(v, u),
             NumKind::Number { suffix, decimals } => {
                 let s = format!("{v:.decimals$}");
                 let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
