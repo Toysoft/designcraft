@@ -5,7 +5,7 @@ use std::sync::Arc;
 use designcraft_doc::{CellAddr, StoryId};
 use designcraft_geom::Unit;
 pub use designcraft_tools::SnapView;
-use designcraft_tools::{Action, CanvasLayout, Cursor, Mods, Overlay, PointerEvent, ToolContext, ToolKey};
+use designcraft_tools::{Action, CanvasLayout, Cursor, Mods, Overlay, PointerEvent, PointerKind, ToolContext, ToolKey};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -63,6 +63,7 @@ impl Session {
         }
         self.end_composition();
         self.tool = designcraft_tools::create(id);
+        self.temp_tool = None;
         // Any other tool unloads the place cursor.
         if id != "placeGun" {
             self.loaded = None;
@@ -103,12 +104,40 @@ impl Session {
             unit: view.unit,
             stroke_in_front: view.stroke_in_front,
         };
-        Some(f(self.tool.as_mut(), &cx))
+        // A gesture a Cmd-held press started runs on the borrowed selection tool.
+        let tool = self.temp_tool.as_deref_mut().unwrap_or(self.tool.as_mut());
+        Some(f(tool, &cx))
+    }
+
+    /// Which selection tool a Cmd-held press borrows while `tool` is chosen, as InDesign's
+    /// Cmd/Ctrl does: the Direct Selection tool for the Pen family and Pencil, the Selection
+    /// tool for the drawing, type and other tools; none for the selection tools themselves,
+    /// Hand, Zoom and a loaded place cursor, where Cmd means something else or nothing.
+    fn borrowed_selection_tool(tool: &str) -> Option<&'static str> {
+        match tool {
+            "selection" | "directSelection" | "hand" | "zoom" | "placeGun" => None,
+            "pen" | "addAnchor" | "deleteAnchor" | "convertDirection" | "pencil" | "smooth" | "erase" | "scissors" => Some("directSelection"),
+            _ => Some("selection"),
+        }
     }
 
     pub fn pointer(&mut self, ev: &PointerEvent, view: ViewInfo) -> Result<()> {
+        // Cmd held at a press: the gesture (press, drags, release) goes to the selection tool the
+        // chosen tool borrows, which selects, moves or resizes without a tool change (#919).
+        if matches!(ev.kind, PointerKind::Down | PointerKind::DoubleClick)
+            && ev.mods.cmd
+            && self.temp_tool.is_none()
+            && !self.tool.busy()
+            && let Some(id) = Self::borrowed_selection_tool(self.tool.id())
+        {
+            self.temp_tool = Some(designcraft_tools::create(id));
+        }
         let actions = self.with_ctx(view, |t, cx| t.pointer(cx, ev)).unwrap_or_default();
-        self.run_actions(actions)
+        let r = self.run_actions(actions);
+        if ev.kind == PointerKind::Up && self.temp_tool.as_ref().is_some_and(|t| !t.busy()) {
+            self.temp_tool = None;
+        }
+        r
     }
 
     pub fn tool_key(&mut self, key: ToolKey, mods: Mods, view: ViewInfo) -> Result<bool> {
@@ -123,6 +152,15 @@ impl Session {
     }
 
     pub fn cursor(&mut self, p: designcraft_geom::Point, mods: Mods, view: ViewInfo) -> Cursor {
+        // Cmd held over the canvas shows the selection tool a press would borrow.
+        if mods.cmd
+            && self.temp_tool.is_none()
+            && !self.tool.busy()
+            && let Some(id) = Self::borrowed_selection_tool(self.tool.id())
+        {
+            let borrowed = designcraft_tools::create(id);
+            return self.with_ctx(view, |_, cx| borrowed.cursor(cx, p, mods)).unwrap_or_default();
+        }
         self.with_ctx(view, |t, cx| t.cursor(cx, p, mods)).unwrap_or_default()
     }
 

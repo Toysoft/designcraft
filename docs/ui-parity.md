@@ -28,7 +28,7 @@ basics of editing fail for too many users on Windows and Linux.
 |---|---|---|---|---|
 | Chrome: app bar, Control panel, Tools panel, dock, doc tabs, status bar | Medium Dark, measured sizes | measured look | ✓ | 11-observed-ui.md |
 | Properties panel and Contextual Task Bar | per selection | ✓, task bar movable (#143) | ✓ | |
-| Selection tool: click, marquee, move, Alt-duplicate, resize handles, rotate from corners | ✓ | ✓ | ✓ | |
+| Selection tool: click, marquee, move, Alt-duplicate, resize handles, rotate from corners | ✓ | ✓ | ✓ | Cmd/Ctrl held with another tool borrows it for one gesture (Direct Selection with the Pen family), #919 |
 | Direct Selection, Pen family, Pencil, Scissors | ✓ | ✓ | ~ | moving reference point "0" fails (#337) |
 | Live corners (yellow handle) | ✓ | ✓ | ~ | not working for some users (#186) |
 | Content grabber, frame fitting by double-click | ✓ | ✓ | ✓ | |

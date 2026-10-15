@@ -275,6 +275,9 @@ pub struct Session {
     pub prefs: Prefs,
     pub cache: Arc<Cache>,
     pub(crate) tool: Box<dyn designcraft_tools::Tool>,
+    /// The Selection (or Direct Selection) tool a Cmd-held press borrows for one gesture while
+    /// another tool stays chosen, as InDesign's Cmd/Ctrl does (#919). Dropped on release.
+    pub(crate) temp_tool: Option<Box<dyn designcraft_tools::Tool>>,
     pub journal: Vec<(String, Value)>,
     pub(crate) find_context: Option<cmd::find::FindContext>,
     pub clipboard: Option<Arc<Document>>,
@@ -324,6 +327,7 @@ impl Session {
             prefs: Prefs::default(),
             cache: Arc::new(Cache::new()),
             tool: designcraft_tools::create("selection"),
+            temp_tool: None,
             journal: vec![],
             find_context: None,
             clipboard: None,
