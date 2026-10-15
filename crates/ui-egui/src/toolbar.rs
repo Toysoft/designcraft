@@ -583,17 +583,10 @@ pub(crate) fn apply_gradient(app: &mut DesignApp) -> Result<Value, String> {
     if crate::panels::colors_affect_text(app) {
         return Err("no gradient to apply yet: make one in the Gradient panel".into());
     }
-    let fill = crate::panels::color_target(app).map(|t| t.0);
     let stops = json!([{"location": 0, "color": "#ffffff"}, {"location": 100, "color": "#000000"}]);
-    let r = app.run("object.gradient", json!({"stops": stops}))?;
-    let sw = r["swatch"].as_str().unwrap_or_default().to_string();
-    app.ui.last_gradient = Some(sw.clone());
-    if stroke {
-        // The gradient was made on the fill: it goes to the stroke, the fill gets its swatch back.
-        crate::panels::apply_swatch(app, true, &sw, None)?;
-        if let Some(f) = fill {
-            app.run("object.fill", json!({"swatch": f}))?;
-        }
+    let r = app.run("object.gradient", json!({"stops": stops, "target": if stroke { "stroke" } else { "fill" }}))?;
+    if let Some(sw) = r["swatch"].as_str() {
+        app.ui.last_gradient = Some(sw.to_string());
     }
     Ok(r)
 }
@@ -765,6 +758,31 @@ mod tests {
         for (id, sc) in [("color.applyColor", ","), ("color.applyGradient", ".")] {
             assert_eq!(crate::menus::ui_label(id).and_then(|c| c.1), Some(sc));
         }
+    }
+
+    /// A new default gradient on the stroke in front is one undo step; the fill keeps its swatch and tint.
+    #[test]
+    fn apply_gradient_to_the_stroke_is_one_undo_step() {
+        use serde_json::json;
+        let mut app = app(true);
+        app.run("file.new", json!({})).unwrap();
+        let id = app.run("frame.create", json!({"rect": [72, 72, 200, 200], "content": "unassigned"})).unwrap()["id"].clone();
+        app.run("selection.set", json!({"ids": [id]})).unwrap();
+        app.run("object.fill", json!({"swatch": "[Paper]", "tint": 0.5})).unwrap();
+        app.run("object.stroke", json!({"swatch": "[Black]", "tint": 0.7})).unwrap();
+        let paints = |app: &crate::DesignApp| {
+            let st = app.session.active().unwrap();
+            let it = st.doc.item(st.selection.items[0]).unwrap();
+            (it.fill.swatch.clone(), it.fill.tint, it.stroke.swatch.clone(), it.stroke.tint)
+        };
+        let before = paints(&app);
+        app.ui.stroke_front = true;
+        app.run("color.applyGradient", json!({})).unwrap();
+        let after = paints(&app);
+        assert_eq!((&after.0, after.1), (&before.0, before.1), "the fill is untouched");
+        assert_ne!(after.2, before.2, "the stroke is the gradient");
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(paints(&app), before, "one undo restores the stroke");
     }
 
     /// The Fill/Stroke proxy's keys run on the selection and stay out of text being typed.
