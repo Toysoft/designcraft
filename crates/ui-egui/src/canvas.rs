@@ -344,6 +344,15 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         let r = xf.rect(slot.bounds);
         painter.rect_filled(r.translate(vec2(1.5, 1.5)), 0.0, Color32::BLACK);
     }
+    // Paper under the rendered content: a page scrolled or jumped to shows its paper colour,
+    // not the shadow's black, until its render arrives.
+    let [r, g, b, _] = doc.resolve_color(designcraft_color::swatch::PAPER, 1.0).unwrap_or(designcraft_color::Color::WHITE).to_rgba8(1.0);
+    let paper = Color32::from_rgb(r, g, b);
+    for slot in &layout.slots {
+        for page in doc.spread(slot.spread).map(|sp| sp.pages.as_slice()).unwrap_or_default() {
+            painter.rect_filled(xf.rect(slot.xf.transform_rect_bbox(page.bounds())), 0.0, paper);
+        }
+    }
     // Rendered content.
     render_texture(app, ui.ctx(), rect, &xf, &layout, preview);
     if let (Some(tex), Some(sh)) = (&app.canvas.texture, app.canvas.shown) {
@@ -2231,6 +2240,39 @@ mod tests {
         // Too slow: a single click.
         let up = release_clicks(Clicks { at: f64::NEG_INFINITY, pos: pos2(0.0, 0.0), n: 1 }, pos2(0.0, 0.0), 0.1, dist);
         assert_eq!(press(Some(up), 0.0, 1.0), 1);
+    }
+
+    /// While a page's render is on its way the page shows paper, not the black of its shadow.
+    #[test]
+    fn pages_show_paper_under_their_render() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", serde_json::json!({"pages": 3, "facingPages": true})).unwrap();
+        let ctx = egui::Context::default();
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| show(&mut app, ui));
+            out.textures_delta.clear();
+            shapes = out.shapes;
+        }
+        let st = app.session.active().unwrap();
+        let layout = CanvasLayout::new(&st.doc, false);
+        let xf = Xf::new(app.canvas_rect.unwrap(), app.view().unwrap());
+        // The paper swatch on screen (white, as the colour settings show it).
+        let [r, g, b, _] = st.doc.resolve_color(designcraft_color::swatch::PAPER, 1.0).unwrap().to_rgba8(1.0);
+        let paper: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(s) if s.fill == Color32::from_rgb(r, g, b) => Some(s.rect),
+                _ => None,
+            })
+            .collect();
+        // Each page on its own (a spread's pages may differ in size).
+        assert_eq!(paper.len(), st.doc.page_count());
+        for abs in 0..st.doc.page_count() {
+            let want = xf.rect(layout.page_rect(&st.doc, abs).unwrap());
+            assert!(paper.iter().any(|r| (r.min - want.min).length() < 0.01 && (r.max - want.max).length() < 0.01), "page {abs}");
+        }
     }
 
     fn harness(app: DesignApp) -> Harness<'static, DesignApp> {
