@@ -4454,3 +4454,33 @@ fn an_empty_last_paragraph_isnt_overset() {
     let (d, sid, _) = doc_with("One\nTwo\n\n", Rect::new(0.0, 0.0, 200.0, 35.0), ParaAttrs::default());
     assert!(compose_story(&d, sid, &ComposeOptions::default()).is_overset(), "an empty paragraph before the last one is text");
 }
+
+#[test]
+fn greek_text_gets_greek_hyphenation() {
+    // Greek had no hyphenation at all: `hypher`'s Greek patterns were not among the features
+    // the crate asks for, so `Lang::for_language` found nothing and Greek text set unhyphenated
+    // however narrow the column (#1008).
+    let text = "δημοκρατια ανθρωπος πολιτισμος δημοκρατια ανθρωπος πολιτισμος";
+    let (mut d, sid, _) = doc_with(text, Rect::new(36.0, 36.0, 76.0, 700.0), ParaAttrs::default());
+    let st = d.story_mut(sid).unwrap();
+    let n = st.len();
+    st.format_chars(0..n, |f| f.over.language = Some("Greek".into()));
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let breaks: Vec<&str> = all_lines(&cs).into_iter().filter(|l| l.hyphenated).map(|l| text[l.range.clone()].trim_end()).collect();
+    assert!(!breaks.is_empty(), "Greek text is hyphenated");
+    // Every break the composer took is a break the patterns give for that word.
+    for b in breaks {
+        let tail = b.rsplit(' ').next().unwrap_or(b);
+        let whole = text[text.find(b).unwrap() + b.len() - tail.len()..].split(|c: char| !c.is_alphabetic()).next().unwrap_or("");
+        let el = hyphen::Lang::for_language("Greek").unwrap();
+        let pts = hyphen::hyphen_points_in(whole, &hyphen::Limits::default(), el);
+        assert!(pts.contains(&tail.chars().count()), "break {tail}- in {whole} is a hyph-el point");
+    }
+    // The language is reached by name and by tag, as the other languages are.
+    for name in ["Greek", "Greek: Greece", "el", "el-GR"] {
+        assert!(hyphen::Lang::for_language(name).is_some(), "{name} has hyphenation");
+    }
+    // αν-θρω-πος, the syllables hyph-el gives.
+    let el = hyphen::Lang::for_language("Greek").unwrap();
+    assert_eq!(hyphen::hyphen_points_in("ανθρωπος", &hyphen::Limits::default(), el), vec![2, 5]);
+}
