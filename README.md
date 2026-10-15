@@ -229,6 +229,20 @@ Installers and executables are code-signed.
 
 RISC-V (riscv64): `designcraft-<ver>-linux-riscv64.tar.gz` only, cross-compiled; needs glibc 2.39+ (Ubuntu 24.04 or newer).
 
+#### Community packages
+
+These packages are maintained by community members, not by the DesignCraft team.
+
+On Gentoo, the [::snakebyte overlay](https://github.com/switch87/snakebyte-overlay) packages the
+Linux release as `media-gfx/designcraft-bin` (prebuilt) and `media-gfx/designcraft` (built from source):
+
+```sh
+eselect repository add snakebyte git https://github.com/switch87/snakebyte-overlay.git
+emaint sync -r snakebyte
+echo 'media-gfx/designcraft-bin ~amd64' >> /etc/portage/package.accept_keywords/designcraft
+emerge --ask media-gfx/designcraft-bin
+```
+
 ### FreeBSD
 
 | Build | File |

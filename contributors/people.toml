@@ -47,3 +47,8 @@ display_name = "Jason Brashear"
 real_name = "Nick Marello"
 display_name = "Nick Marello"
 sync_github_name = false
+
+[people.switch87]
+real_name = "Gert Pellin"
+display_name = "Gert Pellin"
+sync_github_name = false
