@@ -156,6 +156,15 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, p| format_chars(s, p.get("attrs").unwrap_or(p))
         ),
         cmd!(
+            "type.kernPair",
+            "Kerning",
+            [],
+            None,
+            "{kerning: {kind: metrics|optical|none}|{kind: manual, value: 1/1000 em}|null} — at a caret in text, the pair at the caret (the character before the caret takes it); at the start of a story or paragraph, the next typing; a selection or frames take it like `type.char`",
+            has_text_or_frames,
+            kern_pair
+        ),
+        cmd!(
             "type.para",
             "Paragraph Formatting",
             [],
@@ -1120,6 +1129,46 @@ pub(crate) fn format_chars(s: &mut Session, attrs: &Value) -> Result<Value> {
         apply_char_attrs(d, &targets, &a, &cleared);
         ok()
     })
+}
+
+/// Kerning spaces a character from the next one, so the pair at a caret is kerned through the
+/// character before it. With no such pair (story or paragraph start, a selection) this is
+/// `type.char`.
+fn kern_pair(s: &mut Session, p: &Value) -> Result<Value> {
+    const ID: &str = "type.kernPair";
+    let kerning = p.get("kerning").ok_or_else(|| bad(ID, "missing `kerning`"))?;
+    let targets = format_targets(s);
+    if let [t] = targets.as_slice()
+        && t.range.is_empty()
+        && s.doc()?.selection.text.is_some()
+        && let Some(start) = s.doc()?.doc.text_story(t.story, t.cell).and_then(|st| pair_start(&st.text, t.range.start))
+    {
+        let mut a = CharAttrs::default();
+        a.set_json("kerning", kerning).map_err(|e| bad(ID, e))?;
+        let cleared = if kerning.is_null() { vec!["kerning".to_string()] } else { vec![] };
+        let pair = Target { story: t.story, cell: t.cell, range: start..t.range.start };
+        // Kerning chosen earlier for typing at this caret would hide the pair's value.
+        if typing_format(s).is_some()
+            && let Some(f) = &mut s.typing_format
+        {
+            f.attrs.kerning = None;
+            f.cleared.retain(|k| k != "kerning");
+        }
+        return s.edit(|d, _| {
+            apply_char_attrs(d, &[pair], &a, &cleared);
+            ok()
+        });
+    }
+    format_chars(s, &json!({ "kerning": kerning }))
+}
+
+/// Byte offset of the character before `pos` when it starts a kerning pair with the character at
+/// `pos`: both exist and neither is a paragraph or line break.
+fn pair_start(text: &str, pos: usize) -> Option<usize> {
+    let is_text = |c: &char| !matches!(*c, '\n' | designcraft_doc::story::FORCED_LINE_BREAK);
+    text.get(pos..)?.chars().next().filter(is_text)?;
+    let c = text.get(..pos)?.chars().next_back().filter(is_text)?;
+    pos.checked_sub(c.len_utf8())
 }
 
 /// Character attributes `a` (and the overrides `cleared` removed) over each target's text.
@@ -3043,5 +3092,72 @@ mod placeholder_tests {
         assert!(!text.contains(".O") && !text.contains(".L"), "sentences are spaced: {text}");
         assert!(st["overset"].is_null(), "nothing overset: {}", st["overset"]);
         assert!(text.len() > 1500, "the frame is filled: {}", text.len());
+    }
+}
+
+#[cfg(test)]
+mod kern_pair_tests {
+    use designcraft_doc::{Kerning, StoryId};
+    use serde_json::json;
+
+    use crate::Session;
+
+    fn avatar() -> (Session, StoryId) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 300, 200], "content": "text", "text": "AVATAR"})).unwrap();
+        (s, StoryId(r["story"].as_u64().unwrap()))
+    }
+
+    fn kern_at(s: &Session, story: StoryId, pos: usize) -> Option<Kerning> {
+        s.doc().unwrap().doc.story(story).unwrap().format_after(pos).over.kerning
+    }
+
+    #[test]
+    fn kerning_at_a_caret_kerns_the_pair_in_one_undo_step() {
+        let (mut s, sid) = avatar();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 1, "focus": 1})).unwrap();
+        let steps = s.doc().unwrap().history.undo.len();
+        s.execute("type.kernPair", &json!({"kerning": {"kind": "manual", "value": -80}})).unwrap();
+        assert_eq!(kern_at(&s, sid, 0), Some(Kerning::Manual(-80.0)), "A, before the caret, spaces the A|V pair");
+        assert_eq!(kern_at(&s, sid, 1), None);
+        assert_eq!(s.doc().unwrap().history.undo.len(), steps + 1);
+        let shown = s.execute("type.selectionAttrs", &json!({})).unwrap()["chars"]["kerning"].clone();
+        assert_eq!(shown, json!({"kind": "manual", "value": -80.0}), "the caret shows the pair's kerning");
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(kern_at(&s, sid, 0), None);
+    }
+
+    #[test]
+    fn kerning_a_selection_or_at_the_story_start_works_like_type_char() {
+        let (mut s, sid) = avatar();
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 2, "focus": 4})).unwrap();
+        s.execute("type.kernPair", &json!({"kerning": {"kind": "manual", "value": 20}})).unwrap();
+        let kerned: Vec<_> = (0..6).map(|i| kern_at(&s, sid, i)).collect();
+        let m = Some(Kerning::Manual(20.0));
+        assert_eq!(kerned, [None, None, m, m, None, None]);
+        // No character before the caret: the value is for the next typing.
+        s.execute("text.select", &json!({"story": sid.0, "anchor": 0, "focus": 0})).unwrap();
+        let steps = s.doc().unwrap().history.undo.len();
+        s.execute("type.kernPair", &json!({"kerning": {"kind": "none"}})).unwrap();
+        assert_eq!(s.doc().unwrap().history.undo.len(), steps);
+        assert_eq!(kern_at(&s, sid, 0), None);
+        s.execute("text.insert", &json!({"text": "X"})).unwrap();
+        assert_eq!(kern_at(&s, sid, 0), Some(Kerning::None));
+    }
+
+    #[test]
+    fn kerning_at_the_end_of_a_paragraph_or_story_leaves_the_text_alone() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [72, 72, 300, 200], "content": "text", "text": "AV\nTA"})).unwrap();
+        let sid = StoryId(r["story"].as_u64().unwrap());
+        for caret in [2, 5] {
+            s.execute("text.select", &json!({"story": sid.0, "anchor": caret, "focus": caret})).unwrap();
+            let steps = s.doc().unwrap().history.undo.len();
+            s.execute("type.kernPair", &json!({"kerning": {"kind": "manual", "value": -80}})).unwrap();
+            assert_eq!(s.doc().unwrap().history.undo.len(), steps, "no pair at {caret}: nothing is edited");
+            assert_eq!((kern_at(&s, sid, 1), kern_at(&s, sid, 4)), (None, None), "caret {caret}");
+        }
     }
 }

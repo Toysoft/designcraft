@@ -1283,8 +1283,9 @@ fn language_menu(app: &mut DesignApp, ui: &mut Ui, cur: &str) {
     }
 }
 
-/// Kerning for the text selection: the label shows Metrics, Optical, 0 or the manual value; its
-/// menu sets one of the first three or a manual value in 1/1000 em (typed or stepped).
+/// Kerning for the text selection, or at a caret for the pair at the caret: the label shows
+/// Metrics, Optical, 0 or the manual value; its menu sets one of the first three or a manual value
+/// in 1/1000 em (typed or stepped).
 fn kerning_control(app: &mut DesignApp, ui: &mut egui::Ui, id: &str, k: &Value, width: f32) {
     let kind = k["kind"].as_str().unwrap_or("metrics");
     let manual = k["value"].as_f64().filter(|v| kind == "manual" && v.is_finite());
@@ -1300,16 +1301,16 @@ fn kerning_control(app: &mut DesignApp, ui: &mut egui::Ui, id: &str, k: &Value, 
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         for (text, v) in [("Metrics", json!({"kind": "metrics"})), ("Optical", json!({"kind": "optical"})), ("0", json!({"kind": "none"}))] {
             if ui.selectable_label(label == text, crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, text))).clicked() {
-                let _ = app.run("type.char", json!({"attrs": {"kerning": v}}));
+                let _ = app.run("type.kernPair", json!({"kerning": v}));
                 ui.close();
             }
         }
         ui.separator();
-        // A manual value: between the selected character and the next, in 1/1000 em.
+        // A manual value in 1/1000 em: after each selected character, or between the two at a caret.
         let field = format!("{id}_manual");
         if let Some(v) = NumField::number(&field, Some(manual.unwrap_or(0.0)), "", 0).width(90.0).spinner().step(5.0).range(-1000.0, 10000.0).show(ui)
         {
-            let _ = app.run("type.char", json!({"attrs": {"kerning": {"kind": "manual", "value": v}}}));
+            let _ = app.run("type.kernPair", json!({"kerning": {"kind": "manual", "value": v}}));
         }
     });
 }
@@ -2666,6 +2667,26 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run_steps(3);
         assert_eq!(kerning(h.state_mut()), json!({"kind": "manual", "value": -40.0}));
+    }
+
+    #[test]
+    fn a_manual_kerning_value_at_a_caret_kerns_the_pair() {
+        let mut app = text_app();
+        let story = app.session.active().unwrap().selection.text.unwrap().story;
+        app.run("text.select", json!({"story": story.0, "anchor": 1, "focus": 1})).unwrap();
+        let mut h = panel_harness(app, character_panel);
+        h.run_steps(3);
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Kerning").click();
+        h.run_steps(2);
+        let field = h.get_all_by_role(egui::accesskit::Role::TextInput).last().unwrap();
+        field.focus();
+        field.type_text("-80");
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let st = h.state_mut().session.active().unwrap().doc.story(story).unwrap().format_after(0).over.kerning;
+        assert_eq!(st, Some(designcraft_doc::Kerning::Manual(-80.0)), "A of the A|V pair");
+        assert_eq!(kerning(h.state_mut()), json!({"kind": "manual", "value": -80.0}));
     }
 
     #[test]
