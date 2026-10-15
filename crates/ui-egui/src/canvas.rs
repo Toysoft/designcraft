@@ -221,6 +221,20 @@ pub fn go_to_page(app: &mut DesignApp, abs: usize) {
     }
 }
 
+/// Centre the spread `delta` spreads after (or before) the one in view (keeps zoom); stops at the
+/// first and last spread. Parent spreads while they are being edited.
+pub fn step_spread(app: &mut DesignApp, delta: isize) {
+    let Some(st) = app.session.active() else { return };
+    let layout = CanvasLayout::new(&st.doc, st.editing_parents);
+    let Some(cur) = current_slot(app, &layout) else { return };
+    let to = cur.saturating_add_signed(delta).min(layout.slots.len().saturating_sub(1));
+    let Some(b) = layout.slots.get(to).map(|s| s.bounds) else { return };
+    let Some(rect) = app.canvas_rect else { return };
+    if let Some(v) = app.view_mut() {
+        v.origin = Point::new(b.center().x - rect.width() as f64 / 2.0 / v.zoom, b.center().y - rect.height() as f64 / 2.0 / v.zoom);
+    }
+}
+
 pub fn zoom_at(app: &mut DesignApp, screen: Pos2, factor: f64) {
     let Some(rect) = app.canvas_rect else { return };
     let Some(v) = app.view_mut() else { return };

@@ -157,6 +157,12 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.fastDisplay", "Fast Display", Some("Cmd+Alt+Shift+Z"), "{} — placed graphics as grey boxes, no effects"),
     ("view.typicalDisplay", "Typical Display", Some("Cmd+Alt+Z"), "{} — low-resolution image proxies"),
     ("view.highQualityDisplay", "High Quality Display", Some("Cmd+Alt+H"), "{} — full-resolution images"),
+    ("view.firstPage", "First Page", Some("Cmd+Shift+PageUp"), "{} — scroll to the document's first page (zoom kept)"),
+    ("view.previousPage", "Previous Page", Some("Shift+PageUp"), "{} — scroll to the page before the one in view"),
+    ("view.nextPage", "Next Page", Some("Shift+PageDown"), "{} — scroll to the page after the one in view"),
+    ("view.lastPage", "Last Page", Some("Cmd+Shift+PageDown"), "{} — scroll to the document's last page"),
+    ("view.nextSpread", "Next Spread", Some("Alt+PageDown"), "{} — centre the spread after the one in view"),
+    ("view.previousSpread", "Previous Spread", Some("Alt+PageUp"), "{} — centre the spread before the one in view"),
     ("view.goToPage", "Go to Page…", Some("Cmd+J"), "{page: number (position) | \"name\" (section page name, or \"+n\" for a position)}"),
     (
         "window.panel",
@@ -338,6 +344,12 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "cmd:layout.createGuides",
             "cmd:layout.createAlternate",
             "-",
+            "ui:view.firstPage",
+            "ui:view.previousPage",
+            "ui:view.nextPage",
+            "ui:view.lastPage",
+            "ui:view.nextSpread",
+            "ui:view.previousSpread",
             "ui:view.goToPage",
             "-",
             "cmd:layout.section",
@@ -1356,6 +1368,24 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 app.ui.ink_limit = v.as_f64().map(|l| (l / 100.0) as f32);
             }
             app.canvas.shown = None;
+            Ok(Value::Null)
+        }
+        "view.firstPage" | "view.previousPage" | "view.nextPage" | "view.lastPage" => {
+            let n = app.session.active().map_or(0, |d| d.doc.page_count());
+            if n > 0 {
+                let cur = crate::canvas::current_page(app).unwrap_or(0);
+                let to = match id {
+                    "view.firstPage" => 0,
+                    "view.previousPage" => cur.saturating_sub(1),
+                    "view.nextPage" => cur.saturating_add(1).min(n - 1),
+                    _ => n - 1,
+                };
+                crate::canvas::go_to_page(app, to);
+            }
+            Ok(Value::Null)
+        }
+        "view.nextSpread" | "view.previousSpread" => {
+            crate::canvas::step_spread(app, if id == "view.nextSpread" { 1 } else { -1 });
             Ok(Value::Null)
         }
         "view.goToPage" => {
@@ -3294,6 +3324,82 @@ mod tests {
         assert!((v.zoom - v0.zoom).abs() < 1e-9, "panning keeps the zoom");
         assert!(v.origin.x < v0.origin.x && v.origin.y < v0.origin.y, "dragging right/down moves the view: {v0:?} -> {v:?}");
         assert_eq!(items(&app), items0, "the tool saw nothing");
+    }
+
+    #[test]
+    fn layout_menu_goes_through_pages_and_spreads_with_their_shortcuts() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", &json!({"pages": 7, "facingPages": true})).unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut crate::DesignApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+        };
+        let key = |k: egui::Key, modifiers: egui::Modifiers| {
+            vec![
+                egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers },
+                egui::Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers },
+            ]
+        };
+        let page = |app: &crate::DesignApp| crate::canvas::current_page(app).unwrap();
+        let spread = |app: &crate::DesignApp| {
+            let st = app.session.active().unwrap();
+            crate::canvas::current_slot(app, &designcraft_tools::layout::CanvasLayout::new(&st.doc, false)).unwrap()
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        // The Layout menu lists them, as InDesign's does, before Go to Page.
+        let layout = MENUS.iter().find(|m| m.0 == "Layout").unwrap().1;
+        let at = |id: &str| layout.iter().position(|e| e.starts_with(&format!("ui:{id}"))).unwrap();
+        assert!(at("view.firstPage") < at("view.previousPage"));
+        assert!(at("view.previousPage") < at("view.nextPage"));
+        assert!(at("view.nextPage") < at("view.lastPage"));
+        assert!(at("view.lastPage") < at("view.nextSpread"));
+        assert!(at("view.nextSpread") < at("view.previousSpread"));
+        assert!(at("view.previousSpread") < at("view.goToPage"));
+        let shift = egui::Modifiers::SHIFT;
+        let cmd_shift = egui::Modifiers { shift: true, command: true, ctrl: true, ..Default::default() };
+        let alt = egui::Modifiers::ALT;
+        // Pages 1 | 2-3 | 4-5 | 6-7.
+        frame(&mut app, key(egui::Key::PageDown, shift));
+        assert_eq!(page(&app), 1, "Next Page");
+        frame(&mut app, key(egui::Key::PageDown, shift));
+        assert_eq!(page(&app), 2, "Next Page goes to the right page of the spread");
+        frame(&mut app, key(egui::Key::PageUp, shift));
+        assert_eq!(page(&app), 1, "Previous Page");
+        frame(&mut app, key(egui::Key::PageDown, cmd_shift));
+        assert_eq!(page(&app), 6, "Last Page");
+        frame(&mut app, key(egui::Key::PageDown, shift));
+        assert_eq!(page(&app), 6, "Next Page stops at the last page");
+        frame(&mut app, key(egui::Key::PageUp, cmd_shift));
+        assert_eq!(page(&app), 0, "First Page");
+        frame(&mut app, key(egui::Key::PageUp, shift));
+        assert_eq!(page(&app), 0, "Previous Page stops at the first page");
+        frame(&mut app, key(egui::Key::PageDown, alt));
+        assert_eq!(spread(&app), 1, "Next Spread");
+        frame(&mut app, key(egui::Key::PageDown, alt));
+        frame(&mut app, key(egui::Key::PageDown, alt));
+        frame(&mut app, key(egui::Key::PageDown, alt));
+        assert_eq!(spread(&app), 3, "Next Spread stops at the last spread");
+        frame(&mut app, key(egui::Key::PageUp, alt));
+        assert_eq!(spread(&app), 2, "Previous Spread");
+        // The spread is centred, the zoom kept.
+        let zoom = app.view().unwrap().zoom;
+        app.run("view.previousSpread", json!({})).unwrap();
+        let st = app.session.active().unwrap();
+        let slot = designcraft_tools::layout::CanvasLayout::new(&st.doc, false).slots[1];
+        let (v, r) = (*app.view().unwrap(), app.canvas_rect.unwrap());
+        let centre = (v.origin.x + r.width() as f64 / 2.0 / v.zoom, v.origin.y + r.height() as f64 / 2.0 / v.zoom);
+        assert!((centre.0 - slot.bounds.center().x).abs() < 1e-6 && (centre.1 - slot.bounds.center().y).abs() < 1e-6);
+        assert_eq!(v.zoom, zoom);
     }
 
     #[test]
