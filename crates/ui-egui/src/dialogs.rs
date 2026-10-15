@@ -49,7 +49,8 @@ impl Dialog {
                     "marksPageInfo": false,
                     "marksWeight": "0.25",
                     "marksOffset": "6",
-                    "tagged": true
+                    "tagged": true,
+                    "convertToCmyk": false
                 })
             }
             _ => json!({}),
@@ -410,6 +411,9 @@ fn pdf_export(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         crate::rtl::label(ui, crate::i18n::tr(lang, "Offset:"));
         text_field(ui, d, "marksOffset", 60.0);
     });
+
+    head(ui, "Output");
+    check(ui, d, "convertToCmyk", crate::i18n::tr(lang, "Convert to CMYK"));
 
     head(ui, "Advanced");
     ui.horizontal(|ui| {
@@ -2506,6 +2510,7 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
             app.ui.pdf_export.marks_weight = d.s("marksWeight");
             app.ui.pdf_export.marks_offset = d.s("marksOffset");
             app.ui.pdf_export.tagged = d.b("tagged");
+            app.ui.pdf_export.convert_to_cmyk = d.b("convertToCmyk");
 
             let mut params = json!({
                 "standard": d.s("standard"),
@@ -2513,6 +2518,7 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                 "spreads": d.b("spreads"),
                 "bleed": d.b("bleed"),
                 "tagged": d.b("tagged"),
+                "convertToCmyk": d.b("convertToCmyk"),
                 "marks": {
                     "crop": d.b("marksCrop"),
                     "bleed": d.b("marksBleed"),
@@ -6327,6 +6333,7 @@ mod tests {
         let expected = [
             "bleed",
             "compressImages",
+            "convertToCmyk",
             "flatten",
             "marksBleed",
             "marksCrop",
@@ -6351,6 +6358,7 @@ mod tests {
         assert_eq!(d.fields["marksWeight"].as_str(), Some("0.25"));
         assert_eq!(d.fields["marksOffset"].as_str(), Some("6"));
         assert_eq!(d.fields["tagged"].as_bool(), Some(true));
+        assert_eq!(d.fields["convertToCmyk"].as_bool(), Some(false));
     }
 
     #[test]
@@ -6485,6 +6493,7 @@ mod tests {
             d.fields.insert("bleed".into(), json!(false));
             d.fields.insert("marksCrop".into(), json!(true));
             d.fields.insert("tagged".into(), json!(false));
+            d.fields.insert("convertToCmyk".into(), json!(true));
             d.fields.insert("title".into(), json!("Report"));
         }
         confirm(&mut app).unwrap();
@@ -6499,6 +6508,7 @@ mod tests {
         assert!(!app.ui.pdf_export.bleed);
         assert!(app.ui.pdf_export.marks_crop);
         assert!(!app.ui.pdf_export.tagged);
+        assert!(app.ui.pdf_export.convert_to_cmyk);
     }
 
     #[test]

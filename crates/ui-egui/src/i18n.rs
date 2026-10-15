@@ -1013,6 +1013,7 @@ const TABLE: &[(&str, [&str; 5])] = &[
         "Convert Text to Table",
         ["Convert Text to Table", "Convert Text to Table", "Convert Text to Table", "Convert Text to Table", "将文本转换为表格"],
     ),
+    ("Convert to CMYK", ["In CMYK konvertieren", "Convertir en CMJN", "Convertir a CMYK", "CMYK に変換", "转换为 CMYK"]),
     ("Convert to Button", ["Convert to Button", "Convert to Button", "Convert to Button", "Convert to Button", "转换为按钮"]),
     ("Convert to Form Field", ["Convert to Form Field", "Convert to Form Field", "Convert to Form Field", "Convert to Form Field", "转换为表单域"]),
     ("Conveyor", ["Conveyor", "Conveyor", "Conveyor", "Conveyor", "传送带"]),

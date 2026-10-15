@@ -107,7 +107,8 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 - **Missing:** PDF/X-1a and PDF/X-3 (no flattener to PDF 1.3/1.4), Adobe PDF Presets and
   `.joboptions` load/save, output-intent choice beyond the built-in profile, PDF/UA validation;
   #159, #32.
-- **Have:** PDF/X-4 with output intent and a validator (`#200`), PDF/A-2b, tagged PDF, CMYK and
+- **Have:** PDF/X-4 with output intent and a validator (`#200`), PDF/A-2b, tagged PDF, Convert to
+  CMYK (RGB colours and images into the working CMYK, CMYK numbers kept), CMYK and
   spot, marks and bleed, the options dialog with remembered settings (#196).
 - **Estimate:** 40–70 h. **Doc:** [file-format-parity.md](file-format-parity.md)
 

@@ -111,6 +111,63 @@ fn colours_keep_their_space() {
     assert!(s.contains("/Separation") && s.contains("/PANTONE#20Test"), "spot as Separation");
 }
 
+/// Convert to Destination (Preserve Numbers): an RGB swatch prints as CMYK in the working CMYK
+/// space; CMYK keeps its numbers and a spot stays a separation. PDF/A ignores it (RGB only).
+#[test]
+fn converting_to_cmyk_turns_rgb_colours_into_cmyk() {
+    let mut d = doc_with_text("x");
+    add_box(&mut d, Rect::new(36.0, 400.0, 136.0, 500.0), "C=100 M=0 Y=0 K=0");
+    d.swatches.push(Swatch::color("Brand Red", Color::rgb(0.9, 0.1, 0.1)));
+    add_box(&mut d, Rect::new(200.0, 400.0, 300.0, 500.0), "Brand Red");
+    d.swatches.push(Swatch {
+        name: "PANTONE Test".into(),
+        value: SwatchValue::Color { color: Color::cmyk(0.0, 0.5, 1.0, 0.0), color_type: ColorType::Spot },
+        locked: false,
+        named: true,
+        hidden: false,
+    });
+    add_box(&mut d, Rect::new(320.0, 400.0, 420.0, 500.0), "PANTONE Test");
+    let s = uncompressed(&d, PdfOptions { convert_to_cmyk: true, ..Default::default() });
+    assert!(s.contains("1 0 0 0 k"), "CMYK keeps its numbers");
+    assert!(!s.contains(" rg"), "no RGB left");
+    assert!(s.contains("/Separation") && s.contains("/PANTONE#20Test"), "spot as Separation");
+    let [c, m, y, k] = designcraft_color::cms::active().to_cmyk(&Color::rgb(0.9, 0.1, 0.1), designcraft_color::cms::active().settings().intent);
+    assert!(c < 0.2 && m > 0.7 && y > 0.7 && k < 0.3, "red stays red: {c} {m} {y} {k}");
+    let archival =
+        |convert_to_cmyk| uncompressed(&d, PdfOptions { convert_to_cmyk, standard: Standard::PdfA2b, created: Some(0), ..Default::default() });
+    assert_eq!(archival(true), archival(false), "PDF/A ignores it");
+}
+
+/// Converting to CMYK, an RGB image goes in as DeviceCMYK; a CMYK TIFF keeps its inks and a grey
+/// image stays grey.
+#[test]
+fn converting_to_cmyk_turns_rgb_images_into_cmyk() {
+    let opts = PdfOptions { convert_to_cmyk: true, ..Default::default() };
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let mut d = doc_with_text("x");
+    place(&mut d, png, (4, 4));
+    let r = export_pdf_with_report(&d, &Cache::new(), &opts).unwrap();
+    let images = image_xobjects(&r.bytes);
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].0, "DeviceCMYK");
+    let px = &images[0].1[..4];
+    assert!(px[0] > 150 && px[1] > 100 && px[2] < 60, "blue: {px:?}");
+
+    let mut grey = Vec::new();
+    image::GrayImage::from_pixel(4, 4, image::Luma([90])).write_to(&mut std::io::Cursor::new(&mut grey), image::ImageFormat::Png).unwrap();
+    let mut d = doc_with_text("x");
+    place(&mut d, grey, (4, 4));
+    let r = export_pdf_with_report(&d, &Cache::new(), &opts).unwrap();
+    assert_eq!(image_xobjects(&r.bytes)[0].0, "DeviceGray");
+
+    let (tif, px) = cmyk_tiff();
+    let mut d = doc_with_text("x");
+    place(&mut d, tif, (4, 2));
+    let r = export_pdf_with_report(&d, &Cache::new(), &opts).unwrap();
+    assert_eq!(image_xobjects(&r.bytes), vec![("DeviceCMYK".to_string(), px)]);
+}
+
 /// A page applying parent C (based on B, based on A) exports A's items too. Only the first level
 /// used to be drawn, so backgrounds on a deeper parent went missing.
 #[test]
