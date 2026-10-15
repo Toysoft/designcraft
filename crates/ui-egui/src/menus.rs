@@ -162,7 +162,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
         "window.panel",
         "Show Panel",
         None,
-        "{panel: properties|pages|layers|swatches|paragraphStyles|characterStyles|stroke|character|paragraph|textWrap|links|table}",
+        "{panel: properties|pages|layers|swatches|paragraphStyles|characterStyles|stroke|character|paragraph|textWrap|links|table|preflight}",
     ),
     ("window.floatPanel", "Float Panel", None, "{panel, x?, y?} — the panel in its own movable window"),
     (

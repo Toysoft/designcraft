@@ -709,22 +709,21 @@ pub fn status_bar(app: &mut DesignApp, ui: &mut egui::Ui) {
                     4.0,
                     if errors == 0 { Color32::from_rgb(60, 200, 90) } else { Color32::from_rgb(235, 50, 50) },
                 );
-                crate::rtl::label(
-                    ui,
-                    egui::RichText::new(if errors == 0 {
-                        format!("{} ▾", crate::i18n::tr(&app.ui.language, "No errors"))
-                    } else {
-                        format!(
-                            "{} ▾",
-                            crate::i18n::count_label(
-                                &app.ui.language,
-                                if errors == 1 && app.ui.language != "uk" { "error" } else { "errors" },
-                                errors
-                            )
-                        )
-                    })
-                    .font(small.clone()),
-                );
+                let count = if errors == 0 {
+                    format!("{} ▾", crate::i18n::tr(&app.ui.language, "No errors"))
+                } else {
+                    format!(
+                        "{} ▾",
+                        crate::i18n::count_label(&app.ui.language, if errors == 1 && app.ui.language != "uk" { "error" } else { "errors" }, errors)
+                    )
+                };
+                // As in InDesign, the count opens a menu that leads to the Preflight panel.
+                crate::menus::menu_button(ui, egui::RichText::new(count).font(small.clone()), |ui| {
+                    if ui.button(crate::i18n::tr(&app.ui.language, "Preflight Panel…")).clicked() {
+                        let _ = app.run("window.panel", json!({"panel": "preflight"}));
+                        ui.close();
+                    }
+                });
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(&app.ui.status).font(small).color(t.text_dim));
             });
@@ -897,6 +896,22 @@ mod tests {
 
     fn rect(h: &egui_kittest::Harness<'static, test_window::Window>, label: &str) -> egui::Rect {
         h.get_by_label(label).rect()
+    }
+
+    /// The status bar's preflight count is a menu; its Preflight Panel entry shows the panel.
+    #[test]
+    fn status_bar_error_count_opens_the_preflight_panel() {
+        let mut app = app();
+        app.run("file.new", serde_json::json!({})).unwrap();
+        app.ui.dock_tab = "properties".into();
+        let mut h = test_window::open(app, vec2(1200.0, 700.0));
+        h.get_by_label("No errors ▾").click();
+        h.run_steps(3);
+        h.get_by_label("Preflight Panel…").click();
+        h.run_steps(3);
+        // Preflight is not a dock tab: `window.panel` shows it as its own panel.
+        assert_eq!(h.state().app.ui.open_panel.as_deref(), Some("preflight"));
+        h.get_by_label("Preflight");
     }
 
     /// A very long document name made its tab grow past the window, hiding the close button
