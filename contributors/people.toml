@@ -47,3 +47,6 @@ display_name = "Jason Brashear"
 real_name = "Nick Marello"
 display_name = "Nick Marello"
 sync_github_name = false
+
+[people.govindaroyaiub]
+sync_github_name = true
