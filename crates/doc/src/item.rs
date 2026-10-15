@@ -1275,7 +1275,8 @@ impl Item {
     /// The Layers-panel label: `<rectangle>`, the first words of a text frame, the placed file name…
     pub fn default_label(&self) -> &'static str {
         match (&self.content, self.shape) {
-            (Content::Group { .. }, _) => "<group>",
+            // A frame with items pasted into it is named by its shape, as in InDesign.
+            (Content::Group { .. }, Shape::Group) => "<group>",
             (Content::Text(_), _) => "<text frame>",
             (Content::Graphic(_), _) => "<image>",
             (_, Shape::Rectangle) => "<rectangle>",

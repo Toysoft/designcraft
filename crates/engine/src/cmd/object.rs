@@ -1518,8 +1518,14 @@ fn ungroup(s: &mut Session, p: &Value) -> Result<Value> {
         for id in &ids {
             let Some(loc) = d.find(*id) else { continue };
             let Some(g) = d.item(*id).cloned() else { continue };
-            let Content::Group { items } = &g.content else { continue };
-            if loc.path.len() != 1 {
+            // Only groups come apart: a frame holding pasted-into items stays whole, and objects
+            // that aren't groups stay selected (as in InDesign).
+            let Content::Group { items } = &g.content else {
+                out.push(*id);
+                continue;
+            };
+            if !g.is_group() || loc.path.len() != 1 {
+                out.push(*id);
                 continue;
             }
             let Some(sp) = d.spread_mut(loc.spread) else { continue };
@@ -3458,6 +3464,43 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ungroup_tests {
+    use super::*;
+
+    #[test]
+    fn ungroup_leaves_frames_with_pasted_in_items_whole() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = |r: Value| ItemId(r["id"].as_u64().unwrap());
+        let sq = id(s.execute("frame.create", &json!({"rect": [100, 100, 200, 200]})).unwrap());
+        let ell = id(s.execute("frame.create", &json!({"rect": [90, 90, 210, 210], "shape": "ellipse"})).unwrap());
+        s.execute("selection.set", &json!({"ids": [sq.0]})).unwrap();
+        s.execute("edit.cut", &json!({})).unwrap();
+        s.execute("selection.set", &json!({"ids": [ell.0]})).unwrap();
+        s.execute("edit.pasteInto", &json!({})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        assert_eq!(d.item(ell).unwrap().default_label(), "<ellipse>", "named by its shape, not <group>");
+        // Ungroup: the frame keeps its content and stays selected.
+        s.execute("object.ungroup", &json!({})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        assert!(d.item(ell).unwrap().has_nested_items());
+        assert_eq!(d.spreads[0].items.len(), 1);
+        assert_eq!(s.doc().unwrap().selection.items, vec![ell]);
+        // A real group with the frame in it still comes apart, the frame whole.
+        let other = id(s.execute("frame.create", &json!({"rect": [300, 100, 400, 200]})).unwrap());
+        s.execute("selection.set", &json!({"ids": [ell.0, other.0]})).unwrap();
+        let g = id(s.execute("object.group", &json!({})).unwrap());
+        assert_eq!(s.doc().unwrap().doc.item(g).unwrap().default_label(), "<group>");
+        s.execute("object.ungroup", &json!({})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        assert!(d.item(g).is_none());
+        assert!(d.item(ell).unwrap().has_nested_items());
+        assert_eq!(s.doc().unwrap().selection.items.len(), 2);
+        d.check().unwrap();
     }
 }
 
