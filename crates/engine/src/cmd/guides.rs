@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Guide",
             [],
             None,
-            "{orientation: horizontal|vertical, position (spread coordinate), spread?, page? (index in the spread; default: the page under `at` or the position), at? (the other coordinate), spreadGuide?: bool} → {page, index}",
+            "{orientation: horizontal|vertical, position (spread coordinate), spread?, page? (index in the spread; default: the page under `at` or the position), at? (the other coordinate), spreadGuide?: bool, liquid?: bool (a liquid guide, as the Page tool draws from the rulers)} → {page, index}",
             has_doc,
             add
         ),
@@ -98,6 +98,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let pos = finite_number(p, "position", "guide.add")?.ok_or_else(|| bad("guide.add", "missing position"))?;
     let r = super::spread_param(p, "guide.add")?;
     let spread_guide = p.get("spreadGuide").and_then(Value::as_bool).unwrap_or(false);
+    let liquid = p.get("liquid").and_then(Value::as_bool).unwrap_or(false);
     let d = &s.doc()?.doc;
     let pi = match optional_usize(p, "page", "guide.add")? {
         Some(pi) => pi,
@@ -114,7 +115,14 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit(|d, _| {
         let sp = d.spread_mut(r).ok_or_else(|| bad("guide.add", "no such spread"))?;
         let pg = sp.pages.get_mut(pi).ok_or_else(|| bad("guide.add", "no such page"))?;
-        pg.guides.push(Guide { orientation: o, position: pos, spread: spread_guide, locked: false, layer: Some(layer), liquid: false });
+        pg.guides.push(Guide {
+            orientation: o,
+            position: pos,
+            spread: spread_guide,
+            locked: false,
+            layer: Some(layer),
+            liquid: liquid && !spread_guide,
+        });
         Ok(json!({"page": pi, "index": pg.guides.len() - 1}))
     })
 }

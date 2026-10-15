@@ -179,12 +179,35 @@ pub fn specs() -> Vec<CommandSpec> {
                 )
             }
         ),
-        cmd!("object.fill", "Fill", [], None, "{swatch (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?}", has_selection, |s, p| {
-            let sw = str_param(p, "swatch").ok_or_else(|| bad("object.fill", "missing swatch"))?.to_string();
-            known_swatch(&s.doc()?.doc, &sw, "object.fill", "swatch")?;
-            let tint = f64_or(p, "tint", 1.0) as f32;
-            set_flag(s, p, move |i| i.fill = Fill { swatch: sw.clone(), tint, ..i.fill.clone() }, false)
-        }),
+        cmd!(
+            "object.fill",
+            "Fill",
+            [],
+            None,
+            "{swatch? (a swatch's name, e.g. [Paper]), tint?: 0..1, ids?} — at least one; a tint alone keeps each object's own swatch (the Swatches panel's Tint field)",
+            has_selection,
+            |s, p| {
+                let sw = str_param(p, "swatch").map(str::to_string);
+                let tint = match p.get("tint") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_f64().filter(|t| (0.0..=1.0).contains(t)).ok_or_else(|| bad("object.fill", "`tint` is 0..1"))? as f32),
+                };
+                match &sw {
+                    Some(sw) => known_swatch(&s.doc()?.doc, sw, "object.fill", "swatch")?,
+                    None if tint.is_none() => return Err(bad("object.fill", "missing swatch")),
+                    None => {}
+                }
+                set_flag(
+                    s,
+                    p,
+                    move |i| match &sw {
+                        Some(sw) => i.fill = Fill { swatch: sw.clone(), tint: tint.unwrap_or(1.0), ..i.fill.clone() },
+                        None => i.fill.tint = tint.unwrap_or(i.fill.tint),
+                    },
+                    false,
+                )
+            }
+        ),
         cmd!(
             "object.swapFillStroke",
             "Swap Fill and Stroke",
@@ -217,10 +240,15 @@ pub fn specs() -> Vec<CommandSpec> {
                     }
                 }
                 let p2 = p.clone();
+                // A tint alone (the Swatches panel's Tint field) recolours strokes, it doesn't add one.
+                let tint_only = p.as_object().is_some_and(|o| o.contains_key("tint") && o.keys().all(|k| k == "tint" || k == "ids"));
                 set_flag(
                     s,
                     p,
                     move |i| {
+                        if tint_only && i.stroke.is_none() {
+                            return;
+                        }
                         let mut st = if i.stroke.is_none() && p2.get("swatch").is_none() { Stroke::default() } else { i.stroke.clone() };
                         if let Some(v) = p2.get("swatch").and_then(Value::as_str) {
                             st.swatch = v.into();
@@ -3325,5 +3353,38 @@ mod spread_target_tests {
             assert!(s.execute("line.create", &json!({"spread": bad, "a": [0, 0], "b": [50, 50]})).is_err(), "line.create spread {bad}");
         }
         assert!(s.doc().unwrap().doc.spreads[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fill_tint_tests {
+    use super::*;
+
+    #[test]
+    fn a_tint_alone_keeps_each_objects_own_swatch() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let a = s.execute("frame.create", &json!({"rect": [36, 36, 100, 100]})).unwrap()["id"].as_u64().unwrap();
+        let b = s.execute("frame.create", &json!({"rect": [136, 36, 200, 100]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("object.fill", &json!({"ids": [a], "swatch": "C=100 M=0 Y=0 K=0"})).unwrap();
+        s.execute("object.fill", &json!({"ids": [b], "swatch": "C=0 M=100 Y=0 K=0"})).unwrap();
+        s.execute("object.fill", &json!({"ids": [a, b], "tint": 0.4})).unwrap();
+        let fill_of = |s: &Session, id: u64| s.doc().unwrap().doc.item(ItemId(id)).unwrap().fill.clone();
+        assert_eq!((fill_of(&s, a).swatch.as_str(), fill_of(&s, a).tint), ("C=100 M=0 Y=0 K=0", 0.4));
+        assert_eq!((fill_of(&s, b).swatch.as_str(), fill_of(&s, b).tint), ("C=0 M=100 Y=0 K=0", 0.4));
+        // A swatch without a tint is at 100 %, as before.
+        s.execute("object.fill", &json!({"ids": [a], "swatch": "[Black]"})).unwrap();
+        assert_eq!(fill_of(&s, a).tint, 1.0);
+        // Neither, or a tint out of range: refused.
+        assert!(s.execute("object.fill", &json!({"ids": [a]})).is_err());
+        assert!(s.execute("object.fill", &json!({"ids": [a], "tint": 2})).is_err());
+        assert!(s.execute("object.fill", &json!({"ids": [a], "tint": "x"})).is_err());
+        // A stroke tint alone: stroked objects take it, an object without a stroke keeps none.
+        s.execute("object.stroke", &json!({"ids": [a], "swatch": "C=100 M=0 Y=0 K=0", "weight": 2})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [b], "swatch": "[None]"})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [a, b], "tint": 0.5})).unwrap();
+        let stroke_of = |s: &Session, id: u64| s.doc().unwrap().doc.item(ItemId(id)).unwrap().stroke.clone();
+        assert_eq!((stroke_of(&s, a).swatch.as_str(), stroke_of(&s, a).tint, stroke_of(&s, a).weight), ("C=100 M=0 Y=0 K=0", 0.5, 2.0));
+        assert!(stroke_of(&s, b).is_none());
     }
 }

@@ -365,7 +365,8 @@ fn select_at(s: &mut Session, p: &Value, unit: &str) -> Result<Value> {
     s.typing_format = None;
     let st = s.doc_mut()?;
     st.selection = Selection::text(TextSel { story: sid, anchor: a, focus: e, frame: Some(frame), cell });
-    st.revision += 1;
+    // Explicit reselection invalidates the Find scope even when the range is unchanged.
+    st.revision = st.revision.wrapping_add(1);
     Ok(json!({"story": sid.0, "anchor": a, "focus": e}))
 }
 

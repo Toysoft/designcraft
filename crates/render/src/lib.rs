@@ -880,7 +880,9 @@ pub fn color_of(c: &designcraft_color::Color, alpha: f32) -> peniko::Color {
 fn set_fill_paint(ctx: &mut RenderContext, doc: &Document, fill: &designcraft_doc::Fill, bounds: Rect) -> bool {
     let (swatch, tint, angle) = (fill.swatch.as_str(), fill.tint, fill.gradient_angle);
     if let Some(g) = designcraft_color::swatch::resolve_gradient(&doc.swatches, swatch) {
-        let stops: Vec<peniko::ColorStop> = g.expanded_stops().iter().map(|(o, c, a)| peniko::ColorStop::from((*o, color_of(c, *a)))).collect();
+        // Sampled so process colours blend as inks, as InDesign shows them (and as the PDF's CMYK
+        // shading prints).
+        let stops: Vec<peniko::ColorStop> = g.display_stops().iter().map(|(o, c, a)| peniko::ColorStop::from((*o, color_of(c, *a)))).collect();
         if stops.is_empty() {
             return false;
         }

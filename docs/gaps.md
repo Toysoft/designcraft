@@ -1,6 +1,6 @@
 # Where DesignCraft falls short of InDesign
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (gap 0 shrunk: text threads by hand; threading gaps added) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (bounded control click/drag input) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every known shortfall against InDesign 2026, one entry each, ranked by how much it stops an
 InDesign professional from doing real work. This is the work list: agents pick from the top.
@@ -32,6 +32,8 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
   open (#238, #187, #160, #312); double-click word selection in fields
   (#189); character formatting set at a caret is discarded (#289).
 - **Evidence:** 16 issues from 2026-10-05 to 2026-10-10, mostly against the 0.4/0.5 release builds.
+- **Safety:** control-channel clicks and drags reject invalid or over-budget counts before
+  queuing input (#732), including combined drag steps, repeated clicks and already pending events.
 - **Impact:** a layout artist can't finish the simplest job. This dominates the
   ready-for-real-work number.
 - **Estimate:** 30–50 h (reproduce per platform through the control channel, regression tests).

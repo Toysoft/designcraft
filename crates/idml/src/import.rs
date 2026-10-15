@@ -209,6 +209,7 @@ struct Importer<'r> {
     /// Index topic Self → topic path and per-level sort keys; topic cross-references.
     index_topics: HashMap<String, IndexTopic>,
     index_xrefs: Vec<designcraft_doc::IndexRef>,
+    toc: Option<designcraft_doc::Toc>,
 }
 
 /// IDML stores a sort key on each topic, rather than on its page references.
@@ -315,6 +316,7 @@ impl<'r> Importer<'r> {
             xref_formats: designcraft_doc::xref::default_formats(),
             index_topics: HashMap::new(),
             index_xrefs: Vec::new(),
+            toc: None,
         }
     }
 
@@ -488,6 +490,7 @@ impl<'r> Importer<'r> {
             let story = self.story(id, e);
             self.stories.insert(id, story);
         }
+        self.toc = self.toc_of(top);
         // Topic cross-references (See / See also) become markers at the start of the first story
         // with text.
         if !self.index_xrefs.is_empty()
@@ -1141,6 +1144,44 @@ impl<'r> Importer<'r> {
             o.ref_position = names::note_marker_in(v.trim());
         }
         self.footnote_options = o;
+    }
+
+    /// The table of contents: the TOC style a story is generated from (`AppliedTOCStyle`), with
+    /// its entries. Styles the document doesn't have fall back to the generated TOC styles.
+    fn toc_of(&self, top: &[El]) -> Option<designcraft_doc::Toc> {
+        use designcraft_doc::{TocEntry, TocPageNumber};
+        let (ts, story) = top.iter().filter(|e| e.local() == "TOCStyle").find_map(|ts| {
+            let id = ts.get("Self")?;
+            let story = top.iter().find(|e| e.local() == "Story" && e.get("AppliedTOCStyle") == Some(id))?;
+            Some((ts, *self.story_ids.get(story.get("Self")?)?))
+        })?;
+        let known = |r: Option<&str>| r.map(|r| self.para_style_ref(r)).filter(|n| self.styles.para(n).is_some());
+        let entries: Vec<TocEntry> = ts
+            .elements()
+            .filter(|e| e.local() == "TOCStyleEntry")
+            .filter_map(|e| {
+                let style = names::style_name_in(PARA_BUILTINS, e.get("Name")?);
+                if style.is_empty() || style.chars().count() > 256 {
+                    return None;
+                }
+                let level = e.get("Level").and_then(|l| l.trim().parse::<u8>().ok()).unwrap_or(1).clamp(1, 9);
+                let page_number = match e.get("PageNumberPosition") {
+                    Some("BeforeEntry") => TocPageNumber::Before,
+                    Some("NoPageNumber") => TocPageNumber::None,
+                    _ => TocPageNumber::After,
+                };
+                let separator = e.get("Separator").map(crate::names::toc_separator_in).filter(|s| s != "\t" && s.chars().count() <= 64);
+                let entry_style = known(e.get("FormatStyle")).filter(|n| *n != format!("TOC Level {level}"));
+                Some(TocEntry { style, level, entry_style, page_number, separator })
+            })
+            .take(64)
+            .collect();
+        if entries.is_empty() {
+            return None;
+        }
+        let title: String = ts.get("Title").unwrap_or("").chars().filter(|c| !matches!(c, '\n' | '\r' | '\u{2029}')).take(1024).collect();
+        let title_style = known(ts.get("TitleStyle")).filter(|n| n != "TOC Title");
+        Some(designcraft_doc::Toc { story, title, entries, page_numbers: true, title_style })
     }
 
     fn para_style_ref(&self, r: &str) -> String {
@@ -1977,6 +2018,7 @@ impl<'r> Importer<'r> {
                 liquid: Default::default(),
                 transition: None,
                 view_rotation: 0,
+                show_parent_overlay: false,
             });
         }
         let overrides: Vec<Vec<String>> =
@@ -2487,7 +2529,7 @@ impl<'r> Importer<'r> {
             bookmarks: vec![],
             user_words: vec![],
             hyphenation_exceptions: vec![],
-            toc: None,
+            toc: self.toc.take(),
             text_variables: designcraft_doc::vars::defaults(),
             footnote_options: std::mem::take(&mut self.footnote_options),
             xref_formats: std::mem::take(&mut self.xref_formats),

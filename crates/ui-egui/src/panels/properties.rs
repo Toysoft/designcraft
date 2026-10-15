@@ -160,7 +160,7 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
 // ---------------------------------------------------------------- No Selection
 
 /// Page-size presets for the Document dropdown (portrait, points).
-const PAGE_PRESETS: &[(&str, f64, f64)] = &[
+pub(crate) const PAGE_PRESETS: &[(&str, f64, f64)] = &[
     ("Letter", 612.0, 792.0),
     ("Legal", 612.0, 1008.0),
     ("Tabloid", 792.0, 1224.0),
@@ -171,9 +171,10 @@ const PAGE_PRESETS: &[(&str, f64, f64)] = &[
     ("A5", 419.528, 595.276),
     ("A6", 297.638, 419.528),
     ("B5", 498.898, 708.661),
+    ("US Business Card", 144.0, 252.0),
 ];
 
-fn preset_name(w: f64, h: f64) -> &'static str {
+pub(crate) fn preset_name(w: f64, h: f64) -> &'static str {
     let (a, b) = (w.min(h), w.max(h));
     PAGE_PRESETS.iter().find(|p| (p.1 - a).abs() < 0.6 && (p.2 - b).abs() < 0.6).map(|p| p.0).unwrap_or("Custom")
 }
@@ -386,7 +387,7 @@ fn document_sections(app: &mut DesignApp, ui: &mut Ui) {
 // ---------------------------------------------------------------- Objects
 
 /// The 9-point reference-point proxy; returns a newly picked point (0..8, row-major).
-fn ref_point_proxy(ui: &mut Ui, r: Rect, cur: u8) -> Option<u8> {
+pub(crate) fn ref_point_proxy(ui: &mut Ui, r: Rect, cur: u8) -> Option<u8> {
     let t = Tokens::get(ui.ctx());
     let mut out = None;
     let pitch = r.width() / 3.0;

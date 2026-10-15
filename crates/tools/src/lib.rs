@@ -15,6 +15,7 @@ mod frame;
 mod gradient;
 pub mod layout;
 mod nav;
+pub use nav::{LOCK_OFFSET_PX, PIN_OFFSET_PX};
 mod pen;
 mod pencil;
 pub mod select;
@@ -322,6 +323,28 @@ pub enum Overlay {
         b: Point,
         label: String,
     },
+    /// A page selected with the Page tool (canvas rect): its outline and eight handles.
+    PageHandles(Rect),
+    /// A small tag whose bottom-left is at `p` (the Page tool's liquid page rule; English, the UI
+    /// translates it).
+    Tag {
+        p: Point,
+        text: String,
+    },
+    /// A tooltip near the pointer (English; the UI translates it).
+    Tip {
+        p: Point,
+        text: String,
+    },
+    /// An object's liquid pins and resize locks on an object-based page (Page tool), canvas
+    /// coordinates: pinned sides (top, right, bottom, left) and whether width and height follow the
+    /// page.
+    LiquidPins {
+        object: Rect,
+        page: Rect,
+        pins: [bool; 4],
+        resize: [bool; 2],
+    },
 }
 
 /// Correction from a snap, in spread coordinates for `delta`.
@@ -412,7 +435,7 @@ pub fn create(id: &str) -> Box<dyn Tool> {
         "hand" => Box::new(nav::HandTool::default()),
         "placeGun" => Box::new(nav::PlaceGun::default()),
         "zoom" => Box::new(nav::ZoomTool::default()),
-        "page" => Box::new(nav::PageTool),
+        "page" => Box::new(nav::PageTool::default()),
         "typeOnPath" => Box::new(nav::PathTypeTool),
         "gap" => Box::new(nav::GapTool::default()),
         "contentCollector" => Box::new(nav::ConveyorTool::new(false)),

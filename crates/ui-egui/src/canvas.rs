@@ -312,7 +312,12 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
                 designcraft_doc::Orientation::Horizontal => (pos2(rect.min.x, p.y), pos2(rect.max.x, p.y)),
                 designcraft_doc::Orientation::Vertical => (pos2(p.x, rect.min.y), pos2(p.x, rect.max.y)),
             };
-            painter.line_segment([a, b], Stroke::new(1.0, col));
+            // A new guide from the rulers with the Page tool is a liquid guide: dashed.
+            if g.from.is_none() && app.session.tool_id() == "page" {
+                dashed(&painter, a, b, Stroke::new(1.0, col), 6.0, 3.0);
+            } else {
+                painter.line_segment([a, b], Stroke::new(1.0, col));
+            }
         }
         draw_frames(app, &painter, &xf, &doc, &layout);
         if app.ui.hidden_characters {
@@ -415,12 +420,14 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
     let Some(st) = app.session.active() else { return };
     let ppp = ctx.pixels_per_point() as f64;
     let doc_key = (st.uid, std::sync::Arc::as_ptr(&st.doc) as u64, st.revision, preview);
+    let editing_parents = st.editing_parents;
     // Overscan: 25% of the viewport on every side, within the GPU's maximum texture size.
     let max_side = ctx.input(|i| i.max_texture_side) as f32 / ppp as f32;
     let (ow, oh) =
         ((rect.width() * 0.25).min((max_side - rect.width()) / 2.0).max(0.0), (rect.height() * 0.25).min((max_side - rect.height()) / 2.0).max(0.0));
     let want = |origin: Point| crate::Shown {
         doc: doc_key,
+        editing_parents,
         origin: Point::new(origin.x - ow as f64 / xf.zoom, origin.y - oh as f64 / xf.zoom),
         zoom: xf.zoom,
         size: (rect.width() + 2.0 * ow, rect.height() + 2.0 * oh),
@@ -428,7 +435,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
     let target = want(xf.origin);
     // Does the current texture cover the viewport at this zoom and document state?
     let covers = |s: &crate::Shown| {
-        s.doc == doc_key && (s.zoom - xf.zoom).abs() < 1e-9 && {
+        s.doc == doc_key && s.editing_parents == editing_parents && (s.zoom - xf.zoom).abs() < 1e-9 && {
             let x0 = (xf.origin.x - s.origin.x) * s.zoom;
             let y0 = (xf.origin.y - s.origin.y) * s.zoom;
             x0 >= -0.5 && y0 >= -0.5 && x0 + rect.width() as f64 <= s.size.0 as f64 + 0.5 && y0 + rect.height() as f64 <= s.size.1 as f64 + 0.5
@@ -450,6 +457,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
         return;
     }
     let doc_changed = app.canvas.shown.is_none_or(|s| s.doc != doc_key);
+    let mode_changed = app.canvas.shown.is_some_and(|s| s.editing_parents != editing_parents);
     let zoom_same = app.canvas.shown.is_some_and(|s| (s.zoom - xf.zoom).abs() < 1e-9);
     let job = |app: &DesignApp| {
         let st = app.session.active()?;
@@ -492,7 +500,9 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
     if doc_changed && zoom_same && patch_texture(app, layout, ppp, doc_key, preview) {
         return;
     }
-    if !has_worker || app.canvas.shown.is_none() || (doc_changed && zoom_same) {
+    // A mode switch changes every spread's meaning, even if the document has no damage.
+    // Show the new canvas immediately, including when fitting it changes the zoom.
+    if !has_worker || app.canvas.shown.is_none() || mode_changed || (doc_changed && zoom_same) {
         let t0 = crate::now_ms();
         let Some((doc, placed, w, h, view, opts)) = job(app) else { return };
         let img = app.canvas.renderer.render(&doc, &app.session.cache, &placed, w, h, view, &opts);
@@ -500,6 +510,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
         app.canvas.shown = Some(target);
         app.canvas.shown_doc = Some(doc);
         app.canvas.pending = None;
+        app.canvas.pending_doc = None;
         app.perf.render_ms = crate::now_ms() - t0;
         return;
     }
@@ -507,7 +518,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
     {
         // Already rendering this view?
         if app.canvas.pending.is_some_and(|(_, p)| {
-            p.doc == doc_key && (p.zoom - xf.zoom).abs() < 1e-9 && {
+            p.doc == doc_key && p.editing_parents == editing_parents && (p.zoom - xf.zoom).abs() < 1e-9 && {
                 let x0 = (xf.origin.x - p.origin.x) * p.zoom;
                 let y0 = (xf.origin.y - p.origin.y) * p.zoom;
                 x0 >= 0.0 && y0 >= 0.0 && x0 + rect.width() as f64 <= p.size.0 as f64 && y0 + rect.height() as f64 <= p.size.1 as f64
@@ -530,7 +541,7 @@ fn render_texture(app: &mut DesignApp, ctx: &egui::Context, rect: Rect, xf: &Xf,
 /// Returns false when a full render is needed (view moved, too much changed, or damage unknown).
 fn patch_texture(app: &mut DesignApp, layout: &CanvasLayout, ppp: f64, doc_key: (u64, u64, u64, bool), preview: bool) -> bool {
     let (Some(sh), Some(old), Some(st)) = (app.canvas.shown, app.canvas.shown_doc.clone(), app.session.active()) else { return false };
-    if sh.doc.0 != doc_key.0 || sh.doc.3 != doc_key.3 || app.canvas.texture.is_none() {
+    if sh.doc.0 != doc_key.0 || sh.doc.3 != doc_key.3 || sh.editing_parents != st.editing_parents || app.canvas.texture.is_none() {
         return false;
     }
     let new = st.doc.clone();
@@ -658,8 +669,18 @@ fn draw_guides(app: &DesignApp, painter: &egui::Painter, xf: &Xf, doc: &Document
             painter.rect_stroke(rect(br), 0.0, Stroke::new(hair(painter), c32(s.bleed_color)), StrokeKind::Middle);
         }
         let pasteboard = m.inverse().transform_rect_bbox(layout.pasteboard);
-        for p in &sp.pages {
+        for (pi, p) in sp.pages.iter().enumerate() {
             let pr = p.bounds();
+            // Page tool › Show Parent Page Overlay: the parent page's size over the page.
+            if p.show_parent_overlay
+                && let SpreadRef::Doc(si) = slot.spread
+                && let Some((ppi, ppg)) = doc.parent_page_for(doc.first_page_of_spread(si) + pi)
+                && let Some(pp) = doc.parents.get(ppi).and_then(|ps| ps.pages.get(ppg))
+            {
+                let r = rect(DRect::new(pr.x0, pr.y0, pr.x0 + pp.width, pr.y0 + pp.height));
+                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(110, 110, 230, 28));
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_rgb(110, 110, 230)), StrokeKind::Middle);
+            }
             if !app.ui.guides {
                 continue;
             }
@@ -1295,8 +1316,81 @@ fn draw_tool_overlays(app: &mut DesignApp, painter: &egui::Painter, xf: &Xf) {
                 painter.rect_filled(r, 3.0, tok.measure_bg);
                 painter.galley(r.min + vec2(5.0, 3.0), g, tok.measure_text);
             }
+            Overlay::PageHandles(r) => {
+                // The Page tool's selected page: outline and eight handles, as InDesign draws them.
+                let r = xf.rect(r);
+                let col = Color32::from_rgb(79, 153, 255);
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, col), StrokeKind::Middle);
+                for i in (0..9).filter(|i| *i != 4) {
+                    let c = pos2(r.min.x + r.width() * (i % 3) as f32 / 2.0, r.min.y + r.height() * (i / 3) as f32 / 2.0);
+                    let h = Rect::from_center_size(c, vec2(7.0, 7.0));
+                    painter.rect_filled(h, 0.0, Color32::WHITE);
+                    painter.rect_stroke(h, 0.0, Stroke::new(1.0, col), StrokeKind::Inside);
+                }
+            }
+            Overlay::Tag { p, text } => {
+                let text = crate::i18n::tr(&app.ui.language, &text).to_owned();
+                let s = xf.to_screen(p);
+                let g = painter.layout_no_wrap(text, egui::FontId::proportional(10.0), tok.measure_text);
+                let r = Rect::from_min_size(s - vec2(0.0, g.size().y + 4.0), g.size() + vec2(8.0, 4.0));
+                painter.rect_filled(r, 2.0, tok.measure_bg);
+                painter.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_rgb(79, 153, 255)), StrokeKind::Inside);
+                painter.galley(r.min + vec2(4.0, 2.0), g, tok.measure_text);
+            }
+            Overlay::Tip { p, text } => {
+                let text = crate::i18n::tr(&app.ui.language, &text).to_owned();
+                let s = xf.to_screen(p) + vec2(14.0, 14.0);
+                let g = painter.layout(text, egui::FontId::proportional(11.0), tok.measure_text, 260.0);
+                let r = Rect::from_min_size(s, g.size() + vec2(10.0, 6.0));
+                painter.rect_filled(r, 3.0, tok.measure_bg);
+                painter.galley(r.min + vec2(5.0, 3.0), g, tok.measure_text);
+            }
+            Overlay::LiquidPins { object, page, pins, resize } => draw_liquid_pins(painter, xf.rect(object), xf.rect(page), pins, resize),
             Overlay::Path { .. } => {}
         }
+    }
+}
+
+/// An object's liquid controls on an object-based page, as InDesign draws them in orange: a
+/// dashed line across the object for width and height with a padlock (closed: locked), and a pin
+/// outside each edge (pinned: a line to the page edge).
+fn draw_liquid_pins(painter: &egui::Painter, o: Rect, page: Rect, pins: [bool; 4], resize: [bool; 2]) {
+    let col = Color32::from_rgb(178, 88, 18);
+    let st = Stroke::new(1.5, col);
+    let c = o.center();
+    let mids = [pos2(c.x, o.min.y), pos2(o.max.x, c.y), pos2(c.x, o.max.y), pos2(o.min.x, c.y)];
+    // The width and height lines between the edges' middles.
+    for (a, b) in [(mids[3], mids[1]), (mids[0], mids[2])] {
+        dashed(painter, a, b, Stroke::new(1.0, col), 3.0, 3.0);
+    }
+    for m in mids {
+        painter.circle_filled(m, 3.5, col);
+    }
+    let (po, lo) = (designcraft_tools::PIN_OFFSET_PX as f32, designcraft_tools::LOCK_OFFSET_PX as f32);
+    let outward = [vec2(0.0, -1.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(-1.0, 0.0)];
+    let edge = [pos2(c.x, page.min.y), pos2(page.max.x, c.y), pos2(c.x, page.max.y), pos2(page.min.x, c.y)];
+    for i in 0..4 {
+        if pins[i] {
+            painter.line_segment([mids[i], edge[i]], st);
+            painter.circle_filled(edge[i], 4.0, col);
+        } else {
+            painter.circle_stroke(mids[i] + outward[i] * po, 4.0, st);
+        }
+    }
+    // Padlocks: the width lock right of the centre, the height lock above it.
+    for (at, locked) in [(c + vec2(lo, 0.0), !resize[0]), (c + vec2(0.0, -lo), !resize[1])] {
+        let body = Rect::from_center_size(at + vec2(0.0, 2.0), vec2(8.0, 6.0));
+        painter.rect_filled(body.expand(1.0), 1.0, Color32::WHITE);
+        painter.rect_filled(body, 1.0, col);
+        // The shackle: over the body when locked, swung open when not.
+        let base = if locked { body.center().x } else { body.center().x + 3.0 };
+        let pts: Vec<_> = (0..=8)
+            .map(|k| {
+                let a = std::f32::consts::PI * k as f32 / 8.0;
+                pos2(base - 2.6 * a.cos(), body.min.y - 3.0 * a.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, Stroke::new(1.3, col)));
     }
 }
 
@@ -1822,7 +1916,10 @@ fn guide_drag(app: &mut DesignApp, ui: &mut egui::Ui, resp: &egui::Response, rec
             let _ = app.run("guide.move", json!({"spread": r, "page": pi, "index": gi, "position": pos_of(sp)}));
         }
         (None, true, Some((r, sp, on_page))) => {
-            let mut params = json!({"spread": r, "orientation": orient, "position": pos_of(sp), "at": sp.x, "spreadGuide": on_page.is_none()});
+            // The Page tool draws liquid guides from the rulers.
+            let liquid = app.session.tool_id() == "page" && on_page.is_some();
+            let mut params =
+                json!({"spread": r, "orientation": orient, "position": pos_of(sp), "at": sp.x, "spreadGuide": on_page.is_none(), "liquid": liquid});
             if let Some(pi) = on_page {
                 params["page"] = json!(pi);
             }
@@ -1859,6 +1956,10 @@ fn release_clicks(press: Clicks, pos: Pos2, now: f64, dist: f32) -> Clicks {
 }
 
 #[cfg(test)]
+#[path = "parent_canvas_tests.rs"]
+mod parent_canvas_tests;
+
+#[cfg(test)]
 mod tests {
     use designcraft_geom::Unit;
     use egui_kittest::{Harness, kittest::Queryable};
@@ -1893,6 +1994,42 @@ mod tests {
         );
         h.run_steps(4);
         h
+    }
+
+    /// A primary-button drag from `a` to `b` over a few frames.
+    fn drag(h: &mut Harness<'_, DesignApp>, a: Pos2, b: Pos2) {
+        h.hover_at(a);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        for k in 1..=4 {
+            h.hover_at(a + (b - a) * (k as f32 / 4.0));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(3);
+    }
+
+    #[test]
+    fn the_page_tool_draws_liquid_guides_from_the_rulers() {
+        // Chris Cicchino's Page Tool and Liquid Layout video (11:00): with the Page tool, a guide
+        // dragged from the ruler is a liquid guide (dashed).
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({})).unwrap();
+        app.session.set_tool("page");
+        let mut h = harness(app);
+        let r = h.state().canvas_rect.unwrap();
+        let guides = |h: &Harness<'_, DesignApp>| h.state().session.doc().unwrap().doc.spreads[0].pages[0].guides.clone();
+        drag(&mut h, pos2(r.center().x, r.min.y - 8.0), r.center());
+        let g = guides(&h);
+        assert_eq!(g.len(), 1, "{g:?}");
+        assert!(g[0].liquid && g[0].orientation == designcraft_doc::Orientation::Horizontal);
+        // With the Selection tool it's a ruler guide.
+        h.state_mut().session.set_tool("selection");
+        drag(&mut h, pos2(r.center().x, r.min.y - 8.0), r.center() + vec2(0.0, 40.0));
+        let g = guides(&h);
+        assert_eq!(g.len(), 2);
+        assert!(!g[1].liquid);
     }
 
     fn right_click(h: &mut Harness<'_, DesignApp>, p: Pos2) {
