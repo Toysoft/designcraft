@@ -2757,6 +2757,38 @@ mod gradient_tests {
         assert_eq!(fill(&s).gradient_vector, None);
         assert_eq!(fill(&s).gradient_angle, Some(90.0));
     }
+
+    #[test]
+    fn swatches_dropped_on_stops_keep_their_cmyk() {
+        use designcraft_color::Color;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let r = s.execute("frame.create", &json!({"rect": [100, 100, 300, 200]})).unwrap();
+        let id = ItemId(r["id"].as_u64().unwrap());
+        // LYH Studio episode 6: magenta on the left stop, cyan dropped at 68.636 %, a grey third.
+        let r = s
+            .execute(
+                "object.gradient",
+                &json!({"stops": [
+                    {"location": 0, "swatch": "C=0 M=100 Y=0 K=0"},
+                    {"location": 68.636, "swatch": "C=100 M=0 Y=0 K=0"},
+                    {"location": 100, "color": {"gray": 25}}
+                ]}),
+            )
+            .unwrap();
+        let d = &s.doc().unwrap().doc;
+        let g = designcraft_color::swatch::resolve_gradient(&d.swatches, r["swatch"].as_str().unwrap()).unwrap();
+        assert_eq!(d.item(id).unwrap().fill.swatch, r["swatch"].as_str().unwrap());
+        assert_eq!(g.stops[0].color, Color::cmyk(0.0, 1.0, 0.0, 0.0));
+        assert_eq!(g.stops[1].color, Color::cmyk(1.0, 0.0, 0.0, 0.0));
+        assert!((g.stops[1].offset - 0.68636).abs() < 1e-6);
+        assert_eq!(g.stops[2].color, Color::gray(0.25));
+        // Not a colour: refused, nothing changes.
+        for bad in ["[None]", "Missing", r["swatch"].as_str().unwrap()] {
+            let p = json!({"stops": [{"location": 0, "swatch": bad}, {"location": 100, "color": "#000000"}]});
+            assert!(s.execute("object.gradient", &p).is_err(), "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]
