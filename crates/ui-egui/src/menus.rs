@@ -181,6 +181,8 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("window.panel.dock", "Dock Panel", None, "{panel, anchor?, zone?, before?} — return a floating panel to a dock group"),
     ("window.panel.activate", "Activate Panel", None, "{panel} — show and select a panel in its current group"),
     ("window.panel.close", "Close Panel", None, "{panel} — hide a panel"),
+    ("window.panel.closeGroup", "Close Tab Group", None, "{panel} — hide the panel and the panels tabbed with it"),
+    ("window.collapseToIcons", "Collapse to Icons", None, "{} — the panel dock shrinks to its column of icons"),
     ("window.dockPanel", "Dock Panel", None, "{panel} — back into the dock's icon column"),
     ("window.controlBar", "Control", Some("Cmd+Alt+6"), "{}"),
     // Object › Fitting with InDesign's shortcuts (one `object.fit` mode each).
@@ -1557,6 +1559,11 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             Ok(json!({"url": url}))
         }
         "window.toolsDoubleColumn" => flag(&mut app.ui.tools_double_column),
+        "window.collapseToIcons" => {
+            app.ui.dock_expanded = false;
+            app.ui.open_panel = None;
+            Ok(Value::Null)
+        }
         "window.newWorkspace" => {
             let Some(name) = p.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
                 app.ui.dialog = Some(crate::dialogs::Dialog::new("newWorkspace", json!({"name": ""})));

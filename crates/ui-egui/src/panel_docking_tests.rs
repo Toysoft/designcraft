@@ -650,3 +650,56 @@ fn legacy_dock_menu_button_opens_the_active_panel_menu() {
     assert_eq!(h.state().session.active().unwrap().doc.page_count(), pages + 1);
     assert!(!egui::Popup::is_any_open(&h.ctx));
 }
+
+/// InDesign's panel tab menu (Learn Skills Daily's InDesign course, 6:20): Close, Close Tab Group,
+/// Minimize and Collapse to Icons. Close Tab Group hides the panels tabbed together.
+#[test]
+fn close_tab_group_hides_the_panels_tabbed_together() {
+    let mut app = app();
+    // The default dock: Properties, Pages and Layers are one tab group.
+    let r = app.run("window.panel.closeGroup", json!({"panel":"pages"})).unwrap();
+    assert_eq!(r["closed"], json!(["properties", "pages", "layers"]));
+    let layout = app.ui.docking.clone().unwrap();
+    assert!(["properties", "pages", "layers"].iter().all(|p| !layout.contains(&p.to_string())));
+    // Window brings one back.
+    app.run("window.panel.activate", json!({"panel":"pages"})).unwrap();
+    assert!(app.ui.docking.as_ref().unwrap().contains(&"pages".to_string()));
+    // A floating group goes as a whole; the dock keeps its own.
+    app.run("window.panel.float", json!({"panel":"swatches","x":40,"y":60})).unwrap();
+    app.run("window.panel.activate", json!({"panel":"color"})).unwrap();
+    app.run("window.panel.move", json!({"panel":"color", "anchor":"swatches"})).unwrap();
+    app.run("window.panel.closeGroup", json!({"panel":"color"})).unwrap();
+    let layout = app.ui.docking.clone().unwrap();
+    assert!(!layout.contains(&"color".to_string()) && !layout.contains(&"swatches".to_string()));
+    assert!(layout.contains(&"pages".to_string()));
+    assert!(app.run("window.panel.closeGroup", json!({"panel":"nope"})).is_err());
+}
+
+#[test]
+fn collapse_to_icons_shrinks_the_dock_to_its_icons() {
+    let mut app = app();
+    assert!(app.ui.dock_expanded);
+    app.run("window.collapseToIcons", json!({})).unwrap();
+    assert!(!app.ui.dock_expanded);
+    // A panel chosen from Window opens the dock again.
+    app.run("window.panel", json!({"panel":"pages"})).unwrap();
+    assert!(app.ui.dock_expanded);
+}
+
+#[test]
+fn a_tabs_context_menu_lists_indesigns_tab_commands_and_close_works() {
+    let mut h = harness(app(), vec2(1280.0, 800.0));
+    let tab = h.query_all_by_label("Layers").find(|node| node.rect().height() <= 45.0).unwrap().rect().center();
+    h.event(Event::PointerMoved(tab));
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: tab, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: tab, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    for item in ["Close", "Close Tab Group", "Minimize", "Collapse to Icons", "Float Panel"] {
+        assert!(h.query_by_label(item).is_some(), "{item}");
+    }
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(!h.state().ui.docking.as_ref().unwrap().contains(&"layers".to_string()));
+}

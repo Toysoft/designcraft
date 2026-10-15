@@ -69,6 +69,56 @@ fn legacy(app: &DesignApp) -> Layout<String> {
     layout
 }
 
+/// The panels tabbed with `panel`: its floating group, or its tab group in the dock. A panel in
+/// an accordion, or not in the layout, is a group of its own.
+fn tab_group(layout: &Layout<String>, panel: &str) -> Vec<String> {
+    if let Some(group) = layout.floating.iter().find(|g| g.panels.iter().any(|p| p == panel)) {
+        return group.panels.clone();
+    }
+    let mut visit: Vec<&Node<String>> = layout.root.iter().collect();
+    let mut seen = 0usize;
+    while let Some(node) = visit.pop() {
+        seen = seen.saturating_add(1);
+        if seen > 2 * craft_ui::docking::MAX_PANELS {
+            break;
+        }
+        match node {
+            Node::Split { first, second, .. } => {
+                visit.push(first);
+                visit.push(second);
+            }
+            Node::Tabs { panels, .. } if panels.iter().any(|p| p == panel) => return panels.clone(),
+            _ => {}
+        }
+    }
+    vec![panel.to_string()]
+}
+
+/// Is `panel` an open entry of an accordion (which Minimize closes)?
+fn open_in_stack(layout: &Layout<String>, panel: &str) -> bool {
+    let mut visit: Vec<&Node<String>> = layout.root.iter().collect();
+    let mut seen = 0usize;
+    while let Some(node) = visit.pop() {
+        seen = seen.saturating_add(1);
+        if seen > 2 * craft_ui::docking::MAX_PANELS {
+            break;
+        }
+        match node {
+            Node::Split { first, second, .. } => {
+                visit.push(first);
+                visit.push(second);
+            }
+            Node::Stack { entries } => {
+                if let Some(e) = entries.iter().find(|e| e.panel == panel) {
+                    return e.open;
+                }
+            }
+            Node::Tabs { .. } => {}
+        }
+    }
+    false
+}
+
 fn first_root(layout: &Layout<String>, except: &str) -> Option<String> {
     let root = Layout { root: layout.root.clone(), floating: Vec::new() };
     root.panels().into_iter().find(|p| p.as_str() != except).cloned()
@@ -115,6 +165,9 @@ pub(crate) fn command(app: &mut DesignApp, id: &str, params: &Value) -> Option<R
         let panel = "table".to_string();
         let visible = app.ui.docking.as_ref().is_some_and(|layout| layout.contains(&panel));
         return Some(change(app, if visible { "close" } else { "activate" }, &json!({"panel": panel})));
+    }
+    if id == "window.panel.closeGroup" {
+        return Some(close_group(app, params));
     }
     if id == "window.panel.layout" {
         return Some(
@@ -451,6 +504,8 @@ pub(crate) fn legacy_tab(app: &mut DesignApp, ui: &mut egui::Ui, panel: &str, re
 /// The docking commands of a panel: its tab's context menu and the end of its panel menu.
 pub(crate) fn panel_menu(app: &mut DesignApp, ui: &mut egui::Ui, panel: &str) {
     let Some(panel) = normalize(panel) else { return };
+    tab_commands(app, ui, panel, true);
+    ui.separator();
     let language = app.ui.language.clone();
     if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&language, "Float Panel"))).clicked() {
         if let Err(error) = app.run("window.panel.float", json!({"panel": panel})) {
@@ -486,11 +541,62 @@ impl craft_ui::docking::DockContent<String> for PanelContent<'_> {
                 .show(ui, |ui| crate::dock::panel_body(self.0, ui, id));
         });
     }
+    fn panel_menu(&mut self, ui: &mut egui::Ui, id: &String) {
+        // The docking surface adds Float, Group with and Close after these.
+        if let Some(panel) = normalize(id) {
+            tab_commands(self.0, ui, panel, false);
+            ui.separator();
+        }
+    }
     fn label(&mut self, ui: &egui::Ui, _: &String, logical: &str, font: &egui::FontId, color: egui::Color32) -> egui::WidgetText {
         egui::WidgetText::Galley(crate::rtl::plain(ui.ctx(), logical, font.clone(), color))
     }
     fn action_label(&mut self, ui: &egui::Ui, logical: &str, font: &egui::FontId, color: egui::Color32) -> egui::WidgetText {
         egui::WidgetText::Galley(crate::rtl::plain(ui.ctx(), logical, font.clone(), color))
+    }
+}
+
+/// Close Tab Group: `panel` and the panels tabbed with it, each restorable from Window as one
+/// closed with Close.
+fn close_group(app: &mut DesignApp, params: &Value) -> Result<Value, String> {
+    let panel = params.get("panel").and_then(Value::as_str).and_then(normalize).ok_or("panel must name a registered panel")?;
+    let layout = app.ui.docking.clone().unwrap_or_else(|| legacy(app));
+    let group = tab_group(&layout, panel);
+    for p in &group {
+        change(app, "close", &json!({"panel": p}))?;
+    }
+    Ok(json!({"closed": group}))
+}
+
+/// InDesign's commands on a panel tab (and at the end of its panel menu): Close, Close Tab Group,
+/// Minimize (an open accordion entry) and Collapse to Icons. `close` is false where the docking
+/// surface adds its own Close.
+fn tab_commands(app: &mut DesignApp, ui: &mut egui::Ui, panel: &'static str, close: bool) {
+    let language = app.ui.language.clone();
+    let tr = |s: &str| crate::i18n::tr(&language, s).to_owned();
+    let run = |app: &mut DesignApp, ui: &mut egui::Ui, id: &str, p: Value| {
+        if let Err(error) = app.run(id, p) {
+            app.status(error);
+        }
+        ui.close();
+    };
+    if close && ui.button(crate::rtl::widget(ui, tr("Close"))).clicked() {
+        run(app, ui, "window.panel.close", json!({"panel": panel}));
+    }
+    if ui.button(crate::rtl::widget(ui, tr("Close Tab Group"))).clicked() {
+        run(app, ui, "window.panel.closeGroup", json!({"panel": panel}));
+    }
+    let layout = app.ui.docking.clone().unwrap_or_else(|| legacy(app));
+    let minimizable = open_in_stack(&layout, panel);
+    if ui.add_enabled(minimizable, egui::Button::new(crate::rtl::widget(ui, tr("Minimize")))).clicked() {
+        if let Err(error) = apply_action(app, Action::SetStackOpen { panel: panel.to_string(), open: false }) {
+            app.status(error);
+        }
+        ui.close();
+    }
+    ui.separator();
+    if ui.add_enabled(app.ui.dock_expanded, egui::Button::new(crate::rtl::widget(ui, tr("Collapse to Icons")))).clicked() {
+        run(app, ui, "window.collapseToIcons", json!({}));
     }
 }
 
