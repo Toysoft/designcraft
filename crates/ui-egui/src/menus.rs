@@ -788,6 +788,7 @@ pub const MENUS: &[(&str, &[&str])] = &[
             "<",
             ">Utilities",
             "ui:window.panel|Book|{\"panel\": \"book\"}",
+            "ui:window.panel|Craft AI|{\"panel\": \"craftAi\"}",
             "ui:window.panel|Data Merge|{\"panel\": \"dataMerge\"}",
             "ui:window.panel|Library|{\"panel\": \"library\"}",
             "ui:window.panel|Scripts|{\"panel\": \"scripts\"}",

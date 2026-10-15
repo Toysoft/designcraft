@@ -47,6 +47,7 @@ pub const ICON_PANELS: &[(&str, &str, &str)] = &[
     ("trackChanges", "Track Changes", "panel-articles"),
     ("scripts", "Scripts", "panel-library"),
     ("dataMerge", "Data Merge", "panel-datamerge"),
+    ("craftAi", "Craft AI", "panel-craft-ai"),
 ];
 
 pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
@@ -282,6 +283,7 @@ pub fn panel_body(app: &mut DesignApp, ui: &mut egui::Ui, id: &str) {
         "scripts" => panels::library::scripts(app, ui),
         "dataMerge" => panels::datamerge::show(app, ui),
         "table" => panels::table::show(app, ui),
+        "craftAi" => panels::craft_ai::show(app, ui),
         _ => panels::properties::info_panel(app, ui),
     }
 }

@@ -1,6 +1,7 @@
 //! Panels and shared panel helpers.
 
 pub mod conditions;
+pub mod craft_ai;
 pub mod datamerge;
 pub mod glyphs;
 pub mod interactive;

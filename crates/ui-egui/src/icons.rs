@@ -853,6 +853,11 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32) {
             pen.line(&[(13.5, 10.0), (11.5, 13.5), (13.5, 13.5)]);
             pen.line(&[(9.2, 15.0), (11.0, 9.0)]);
         }
+        "panel-craft-ai" => {
+            // A four-point sparkle: the assistant's mark.
+            pen.closed(&[(10.0, 2.0), (11.8, 8.2), (18.0, 10.0), (11.8, 11.8), (10.0, 18.0), (8.2, 11.8), (2.0, 10.0), (8.2, 8.2)]);
+            pen.fcircle(15.5, 4.5, 1.0);
+        }
         "screen-mode" => {
             pen.rect(3.0, 4.0, 17.0, 16.0);
             pen.line(&[(3.0, 7.0), (17.0, 7.0)]);
