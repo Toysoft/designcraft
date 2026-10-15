@@ -109,6 +109,8 @@ pub fn import(bytes: &[u8]) -> Result<Imported, ImportError> {
                 if stack.len() > 1 {
                     stack.pop();
                 }
+                // The `\uN` fallback skip ends with the group.
+                pending = 0;
                 fmt = stack.last().map(State::format).unwrap_or_default();
                 i += 1;
             }
@@ -306,5 +308,13 @@ Caf\'e9 \u8364? price\tab tab\line next\par
         assert_eq!(import(crate::export::rtf(&doc, &st).as_bytes()).unwrap().story.text, st.text);
         // Half a pair is not a character: it is still left out.
         assert_eq!(import(br"{\rtf1 A\u-10179?B\u-8704?C}").unwrap().story.text, "ABC");
+    }
+
+    /// A `\uN` at the end of a group has no fallback character inside it. The skip count must
+    /// end with the group, not eat the text after it.
+    #[test]
+    fn unicode_fallback_skip_ends_with_group() {
+        assert_eq!(import(br"{\rtf1 {\b \u8364} AB}").unwrap().story.text, "\u{20AC} AB");
+        assert_eq!(import(br"{\rtf1 {\uc2\b \u8364} ABC}").unwrap().story.text, "\u{20AC} ABC");
     }
 }
