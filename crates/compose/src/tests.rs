@@ -63,6 +63,37 @@ fn justified_lines_fill_the_measure() {
     assert!(last.end_x < last.x1 - 1.0, "last line is ragged");
 }
 
+/// A justified line squeezes its word spaces past the 80% minimum (down to 60%) rather than leave
+/// a long word for the next line and gape: InDesign breaks the limit that costs less.
+#[test]
+fn justified_line_squeezes_past_the_minimum_rather_than_gaping() {
+    let text = "Aaaa bbbb cccc dddd Wwwwwwwwwwwwwwwwww eee";
+    // Natural word widths and the space, from one unjustified line.
+    let (d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 2000.0, 100.0), ParaAttrs::default());
+    let line = all_lines(&compose_story(&d, sid, &ComposeOptions::default()))[0].clone();
+    let space = line.glyphs.iter().find(|g| text[g.byte..].starts_with(' ')).unwrap().adv;
+    let end_of = |w: &str| {
+        let at = text.find(w).unwrap() + w.len();
+        line.glyphs.iter().filter(|g| g.byte < at).map(|g| g.x + g.adv).fold(0.0, f64::max)
+    };
+    // The first five words fit with their four spaces at 70%.
+    let words = end_of("Wwwwwwwwwwwwwwwwww") - 4.0 * space;
+    let measure = words + 4.0 * space * 0.7;
+    let para = ParaAttrs { align: Some(Align::LeftJustified), ..Default::default() };
+    let (d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, measure, 100.0), para.clone());
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let first = &all_lines(&cs)[0];
+    assert!(first.range.end >= text.find(" eee").unwrap(), "the long word stays on the first line: {:?}", first.range);
+    let gaps: Vec<f64> = first.glyphs.windows(2).filter(|w| text[w[0].byte..].starts_with(' ')).map(|w| w[1].x - w[0].x).collect();
+    for g in &gaps {
+        assert!(*g > space * 0.6 - 0.01 && *g < space * 0.8, "a squeezed space {g} of {space}");
+    }
+    // Room for less than 60%: the word goes to the next line after all.
+    let (d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, words + 4.0 * space * 0.5, 100.0), para);
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    assert!(all_lines(&cs)[0].range.end <= text.find("Wwww").unwrap());
+}
+
 /// A combining mark in a colour of its own still sits on its base letter (the runs shape as one)
 /// and keeps its colour: colour-coded texts put single vowel marks in their own colour.
 #[test]
@@ -1804,8 +1835,15 @@ fn check_kashida_justification(db: &FontDb, require_fallback: bool) {
     let mut d = Document::new(&designcraft_doc::build::NewDocument::default());
     let lid = d.default_layer();
     let text = "بسم الله الرحمن الرحيم الحمد لله رب العالمين الرحمن الرحيم مالك يوم الدين اياك نعبد واياك نستعين";
+    // No shrink range: with or without kashidas the lines break alike (neither may squeeze the
+    // word spaces), so the first lines compare the stretch.
     let pf = ParaFormat {
-        para: ParaAttrs { align: Some(Align::RightJustified), direction: Some(designcraft_doc::TextDirection::RightToLeft), ..Default::default() },
+        para: ParaAttrs {
+            align: Some(Align::RightJustified),
+            direction: Some(designcraft_doc::TextDirection::RightToLeft),
+            word_space_min: Some(1.0),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let (_, sid) = d.add_text_frame(SpreadRef::Doc(0), Rect::new(100.0, 100.0, 260.0, 400.0), lid, text, pf).unwrap();

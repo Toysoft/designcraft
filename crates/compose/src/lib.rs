@@ -793,7 +793,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
             let cols_here = &cols[cur.fi];
             let col = span_rect(cols_here, cols_here[cur.col.min(cols_here.len() - 1)], pp.span_columns);
             let col = SplitCfg::of(&pp).map_or(col, |c| c.sub_rect(col, 0));
-            let spacing = spacing_for(&pp, base_chars.size);
+            let spacing = paragraph_spacing(&pp, base_chars.size, &sp.glyphs);
             let mut lines: Vec<(std::ops::Range<usize>, String)> = Vec::new();
             for _ in 0..3 {
                 // The same drop cap, spacing, hyphenation and breaker as the layout below.
@@ -908,7 +908,7 @@ fn compose_with_db(doc: &Document, story: &Story, frames: &[FrameSpec], opts: &C
         apply_desired_spacing(&mut glyphs, &pp);
         let hyph_after = hyphenation_points(&story.text, &glyphs, &pp, &hyph_exceptions, &foreign_ranges(doc, story, prange.clone(), &base_chars));
         let base_size = base_chars.size;
-        let spacing = spacing_for(&pp, base_size);
+        let spacing = paragraph_spacing(&pp, base_size, &glyphs);
         // A paragraph set across the columns moves on to the next frame where others move on to
         // the next column.
         let spanning = matches!(pp.span_columns, SpanColumns::Span(n) if n != 1);
@@ -1682,7 +1682,18 @@ fn spacing_for(pp: &ParaProps, base_size: f64) -> Spacing {
         hyph_zone: if pp.align.is_justified() || pp.composer != Composer::SingleLine { 0.0 } else { pp.hyph_zone },
         optical: pp.optical_margin,
         korean_char_breaks: pp.korean_char_breaks,
+        overshrink: true,
     }
+}
+
+/// [`spacing_for`] a paragraph with its glyphs: no shrinking past the word-space minimum where
+/// kashidas will justify the Arabic (see [`Spacing::overshrink`]).
+fn paragraph_spacing(pp: &ParaProps, base_size: f64, glyphs: &[Glyph]) -> Spacing {
+    let mut sp = spacing_for(pp, base_size);
+    if sp.justify && pp.kashidas && pp.arabic_justification != "DefaultJustification" && !kashida_points(glyphs).is_empty() {
+        sp.overshrink = false;
+    }
+    sp
 }
 
 /// Desired word spacing, letter spacing and glyph scaling apply to every line (any alignment).
@@ -2959,12 +2970,17 @@ fn distribute(line: &[Glyph], spaces: &[usize], extra: f64, sp: &Spacing, add: &
     let tg = rem.min(yg);
     rem -= tg;
     let sign = if stretch { 1.0 } else { -1.0 };
-    // Stretch left over beyond every limit is shared equally by the word spaces; shrink never goes
-    // past the minimums (that would overlap glyphs), so an overfull line stays overfull.
+    // Stretch left over beyond every limit is shared equally by the word spaces. Shrink left over
+    // goes on shrinking the word spaces, in proportion to their width, down to the floor the
+    // composer allows ([`breaker::overshrink_units`]); past that an overfull line stays overfull.
     let over = if stretch && !spaces.is_empty() { rem / spaces.len() as f64 } else { 0.0 };
+    let units = breaker::overshrink_units(sp);
+    let deeper: f64 = if stretch || rem <= 1e-9 { 0.0 } else { word.iter().sum::<f64>() * units };
+    let squeeze = if deeper > 1e-9 { rem.min(deeper) } else { 0.0 };
     for (k, &i) in spaces.iter().enumerate() {
         let share = if yw > 1e-9 { tw * word[k] / yw } else { 0.0 };
-        add[i] += sign * share + over;
+        let deep = if deeper > 1e-9 { squeeze * word[k] * units / deeper } else { 0.0 };
+        add[i] += sign * (share + deep) + over;
     }
     if yl > 1e-9 && tl > 0.0 {
         for (i, l) in letter.iter().enumerate() {
