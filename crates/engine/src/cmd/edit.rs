@@ -67,7 +67,7 @@ fn paste_text(s: &mut Session, text: Option<String>, formatted: bool) -> Result<
         }
     }
     let use_clip = formatted && clip.as_ref().is_some_and(|(_, p)| text.as_ref().is_none_or(|x| x.replace("\r\n", "\n") == *p));
-    // Footnotes, cross-references and tables only paste into story text, not cells or footnotes.
+    // Footnotes, endnotes, editorial notes, cross-references and tables cannot be pasted into cells or footnotes.
     if use_clip && let Some((slice, _)) = clip {
         let slice = if t.cell.is_some() { strip_objects(&slice) } else { (*slice).clone() };
         return s.edit(|d, sel| {
@@ -152,7 +152,13 @@ fn paste_text_frame(s: &mut Session, p: &Value, text: &str, slice: Option<&desig
 
 fn strip_objects(st: &designcraft_doc::Story) -> designcraft_doc::Story {
     let mut out = st.clone();
-    let marks = [designcraft_doc::FOOTNOTE_REF, designcraft_doc::XREF_MARK, designcraft_doc::TABLE_ANCHOR];
+    let marks = [
+        designcraft_doc::FOOTNOTE_REF,
+        designcraft_doc::ENDNOTE_REF,
+        designcraft_doc::NOTE_MARK,
+        designcraft_doc::XREF_MARK,
+        designcraft_doc::TABLE_ANCHOR,
+    ];
     while let Some(i) = out.text.find(marks) {
         let n = out.text[i..].chars().next().map_or(1, char::len_utf8);
         out.delete(i..i + n);
@@ -251,11 +257,20 @@ pub fn specs() -> Vec<CommandSpec> {
                 return super::text::delete_selection(s);
             }
             let ids = super::targets(s, p)?;
+            // With a placed graphic itself selected (Direct Selection), only the graphic goes: its
+            // frame stays, empty and selected (as in InDesign). Other items are deleted.
+            let content = s.doc()?.selection.content && p.get("ids").is_none();
             s.edit(|d, sel| {
+                let mut kept = Vec::new();
                 for id in &ids {
-                    let _ = d.remove_item(*id);
+                    if let Some(it) = d.item_mut(*id).filter(|it| content && matches!(it.content, designcraft_doc::Content::Graphic(_))) {
+                        it.content = designcraft_doc::Content::Unassigned;
+                        kept.push(*id);
+                    } else {
+                        let _ = d.remove_item(*id);
+                    }
                 }
-                *sel = Selection::default();
+                *sel = Selection::items(kept);
                 Ok(json!({"deleted": ids.len()}))
             })
         }),
@@ -335,12 +350,15 @@ pub(crate) fn clip_doc(s: &Session) -> Result<designcraft_doc::Document> {
     let st = s.doc()?;
     let mut d = (*st.doc).clone();
     let keep: Vec<ItemId> = st.selection.items.clone();
-    // Gather the selected items (keep their spread coordinates) into spread 0.
+    // Gather the selected items (in their spread coordinates, nested ones too) into spread 0.
     let mut items = Vec::new();
     for id in &keep {
-        if let Some(it) = st.doc.item(*id) {
-            items.push(Arc::new(it.clone()));
-        }
+        let (Some(it), Some(loc)) = (st.doc.item(*id), st.doc.find(*id)) else { continue };
+        let parent = st.doc.parent_xf(&loc);
+        items.push(Arc::new(match &it.content {
+            designcraft_doc::Content::Graphic(g) if st.selection.content => graphic_alone(it, g, parent),
+            _ => designcraft_doc::Item { xf: parent * it.xf, ..it.clone() },
+        }));
     }
     for sp in d.spreads.iter_mut() {
         Arc::make_mut(sp).items.clear();
@@ -374,6 +392,22 @@ pub(crate) fn clip_doc(s: &Session) -> Result<designcraft_doc::Document> {
     d.hyperlinks.clear();
     d.bookmarks.clear();
     Ok(d)
+}
+
+/// A placed graphic on its own, as InDesign copies one selected with Direct Selection: a frame of
+/// the whole graphic's bounds (uncropped), where the graphic sits on the spread (`parent` is the
+/// frame's parent transform), without the frame's fill, stroke or effects.
+fn graphic_alone(frame: &designcraft_doc::Item, g: &designcraft_doc::Graphic, parent: designcraft_geom::Affine) -> designcraft_doc::Item {
+    let r = designcraft_geom::Rect::new(0.0, 0.0, g.size.0, g.size.1);
+    let mut it = designcraft_doc::Item::new(frame.id, frame.layer, designcraft_doc::Shape::Rectangle, designcraft_geom::shapes::rectangle(r));
+    it.xf = parent * frame.xf * g.xf;
+    it.content = designcraft_doc::Content::Graphic(designcraft_doc::Graphic {
+        xf: designcraft_geom::Affine::IDENTITY,
+        auto_fit: designcraft_doc::Fitting::None,
+        crop: [0.0; 4],
+        ..g.clone()
+    });
+    it
 }
 
 #[cfg(test)]
@@ -505,6 +539,124 @@ mod text_clipboard_tests {
         s.doc().unwrap().doc.check().unwrap();
     }
 
+    fn note_clipboard_session() -> (Session, designcraft_doc::StoryId) {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let source = frame(&mut s, "aéz");
+        s.execute("text.select", &json!({"story": source.0, "anchor": 1, "focus": 1})).unwrap();
+        s.execute("endnote.insert", &json!({"text": "Citation A"})).unwrap();
+        s.execute("note.new", &json!({"text": "Memo A", "author": "Ed"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(source).unwrap().text, "a\u{E00F}\u{E010}éz");
+        s.execute("text.select", &json!({"story": source.0, "anchor": 0, "focus": 10})).unwrap();
+        s.execute("type.char", &json!({"attrs": {"fontStyle": "Bold"}})).unwrap();
+        assert_eq!(s.execute("edit.copy", &json!({})).unwrap(), json!({"text": "aéz"}));
+        (s, source)
+    }
+
+    fn assert_child_note_paste(
+        s: &mut Session,
+        source: designcraft_doc::StoryId,
+        parent: designcraft_doc::StoryId,
+        cell: designcraft_doc::CellAddr,
+        endpoints: (usize, usize),
+    ) {
+        let before = s.doc().unwrap().doc.clone();
+        let selected = s.doc().unwrap().selection.text.unwrap();
+        assert_eq!((selected.story, selected.cell, selected.anchor, selected.focus), (parent, Some(cell), endpoints.0, endpoints.1));
+        assert_eq!(selected.frame, None);
+        let before_child = before.text_story(parent, Some(cell)).unwrap();
+        assert_eq!(before_child.text, "L----R");
+        let clipboard = s.text_clipboard.clone();
+        let history = s.execute("document.history", &json!({})).unwrap();
+        assert_eq!(history["redo"], json!([]));
+
+        let result = s.execute("edit.paste", &json!({})).unwrap();
+        let after = s.doc().unwrap().doc.clone();
+        let child = after.text_story(parent, Some(cell)).unwrap();
+        assert_eq!(child.text, "LaézR", "root-only note markers must not enter child text");
+        assert_eq!(child.len(), 6);
+        assert_eq!(result, json!({"pos": 5, "formatted": true}));
+        assert_eq!(s.doc().unwrap().selection, Selection::text(designcraft_doc::TextSel { anchor: 5, focus: 5, ..selected }));
+        assert!(child.endnotes.is_empty() && child.editorial.is_empty());
+        for pos in [1, 2, 4] {
+            let (_, format) = child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            assert_eq!(format.over.font_style.as_deref(), Some("Bold"));
+        }
+        // Inspect actual run coverage: char_format_at at a run boundary means the preceding run.
+        for pos in [0, 5] {
+            let (_, old_format) = before_child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            let (_, new_format) = child.runs().find(|(range, _)| range.contains(&pos)).unwrap();
+            assert_eq!(new_format, old_format);
+        }
+        assert_eq!(after.story(parent).unwrap().text, before.story(parent).unwrap().text);
+        assert_eq!(after.story(parent).unwrap().chars, before.story(parent).unwrap().chars);
+        assert_eq!(after.story(source), before.story(source));
+        assert_eq!(s.text_clipboard, clipboard);
+
+        let mut pasted_history = history.clone();
+        pasted_history["undo"].as_array_mut().unwrap().push(json!("Paste"));
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), pasted_history);
+        assert_eq!(s.execute("edit.undo", &json!({})).unwrap(), json!({"undone": "Paste"}));
+        assert_eq!(s.doc().unwrap().doc, before);
+        let mut undone_history = history;
+        undone_history["redo"] = json!(["Paste"]);
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), undone_history);
+        // This filter does not change which selection Undo restores.
+        assert_eq!(s.execute("edit.redo", &json!({})).unwrap(), json!({"redone": "Paste"}));
+        assert_eq!(s.doc().unwrap().doc, after);
+        assert_eq!(s.execute("document.history", &json!({})).unwrap(), pasted_history);
+    }
+
+    #[test]
+    fn formatted_child_paste_filters_endnotes_and_editorial_in_cells() {
+        let (mut s, source) = note_clipboard_session();
+        let parent = frame(&mut s, "PZ");
+        s.execute("text.select", &json!({"story": parent.0, "anchor": 1, "focus": 1})).unwrap();
+        let table_id = s.execute("table.insert", &json!({"rows": 1, "cols": 2})).unwrap()["table"].as_u64().unwrap();
+        s.execute("text.insert", &json!({"text": "L----R"})).unwrap();
+        s.execute("table.nextCell", &json!({})).unwrap();
+        s.execute("text.insert", &json!({"text": "NEIGHBOR"})).unwrap();
+        s.execute("table.prevCell", &json!({})).unwrap();
+        s.execute("text.move", &json!({"dir": "storyStart"})).unwrap();
+        s.execute("text.move", &json!({"dir": "right"})).unwrap();
+        for _ in 0..4 {
+            s.execute("text.move", &json!({"dir": "right", "extend": true})).unwrap();
+        }
+        let before_table = s.doc().unwrap().doc.story(parent).unwrap().tables[&table_id].clone();
+        let cell = designcraft_doc::CellAddr { table: table_id, row: 0, col: 0 };
+        assert_child_note_paste(&mut s, source, parent, cell, (1, 5));
+        let table = &s.doc().unwrap().doc.story(parent).unwrap().tables[&table_id];
+        assert_eq!(table.cell(0, 1).unwrap().text.text, "NEIGHBOR");
+        let mut expected_table = (*before_table).clone();
+        expected_table.cells[0].text = table.cells[0].text.clone();
+        assert_eq!(table.as_ref(), &expected_table);
+
+        // The same clipboard must still retain both markers when pasted into an ordinary root story.
+        let root = frame(&mut s, "L----R");
+        s.execute("text.select", &json!({"story": root.0, "anchor": 1, "focus": 5})).unwrap();
+        assert_eq!(s.execute("edit.paste", &json!({})).unwrap(), json!({"pos": 11, "formatted": true}));
+        assert_eq!(s.doc().unwrap().doc.story(root).unwrap().text, "La\u{E00F}\u{E010}ézR");
+    }
+
+    #[test]
+    fn formatted_child_paste_filters_endnotes_and_editorial_in_footnotes() {
+        let (mut s, source) = note_clipboard_session();
+        let parent = frame(&mut s, "PZ");
+        let neighbor = s.execute("footnote.insert", &json!({"text": "NEIGHBOR"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("text.select", &json!({"story": parent.0, "anchor": 1, "focus": 1})).unwrap();
+        let target = s.execute("footnote.insert", &json!({"text": "L----R"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("text.move", &json!({"dir": "left"})).unwrap();
+        for _ in 0..4 {
+            s.execute("text.move", &json!({"dir": "left", "extend": true})).unwrap();
+        }
+        let before = s.doc().unwrap().doc.story(parent).unwrap().clone();
+        assert_child_note_paste(&mut s, source, parent, designcraft_doc::CellAddr::footnote(target), (5, 1));
+        let after = s.doc().unwrap().doc.story(parent).unwrap();
+        assert_eq!(after.note(neighbor).unwrap().text.text, "NEIGHBOR");
+        assert_eq!(after.note(neighbor), before.note(neighbor));
+        assert_eq!(after.notes.iter().map(|note| note.id).collect::<Vec<_>>(), before.notes.iter().map(|note| note.id).collect::<Vec<_>>());
+    }
+
     #[test]
     fn change_case_keeps_runs() {
         let mut s = Session::new();
@@ -524,6 +676,22 @@ mod text_clipboard_tests {
         assert_eq!(st.char_format_at(5).over.font_style.as_deref(), Some("Italic"));
         assert_eq!(s.doc().unwrap().selection.text.unwrap().range(), 0..st.len());
         st.check().unwrap();
+    }
+
+    #[test]
+    fn change_case_leaves_georgian_without_initial_capitals() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let a = frame(&mut s, "ᲒᲐᲛᲐᲠᲯᲝᲑᲐ ᲛᲡᲝᲤᲚᲘᲝ. ᲐᲮᲐᲚᲘ word");
+        let len = s.doc().unwrap().doc.story(a).unwrap().len();
+        s.execute("text.select", &json!({"story": a.0, "anchor": 0, "focus": len})).unwrap();
+        // Georgian has no title or sentence capitals: Mtavruli is only for all-caps text.
+        s.execute("type.changeCase", &json!({"case": "title"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(a).unwrap().text, "გამარჯობა მსოფლიო. ახალი Word");
+        s.execute("type.changeCase", &json!({"case": "sentence"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(a).unwrap().text, "გამარჯობა მსოფლიო. ახალი word");
+        s.execute("type.changeCase", &json!({"case": "upper"})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.story(a).unwrap().text, "ᲒᲐᲛᲐᲠᲯᲝᲑᲐ ᲛᲡᲝᲤᲚᲘᲝ. ᲐᲮᲐᲚᲘ WORD");
     }
 }
 
@@ -603,5 +771,45 @@ mod paste_into_tests {
         assert!(img.pixel(200, 200)[0] < 90, "{:?}", img.pixel(200, 200));
         assert!(img.pixel(120, 120)[0] > 200, "{:?}", img.pixel(120, 120));
         s.doc().unwrap().doc.check().unwrap();
+    }
+
+    #[test]
+    fn a_selected_graphic_copies_and_clears_on_its_own() {
+        let dir = std::env::temp_dir().join(format!("dc-graphic-alone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("photo.png");
+        std::fs::write(&png, designcraft_render::Rendered { width: 200, height: 100, pixels: vec![40u8; 200 * 100 * 4] }.to_png()).unwrap();
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        // A square frame showing the middle of a wide photo (cropped left and right).
+        let frame = s.execute("frame.create", &json!({"rect": [100, 100, 200, 200]})).unwrap()["id"].as_u64().unwrap();
+        s.execute("file.place", &json!({"path": png.to_string_lossy(), "frame": frame})).unwrap();
+        s.execute("object.fit", &json!({"mode": "fillProportionally", "ids": [frame]})).unwrap();
+        s.execute("object.stroke", &json!({"ids": [frame], "swatch": "[Black]", "weight": 4})).unwrap();
+        // Direct Selection on the photo, Copy: the whole photo, where it is, without the frame's stroke.
+        s.execute("selection.set", &json!({"ids": [frame], "content": true})).unwrap();
+        s.execute("edit.copy", &json!({})).unwrap();
+        let clip = s.clipboard.clone().unwrap();
+        let it = &clip.spreads[0].items[0];
+        assert!(matches!(&it.content, designcraft_doc::Content::Graphic(g) if g.crop == [0.0; 4]));
+        assert_eq!(it.bounds(), designcraft_geom::Rect::new(50.0, 100.0, 250.0, 200.0));
+        assert!(it.stroke.weight == 0.0 || it.stroke.swatch == "[None]", "{:?}", it.stroke);
+        // Paste Into a shape over it: the photo lands in place, inside the shape.
+        let shape = s.execute("frame.create", &json!({"rect": [60, 90, 240, 210], "shape": "ellipse"})).unwrap()["id"].as_u64().unwrap();
+        s.execute("selection.set", &json!({"ids": [shape]})).unwrap();
+        s.execute("edit.pasteInto", &json!({})).unwrap();
+        let d = s.doc().unwrap().doc.clone();
+        let kid = d.item(ItemId(shape)).unwrap().children()[0].clone();
+        let at = d.parent_xf(&d.find(kid.id).unwrap()) * kid.xf;
+        assert!((at * designcraft_geom::Point::new(0.0, 0.0) - designcraft_geom::Point::new(50.0, 100.0)).hypot() < 1e-6);
+        assert!((at * designcraft_geom::Point::new(200.0, 100.0) - designcraft_geom::Point::new(250.0, 200.0)).hypot() < 1e-6);
+        // Delete with the photo selected: the frame stays, empty.
+        s.execute("selection.set", &json!({"ids": [frame], "content": true})).unwrap();
+        assert_eq!(s.execute("edit.clear", &json!({})).unwrap()["deleted"], 1);
+        let d = s.doc().unwrap().doc.clone();
+        assert!(matches!(d.item(ItemId(frame)).unwrap().content, designcraft_doc::Content::Unassigned));
+        assert_eq!(s.doc().unwrap().selection, Selection::items(vec![ItemId(frame)]));
+        d.check().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

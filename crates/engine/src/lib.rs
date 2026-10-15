@@ -11,7 +11,9 @@
 pub mod atomic;
 pub mod cmd;
 pub mod dtd;
+pub mod file_access;
 pub mod guard;
+pub mod io;
 pub mod links;
 pub mod math;
 pub mod recovery;
@@ -110,6 +112,16 @@ pub struct DocState {
 #[derive(Debug)]
 pub struct FontScope(pub u32);
 
+/// A graphic loaded in the place cursor (`place.load`, File › Place with no frame to fill).
+#[derive(Clone, Copy, Debug)]
+pub struct LoadedGraphic {
+    pub asset: designcraft_doc::AssetId,
+    /// Natural size in points.
+    pub size: (f64, f64),
+    /// Image Import Options › Crop to: the box of the graphic a new frame shows (x, y, w, h).
+    pub crop: Option<(f64, f64, f64, f64)>,
+}
+
 impl Drop for FontScope {
     fn drop(&mut self) {
         designcraft_fonts::FontDb::global().close_scope(self.0);
@@ -201,6 +213,9 @@ pub struct Prefs {
     pub show_note_anchors: bool,
     /// Preferences › File Handling: minutes between document recovery saves.
     pub recovery_minutes: f64,
+    /// Preferences › File Handling › Create Links When Placing Text Files: placed text files are
+    /// linked (Links panel) unless `file.place` says otherwise.
+    pub link_text_files: bool,
 }
 
 /// A starter autocorrect list (common English typing slips).
@@ -249,6 +264,7 @@ impl Default for Prefs {
             show_added_text: true,
             show_note_anchors: true,
             recovery_minutes: 0.5,
+            link_text_files: false,
         }
     }
 }
@@ -260,6 +276,7 @@ pub struct Session {
     pub cache: Arc<Cache>,
     pub(crate) tool: Box<dyn designcraft_tools::Tool>,
     pub journal: Vec<(String, Value)>,
+    pub(crate) find_context: Option<cmd::find::FindContext>,
     pub clipboard: Option<Arc<Document>>,
     /// Crash-recovery folder (the app sets it; saving or closing a document removes its entry).
     pub recovery_dir: Option<std::path::PathBuf>,
@@ -267,8 +284,8 @@ pub struct Session {
     pub text_clipboard: Option<(Arc<designcraft_doc::Story>, String)>,
     /// Requests for the UI (dialogs, view changes) produced by tools/commands.
     pub ui_requests: Vec<UiRequest>,
-    /// Graphic loaded in the place cursor: (asset, natural size in points).
-    pub loaded: Option<(designcraft_doc::AssetId, (f64, f64))>,
+    /// Graphic loaded in the place cursor.
+    pub loaded: Option<LoadedGraphic>,
     pub(crate) untitled: u32,
     /// Transforms applied to the current selection, oldest first (Transform Again / Sequence
     /// Again), with the selection they were applied to and whether the last one came from a
@@ -278,12 +295,18 @@ pub struct Session {
     pub(crate) text_drag: bool,
     /// Character formatting chosen at a bare caret, for the text typed there next.
     pub(crate) typing_format: Option<cmd::text::TypingFormat>,
+    /// Text an input method is composing (a dead key's accent), shown in the story as an
+    /// interaction preview until it commits: (document uid, byte length before the caret).
+    pub(crate) composition: Option<(u64, usize)>,
     /// The open Object Library (File › New / Open Library).
     pub library: Option<cmd::library::Library>,
     /// The open book (File › Open Book).
     pub book: Option<cmd::book::Book>,
     /// Content Collector conveyor: collected objects as snippets (name, bytes).
     pub conveyor: Vec<(String, Vec<u8>)>,
+    /// Linked text files checked by the Links panel: path → the size and modification time the
+    /// file had and the hash of its contents then, so a file touched but not changed is read once.
+    pub(crate) text_link_checks: std::collections::HashMap<String, (designcraft_doc::Fingerprint, String)>,
 }
 
 impl Default for Session {
@@ -302,14 +325,17 @@ impl Session {
             cache: Arc::new(Cache::new()),
             tool: designcraft_tools::create("selection"),
             journal: vec![],
+            find_context: None,
             clipboard: None,
             recovery_dir: None,
             text_clipboard: None,
+            text_link_checks: Default::default(),
             ui_requests: vec![],
             loaded: None,
             transforms: Default::default(),
             text_drag: false,
             typing_format: None,
+            composition: None,
             library: None,
             conveyor: Vec::new(),
             book: None,
@@ -361,13 +387,26 @@ impl Session {
     pub fn doc_mut(&mut self) -> Result<&mut DocState> {
         self.active_mut().ok_or(EngineError::NoDocument)
     }
+    /// Release the transient Find/Change domain when its caller starts or closes a search.
+    pub fn reset_find_scope(&mut self) {
+        self.find_context = None;
+    }
+
+    fn discard_stale_find_scope(&mut self) {
+        if self.find_context.as_ref().is_some_and(|c| self.active().is_none_or(|st| !c.is_current(st))) {
+            self.reset_find_scope();
+        }
+    }
+
     pub fn set_active(&mut self, i: usize) {
         if i < self.docs.len() && self.active != Some(i) {
+            self.reset_find_scope();
             self.stop_data_preview();
             self.active = Some(i);
         }
     }
     pub fn add_document(&mut self, d: DocState) -> usize {
+        self.reset_find_scope();
         self.stop_data_preview();
         self.docs.push(d);
         self.active = Some(self.docs.len() - 1);
@@ -391,6 +430,7 @@ impl Session {
             recovery::discard_document(self, i, recovery_dir.as_deref());
         }
         if i < self.docs.len() {
+            self.reset_find_scope();
             self.docs.remove(i);
             self.active = if self.docs.is_empty() { None } else { Some(i.min(self.docs.len() - 1)) };
         }
@@ -405,6 +445,10 @@ impl Session {
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.into()))?;
+        // Text still being composed isn't part of the story: any other edit drops it first.
+        if id != "text.compose" && (spec.undoable || spec.journal) {
+            self.end_composition();
+        }
         if let Err(e) = (spec.enabled)(self) {
             // A command that takes `ids` acts on the objects the call names, so it needs no
             // selection: with a text caret or nothing selected, `{"ids": [5]}` still runs.
@@ -421,6 +465,8 @@ impl Session {
         if id != "data.preview" && (spec.undoable || spec.journal) {
             self.stop_data_preview();
         }
+        // Preview restoration can replace the document before a Find handler resolves bounds.
+        self.discard_stale_find_scope();
         let before = self.active().map(|d| (d.uid, d.doc.clone()));
         let r = (spec.run)(self, params)?;
         // Undo, redo or deleting layers can take the active layer away: new objects would land on
@@ -458,6 +504,7 @@ impl Session {
         if spec.journal {
             self.journal.push((id.to_string(), params.clone()));
         }
+        self.discard_stale_find_scope();
         Ok(r)
     }
 
@@ -541,10 +588,12 @@ impl Session {
         let mut sel = st.selection.clone();
         let r = f(&mut doc, &mut sel)?;
         crate::cmd::sync_placeholders(&mut doc);
+        crate::cmd::flex::sync(&mut doc);
         doc.sync_endnote_story();
         st.doc = Arc::new(doc);
         st.selection = sel;
         st.revision += 1;
+        self.reset_find_scope();
         Ok(r)
     }
 }
@@ -562,7 +611,11 @@ pub(crate) use push_undo as record_undo;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_file_guard;
+#[cfg(test)]
 mod tests_idml;
+#[cfg(test)]
+mod tests_roots;
 #[cfg(test)]
 mod tests_table;
 
@@ -612,7 +665,7 @@ mod resize_anchor_tests {
             let before = s.doc().unwrap().doc.clone();
             let undo = s.doc().unwrap().history.undo.len();
             let journal = s.journal.len();
-            let view = ViewInfo { zoom: 1.0, snap: SnapView::OFF, unit: Unit::Points };
+            let view = ViewInfo { zoom: 1.0, snap: SnapView::OFF, unit: Unit::Points, stroke_in_front: false };
             let layout = s.layout();
             let at = layout.to_canvas(SpreadRef::Doc(0), down);
             s.pointer(&PointerEvent::new(PointerKind::Down, at.x, at.y).with_mods(mods), view).unwrap();
@@ -662,7 +715,12 @@ mod resize_anchor_tests {
         assert!(!s.doc().unwrap().history.redo.is_empty());
         assert_rect(s.doc().unwrap().doc.item(id).unwrap().bounds(), Rect::new(100.0, 100.0, 200.0, 150.0));
         s.set_tool("selection");
-        let view = ViewInfo { zoom: 1.0, snap: SnapView { smart_guides: true, smart_dimensions: true, ..SnapView::OFF }, unit: Unit::Points };
+        let view = ViewInfo {
+            zoom: 1.0,
+            snap: SnapView { smart_guides: true, smart_dimensions: true, ..SnapView::OFF },
+            unit: Unit::Points,
+            stroke_in_front: false,
+        };
         (s, id, view)
     }
 
@@ -787,8 +845,12 @@ mod resize_anchor_tests {
         assert_rect(before.item(id).unwrap().path.bounds().unwrap(), Rect::new(100.0, 100.0, 200.0, 150.0));
         assert_eq!(before.item(id).unwrap().stroke.weight, 4.0);
         assert!((before.item(id).unwrap().visible_bounds().width() - 104.0).abs() < 1e-6);
-        let view =
-            ViewInfo { zoom: 1.0, snap: SnapView { smart_guides: true, smart_dimensions: true, zone_px: 8.0, ..SnapView::OFF }, unit: Unit::Points };
+        let view = ViewInfo {
+            zoom: 1.0,
+            snap: SnapView { smart_guides: true, smart_dimensions: true, zone_px: 8.0, ..SnapView::OFF },
+            unit: Unit::Points,
+            stroke_in_front: false,
+        };
         let layout = s.layout();
         let event = |kind, at: Point, mods| {
             let at = layout.to_canvas(SpreadRef::Doc(0), at);
@@ -865,5 +927,147 @@ mod resize_anchor_tests {
         assert_eq!(s.doc().unwrap().doc.as_ref(), &expected);
         assert_eq!(s.doc().unwrap().selection, selection);
         assert_resize_history(&s.doc().unwrap().history, &committed_history);
+    }
+
+    #[test]
+    fn resize_flex_releasing_cmd_preserves_first_preview_commit_and_cancel() {
+        for cancel in [false, true] {
+            let mut s = Session::new();
+            s.execute("file.new", &json!({"pages": 1})).unwrap();
+            let id =
+                ItemId(s.execute("frame.create", &json!({"rect": [100, 100, 200, 150], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap());
+            s.execute("flex.convert", &json!({"ids": [id.0]})).unwrap();
+            s.execute("object.stroke", &json!({"ids": [id.0], "swatch": "[Black]", "weight": 4})).unwrap();
+            let target = s.execute("frame.create", &json!({"rect": [400, 100, 406, 400], "content": "unassigned"})).unwrap()["id"].as_u64().unwrap();
+            s.execute("object.stroke", &json!({"ids": [target], "swatch": "[None]", "weight": 0})).unwrap();
+            s.execute("prefs.set", &json!({"scaleStrokes": false})).unwrap();
+            s.execute("selection.set", &json!({"ids": [id.0]})).unwrap();
+            s.doc_mut().unwrap().selection.key = Some(id);
+            s.execute("transform.move", &json!({"dx": 7, "dy": 0})).unwrap();
+            s.execute("edit.undo", &json!({})).unwrap();
+            s.set_tool("selection");
+            let before = s.doc().unwrap().doc.clone();
+            let selection = s.doc().unwrap().selection.clone();
+            let history = s.doc().unwrap().history.clone();
+            let journal = s.journal.clone();
+            assert!(!s.prefs.scale_strokes);
+            assert!(!selection.content);
+            assert!(!history.redo.is_empty());
+            let original = before.item(id).unwrap();
+            assert!(original.flex.is_some());
+            assert!(matches!(&original.content, designcraft_doc::Content::Group { items } if items.is_empty()));
+            assert_rect(original.path.bounds().unwrap(), Rect::new(100.0, 100.0, 200.0, 150.0));
+            assert_rect(original.bounds(), Rect::new(100.0, 100.0, 200.0, 150.0));
+            assert_eq!(original.stroke.weight, 4.0);
+            assert!((original.visible_bounds().width() - 104.0).abs() < 1e-6);
+            let view = ViewInfo {
+                zoom: 1.0,
+                snap: SnapView { smart_guides: true, smart_dimensions: true, zone_px: 8.0, ..SnapView::OFF },
+                unit: Unit::Points,
+                stroke_in_front: false,
+            };
+            let layout = s.layout();
+            let event = |kind, at: Point, mods| {
+                let at = layout.to_canvas(SpreadRef::Doc(0), at);
+                PointerEvent::new(kind, at.x, at.y).with_mods(mods)
+            };
+            let cmd = Mods { cmd: true, ..Mods::default() };
+            s.pointer(&event(PointerKind::Down, Point::new(200.0, 150.0), cmd), view).unwrap();
+            assert!(s.doc().unwrap().interaction.is_some());
+            assert!(s.tool_busy());
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+            s.pointer(&event(PointerKind::Drag, Point::new(300.0, 200.0), cmd), view).unwrap();
+            let scaled = s.doc().unwrap().doc.item(id).unwrap();
+            assert_rect(scaled.path.bounds().unwrap(), Rect::new(100.0, 100.0, 200.0, 150.0));
+            assert_rect(scaled.bounds(), Rect::new(100.0, 100.0, 300.0, 200.0));
+            assert_eq!(scaled.stroke.weight, 2.0, "held Cmd must exercise the Flex group's temporary stroke compensation");
+            assert!((scaled.visible_bounds().width() - 202.0).abs() < 1e-6);
+            assert!(s.overlays(view).is_empty());
+            assert_eq!(s.doc().unwrap().selection, selection);
+            assert_resize_history(&s.doc().unwrap().history, &history);
+            assert_eq!(s.journal, journal);
+
+            // An ordinary Flex resize bakes only its frame. The first released-Cmd preview
+            // must already agree with an identical repeated event, using the original stroke 4.
+            let mut expected = (*before).clone();
+            expected.item_mut(id).unwrap().path = designcraft_geom::shapes::rectangle(Rect::new(100.0, 100.0, 102.0, 150.0));
+            for preview in 0..2 {
+                s.pointer(&event(PointerKind::Drag, Point::new(103.0, 150.0), Mods::default()), view).unwrap();
+                let item = s.doc().unwrap().doc.item(id).unwrap();
+                assert!(
+                    (item.visible_bounds().width() - 6.0).abs() < 1e-6,
+                    "Flex Cmd-release preview {preview}: expected visible width 6, got {}",
+                    item.visible_bounds().width()
+                );
+                assert_rect(item.path.bounds().unwrap(), Rect::new(100.0, 100.0, 102.0, 150.0));
+                assert_rect(item.bounds(), Rect::new(100.0, 100.0, 102.0, 150.0));
+                assert_eq!(item.stroke.weight, 4.0);
+                assert_eq!(s.doc().unwrap().doc.as_ref(), &expected, "only the literal frame path may change");
+                assert_eq!(s.doc().unwrap().selection, selection);
+                assert!(s.doc().unwrap().interaction.is_some());
+                assert!(s.tool_busy());
+                assert_resize_history(&s.doc().unwrap().history, &history);
+                assert_eq!(s.journal, journal);
+                let overlays = s.overlays(view);
+                assert_eq!(overlays.iter().filter(|o| matches!(o, designcraft_tools::Overlay::Measure { .. })).count(), 1);
+                assert_eq!(overlays.iter().filter(|o| matches!(o, designcraft_tools::Overlay::Guide { .. })).count(), 1);
+            }
+
+            if cancel {
+                assert!(s.tool_key(designcraft_tools::ToolKey::Escape, Mods::default(), view).unwrap());
+                let assert_restored = |s: &mut Session| {
+                    let st = s.doc().unwrap();
+                    assert!(Arc::ptr_eq(&st.doc, &before));
+                    assert_eq!(st.doc.as_ref(), before.as_ref());
+                    assert_eq!(st.selection, selection);
+                    assert_resize_history(&st.history, &history);
+                    assert_eq!(s.journal, journal);
+                    assert!(st.interaction.is_none());
+                    assert!(!s.tool_busy());
+                    assert!(s.overlays(view).is_empty());
+                };
+                assert_restored(&mut s);
+                for kind in [PointerKind::Up, PointerKind::Drag, PointerKind::Move, PointerKind::Up] {
+                    s.pointer(&event(kind, Point::new(103.0, 150.0), Mods::default()), view).unwrap();
+                    assert_restored(&mut s);
+                }
+                // Cancellation keeps the pre-existing redo usable, not just its count.
+                let redo = history.redo.last().unwrap().doc.clone();
+                s.execute("edit.redo", &json!({})).unwrap();
+                assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &redo));
+                s.doc().unwrap().doc.check().unwrap();
+                continue;
+            }
+
+            let after = s.doc().unwrap().doc.clone();
+            s.pointer(&event(PointerKind::Up, Point::new(103.0, 150.0), Mods::default()), view).unwrap();
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &after));
+            assert_eq!(s.doc().unwrap().selection, selection);
+            assert!(s.doc().unwrap().interaction.is_none());
+            assert!(!s.tool_busy());
+            assert!(s.overlays(view).is_empty());
+            let mut committed_history = history.clone();
+            committed_history.redo.clear();
+            committed_history.undo.push(super::HistoryEntry { label: "Resize".into(), doc: before.clone(), selection: selection.clone() });
+            assert_resize_history(&s.doc().unwrap().history, &committed_history);
+            let mut committed_journal = journal;
+            committed_journal.push((
+                "transform.resize".into(),
+                json!({"from": [100.0, 100.0, 200.0, 150.0], "to": [100.0, 100.0, 102.0, 150.0], "content": false, "distribute": false}),
+            ));
+            assert_eq!(s.journal, committed_journal);
+            after.check().unwrap();
+            s.execute("edit.undo", &json!({})).unwrap();
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &before));
+            assert_eq!(s.doc().unwrap().selection, selection);
+            let mut undone_history = history;
+            undone_history.redo = vec![super::HistoryEntry { label: "Resize".into(), doc: after.clone(), selection: selection.clone() }];
+            assert_resize_history(&s.doc().unwrap().history, &undone_history);
+            s.execute("edit.redo", &json!({})).unwrap();
+            assert!(Arc::ptr_eq(&s.doc().unwrap().doc, &after));
+            assert_eq!(s.doc().unwrap().doc.as_ref(), &expected);
+            assert_eq!(s.doc().unwrap().selection, selection);
+            assert_resize_history(&s.doc().unwrap().history, &committed_history);
+        }
     }
 }

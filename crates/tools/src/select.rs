@@ -282,14 +282,18 @@ fn resize_edges_rect(from: Rect, handle: usize, p: Point) -> Rect {
 }
 
 fn finish_resize(from: Rect, handle: usize, rect: Rect, m: Mods) -> Rect {
-    // Measure a centered drag from the center before choosing the aspect's driving axis.
+    // Alt first: Shift then measures the drag from the centre and keeps it there.
     let rect = if m.alt { apply_alt(from, handle, rect) } else { rect };
-    if m.shift && from.width() > 1e-9 && from.height() > 1e-9 {
-        let s = aspect_scale(from, handle, rect);
-        if m.alt { centered_rect(from, from.width() * s, from.height() * s) } else { apply_aspect(from, handle, rect, s) }
-    } else {
-        rect
+    if !(m.shift && from.width() > 1e-9 && from.height() > 1e-9) {
+        return rect;
     }
+    let s = aspect_scale(from, handle, rect);
+    if m.alt { centered_rect(from, from.width() * s, from.height() * s) } else { apply_aspect(from, handle, rect, s) }
+}
+
+fn centered_rect(from: Rect, w: f64, h: f64) -> Rect {
+    let c = from.center();
+    Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)
 }
 
 fn aspect_scale(from: Rect, handle: usize, rect: Rect) -> f64 {
@@ -320,51 +324,17 @@ fn drives_x(handle: usize, from: Rect, rect: Rect) -> bool {
     sx > sy
 }
 
+/// Scales `from` by `s` with the edges opposite the handle fixed. An axis the handle doesn't move stays centred.
 fn apply_aspect(from: Rect, handle: usize, rect: Rect, s: f64) -> Rect {
-    let (mut x0, mut y0, mut x1, mut y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
-    let (w, h) = (from.width() * s, from.height() * s);
-    match handle {
-        0 => {
-            x0 = x1 - w;
-            y0 = y1 - h;
-        }
-        1 => {
-            x0 = from.center().x - w / 2.0;
-            x1 = from.center().x + w / 2.0;
-            y0 = y1 - h;
-        }
-        2 => {
-            x1 = x0 + w;
-            y0 = y1 - h;
-        }
-        3 => {
-            x1 = x0 + w;
-            y0 = from.center().y - h / 2.0;
-            y1 = from.center().y + h / 2.0;
-        }
-        4 => {
-            x1 = x0 + w;
-            y1 = y0 + h;
-        }
-        5 => {
-            x0 = from.center().x - w / 2.0;
-            x1 = from.center().x + w / 2.0;
-            y1 = y0 + h;
-        }
-        6 => {
-            x0 = x1 - w;
-            y1 = y0 + h;
-        }
-        7 => {
-            x0 = x1 - w;
-            y0 = from.center().y - h / 2.0;
-            y1 = from.center().y + h / 2.0;
-        }
-        _ => {
-            x0 = x1 - w;
-            y0 = y1 - h;
-        }
-    }
+    let (x_edges, y_edges) = resize_edge_flags(handle);
+    let span = |edges: [bool; 3], lo: f64, hi: f64, mid: f64, len: f64| match edges {
+        [true, _, _] => (hi - len, hi),
+        [_, _, true] => (lo, lo + len),
+        _ => (mid - len / 2.0, mid + len / 2.0),
+    };
+    let c = from.center();
+    let (x0, x1) = span(x_edges, rect.x0, rect.x1, c.x, from.width() * s);
+    let (y0, y1) = span(y_edges, rect.y0, rect.y1, c.y, from.height() * s);
     Rect::new(x0, y0, x1, y1)
 }
 
@@ -418,8 +388,7 @@ fn finish_snapped_resize(
     if !(w.is_finite() && h.is_finite()) {
         return proposed;
     }
-    let c = from.center();
-    Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)
+    centered_rect(from, w, h)
 }
 
 /// Length match: apply the physical difference once in the span's direction. Position matches mirror the edge movement.
@@ -446,25 +415,17 @@ fn axis_size_delta(edges: [bool; 3], delta: f64) -> f64 {
     }
 }
 
-fn centered_rect(from: Rect, w: f64, h: f64) -> Rect {
-    let c = from.center();
-    Rect::new(c.x - w / 2.0, c.y - h / 2.0, c.x + w / 2.0, c.y + h / 2.0)
-}
-
+/// Mirrors the dragged sides around the centre of `from`. Shrinking and crossing the centre follow the pointer.
 fn apply_alt(from: Rect, handle: usize, rect: Rect) -> Rect {
-    let c = from.center();
-    // Only the dragged side sets the half-size; the opposite side must not prevent shrinking.
     let (x_edges, y_edges) = resize_edge_flags(handle);
-    let w = match x_edges {
-        [true, _, false] => 2.0 * (c.x - rect.x0),
-        [false, _, true] => 2.0 * (rect.x1 - c.x),
-        _ => from.width(),
+    let c = from.center();
+    let size = |edges: [bool; 3], lo: f64, hi: f64, mid: f64, len: f64| match edges {
+        [true, _, _] => 2.0 * (mid - lo),
+        [_, _, true] => 2.0 * (hi - mid),
+        _ => len,
     };
-    let h = match y_edges {
-        [true, _, false] => 2.0 * (c.y - rect.y0),
-        [false, _, true] => 2.0 * (rect.y1 - c.y),
-        _ => from.height(),
-    };
+    let w = size(x_edges, rect.x0, rect.x1, c.x, from.width());
+    let h = size(y_edges, rect.y0, rect.y1, c.y, from.height());
     centered_rect(from, w, h)
 }
 
@@ -518,7 +479,8 @@ fn fixed_resize_frame(cx: &ToolContext, spread: SpreadRef) -> bool {
         return false;
     }
     let Some(it) = cx.doc.item_at(&loc) else { return false };
-    !matches!(it.content, designcraft_doc::Content::Group { .. })
+    // Flex containers bake their frame on ordinary resize; other grouped content scales.
+    it.flex.is_some() || !matches!(it.content, designcraft_doc::Content::Group { .. })
 }
 
 /// Ordinary frame previews restore the original geometry and fixed stroke before resizing.

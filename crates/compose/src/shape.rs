@@ -96,6 +96,7 @@ pub struct ShapedPara {
 #[derive(Clone, Debug, Default)]
 pub struct SubstCtx {
     pub page_name: Option<String>,
+    /// The section marker text of the page being composed (`None` on parent pages: "Section").
     pub section_marker: Option<String>,
     /// Text variable values by index (on the page being composed).
     pub vars: Arc<Vec<String>>,
@@ -146,6 +147,7 @@ impl StyleTable<'_> {
             stroke: p.stroke.clone(),
             stroke_tint: p.stroke_tint,
             stroke_weight: p.stroke_weight,
+            stroke_behind_fill: p.stroke_behind_fill,
             underline: p.underline,
             strikethrough: p.strikethrough,
             underline_rule: crate::Rule {
@@ -619,7 +621,14 @@ fn shape_run_raw(
                     } else {
                         sub.page_name.clone().unwrap_or_else(|| "#".into())
                     };
-                    shape_segment(db, text, i..i + c.len_utf8(), Some(&s), p, &primary, auto_leading, style, out, sub.vertical);
+                    if s.is_empty() {
+                        // A section without marker text: the character takes no space.
+                        let mut g = control_glyph(&primary, p, auto_leading, style, i, c);
+                        g.adv = 0.0;
+                        out.push(g);
+                    } else {
+                        shape_segment(db, text, i..i + c.len_utf8(), Some(&s), p, &primary, auto_leading, style, out, sub.vertical);
+                    }
                 }
                 designcraft_doc::OBJECT_MARK => {
                     let mut g = control_glyph(&primary, p, auto_leading, style, i, c);

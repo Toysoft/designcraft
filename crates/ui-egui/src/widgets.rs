@@ -364,6 +364,7 @@ pub fn link_label(ui: &mut Ui, text: &str, width: f32) -> Response {
     ui.painter().galley(pos, g, t.text);
     let y = r.center().y + 6.5;
     ui.painter().line_segment([pos2(r.min.x, y), pos2(r.min.x + w, y)], Stroke::new(1.0, if resp.hovered() { t.text_strong } else { t.text_dim }));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
