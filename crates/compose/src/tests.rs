@@ -4177,6 +4177,22 @@ fn an_empty_paragraph_keeps_the_leading_under_a_leading_model() {
     }
 }
 
+/// A centred line wider than its column (a word set to No Break) is centred on the column and
+/// hangs out on both sides, as in InDesign; it used to start at the left edge.
+#[test]
+fn an_overfull_centred_line_hangs_out_on_both_sides() {
+    let text = "nnnnnnnnnnnn";
+    let (mut d, sid, _) = doc_with(text, Rect::new(0.0, 0.0, 30.0, 100.0), ParaAttrs { align: Some(Align::Center), ..Default::default() });
+    d.story_mut(sid).unwrap().format_chars(0..text.len(), |f| f.over.no_break = Some(true));
+    let cs = compose_story(&d, sid, &ComposeOptions::default());
+    let l = &cs.frames[0].lines[0];
+    let first = l.glyphs.first().unwrap();
+    let last = l.glyphs.last().unwrap();
+    assert!(first.x < l.x0, "starts left of the column: {} vs {}", first.x, l.x0);
+    let mid = (first.x + last.x + last.adv) / 2.0;
+    assert!((mid - (l.x0 + l.x1) / 2.0).abs() < 0.01, "centre {mid} vs {}", (l.x0 + l.x1) / 2.0);
+}
+
 /// A paragraph that starts with a tab (an indent typed as a tab) is composed by the paragraph
 /// composer like one with a first-line indent of the tab's width; it used to fall back to the
 /// line-by-line composer, which can't squeeze a line below the minimum word space.
