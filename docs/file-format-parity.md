@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (content-indexed asset deduplication, #727) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (IDML liquid guide types, #872) · **Target:** Adobe InDesign 2026 (21.6)
 
 Every format InDesign 2026 reads or writes, with DesignCraft's support, fidelity and tests. The
 InDesign list comes from its bundle's `Info.plist` (`CFBundleDocumentTypes`,
@@ -30,6 +30,12 @@ score below).
 | InDesign Interchange (legacy) | `.inx` | read | ✗ | — | | <1% |
 | PageMaker | `.pmd`, `.p65`, `.t65`, `.pmt` | read | ✗ | — | | <1% |
 | QuarkXPress | `.qxd`, `.qxt` | read (old versions) | ✗ (#73) | — | | <1% |
+
+IDML preserves stored page liquid rules and distinguishes liquid guides from ordinary ruler
+guides on document and parent pages. Guide positions, orientation, Fit to Page, lock state and
+layer survive interchange; literal XML and round-trip tests are in
+`crates/idml/src/tests/liquid_guides.rs`. Object liquid pins and resize constraints remain unmapped
+(#872); this is not full liquid-layout interchange support.
 
 ## Output
 
@@ -107,5 +113,6 @@ for real work** (estimated). INDD alone moves this dimension by up to 30 points.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | IDML retains liquid versus ruler guide types on document and parent pages, with literal XML and mixed-guide round-trip coverage; object liquid constraints remain unsupported (#872) |
 | 2026-10-13 | minor | Asset loading and compaction use content fingerprints with exact equality checks; tests cover equal-sized distinct buffers, shared copies, independent links and missing data (#727) |
 | 2026-10-10 | major | Created from InDesign 2026's declared document types and filters, `plan/indesign/08-file-formats.md` and the code |

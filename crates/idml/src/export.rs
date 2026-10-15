@@ -1686,7 +1686,7 @@ impl<'a> Ex<'a> {
                     .attr("ViewThreshold", "5")
                     .attr("Locked", bool_s(g.locked))
                     .attr("PageIndex", (first_page + i).to_string())
-                    .attr("GuideType", "Ruler");
+                    .attr("GuideType", if g.liquid { "Liquid" } else { "Ruler" });
                 if let Some(l) = g.layer {
                     ge.set("ItemLayer", uid(l.0));
                 }

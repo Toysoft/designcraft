@@ -22,13 +22,13 @@
 //! `Rectangle`, `Oval`, `Polygon`, `GraphicLine`, `Group`) with fill/stroke, corner options, text
 //! frame options (with column rules), text wrap, transparency (opacity, blend mode, drop shadow,
 //! feather), images (embedded `Contents` or linked), stories with paragraph/character style ranges and local overrides, special
-//! characters and breaks, and text threading.
+//! characters and breaks, text threading, ruler and liquid guides, and stored page liquid rules.
 //!
 //! ## TODO (ignored on import / not written on export)
 //! - Tables, footnotes, anchored/inline objects, notes, tracked changes, hyperlinks, index and
 //!   cross-reference markers, text variables, conditions, XML structure (`XML/*` parts).
-//! - Guides, page-item overrides of parent items (only the page's `OverrideList` is read),
-//!   parent-of-parent page mapping beyond `AppliedMaster`, alternate layouts, liquid layout.
+//! - Page-item overrides of parent items (only the page's `OverrideList` is read),
+//!   parent-of-parent page mapping beyond `AppliedMaster`, alternate layouts, liquid object constraints.
 //! - Nested/GREP/line styles, bullets & numbering details (bullet glyph, number format), OpenType
 //!   feature flags, paragraph borders, grid alignment, custom dashed stroke styles; column rule
 //!   stroke type and overprint.
