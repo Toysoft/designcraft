@@ -31,6 +31,8 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "Recortar"),
     ("Copy", "Copiar"),
     ("Paste", "Colar"),
+    ("Back", "Voltar"),
+    ("Margins and Columns", "Margens e colunas"),
     ("Bulleted & Numbered Lists", "Listas com marcadores e numeradas"),
     ("Show Hidden Characters", "Mostrar caracteres ocultos"),
     ("Current Page Number", "Número da página atual"),

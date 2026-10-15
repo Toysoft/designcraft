@@ -30,6 +30,7 @@ pub(super) const TABLE: &[(&str, &str)] = &[
     ("Cut", "قص"),
     ("Copy", "نسخ"),
     ("Paste", "لصق"),
+    ("Back", "رجوع"),
     ("Bulleted & Numbered Lists", "القوائم ذات التعداد النقطي والرقمي"),
     ("Current Page Number", "رقم الصفحة الحالية"),
     ("Apply Color (,)", "تطبيق اللون (,)"),

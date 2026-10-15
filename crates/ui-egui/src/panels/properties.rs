@@ -84,7 +84,9 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
     let info = sel_info(app);
     let has_text = app.session.active().is_some_and(|s| s.selection.text.is_some());
-    selection_band(ui, &selection_title(app, &info));
+    if !(info.is_none() && !has_text && app.session.tool_id() == "page") {
+        selection_band(ui, &selection_title(app, &info));
+    }
     if has_text {
         text_style_section(app, ui);
         divider(ui);
@@ -103,6 +105,14 @@ pub fn show(app: &mut DesignApp, ui: &mut egui::Ui) {
         section(ui, crate::i18n::tr(&app.ui.language, "Quick Actions"), true);
         quick_actions_text(app, ui);
         return;
+    }
+    // The Page tool with no objects selected: the page's own settings, as InDesign's.
+    if info.is_none() && app.session.tool_id() == "page" {
+        let page = app.session.active().and_then(|st| st.selection.page).or_else(|| crate::canvas::current_page(app));
+        if let Some(page) = page {
+            page_sections(app, ui, page);
+            return;
+        }
     }
     let Some(i) = info else {
         document_sections(app, ui);
@@ -188,6 +198,104 @@ pub(crate) const PAGE_PRESETS: &[(&str, f64, f64)] = &[
 pub(crate) fn preset_name(w: f64, h: f64) -> &'static str {
     let (a, b) = (w.min(h), w.max(h));
     PAGE_PRESETS.iter().find(|p| (p.1 - a).abs() < 0.6 && (p.2 - b).abs() < 0.6).map(|p| p.0).unwrap_or("Custom")
+}
+
+/// Properties with the Page tool (Properties › Edit Page), as InDesign's: a "Page" band with Back,
+/// Page Size for this page alone (which page, preset, orientation, W/H), Margins and Columns and
+/// Quick Actions. Back returns to the Selection tool and the document's properties.
+fn page_sections(app: &mut DesignApp, ui: &mut Ui, page: usize) {
+    let u = units(app);
+    let lang = app.ui.language.clone();
+    let Some(st) = app.session.active() else { return };
+    let d = st.doc.clone();
+    let Some((si, pi)) = d.page_loc(page) else { return };
+    let Some(pg) = d.spreads.get(si).and_then(|s| s.pages.get(pi)).cloned() else { return };
+    let n = page + 1;
+    let t = Tokens::get(ui.ctx());
+    // The band: "Page", and Back at its end.
+    let band = block(ui, 33.0);
+    crate::rtl::paint(
+        ui.painter(),
+        pos2(band.min.x, band.center().y + 1.0),
+        egui::Align2::LEFT_CENTER,
+        crate::i18n::tr(&lang, "Page"),
+        crate::theme::semibold(11.5),
+        t.text_strong,
+    );
+    let back = place(ui, Rect::from_min_size(pos2(band.max.x - 58.0, band.center().y - 10.0), vec2(54.0, 20.0)), |ui| {
+        outline_button(ui, crate::i18n::tr(&lang, "Back"), 54.0).clicked()
+    });
+    rule(ui);
+    if back {
+        let _ = app.run("layout.selectPage", json!({"page": null}));
+        app.select_tool("selection");
+        return;
+    }
+    section(ui, crate::i18n::tr(&lang, "Page Size"), true);
+    // Which page.
+    let b = block(ui, FIELD_H);
+    let names: Vec<String> = (0..d.page_count()).map(|i| app.session.page_label(i)).collect();
+    let picked = place(ui, sub(b, 0.0, 0.0, 93.0, FIELD_H), |ui| {
+        widgets::dropdown_list(ui, names.get(page).map_or("", String::as_str), 93.0, &names, Some(page))
+    });
+    if let Some(p) = picked {
+        let _ = app.run("layout.selectPage", json!({"page": p + 1}));
+        crate::canvas::go_to_page(app, p);
+        return;
+    }
+    ui.add_space(3.0);
+    // Preset and orientation: this page alone.
+    let (w, h) = (pg.width, pg.height);
+    let landscape = w > h;
+    let b = block(ui, FIELD_H);
+    let mut size = None;
+    place(ui, sub(b, 0.0, 0.0, 93.0, FIELD_H), |ui| {
+        let resp = dropdown(ui, crate::i18n::tr(&lang, preset_name(w, h)), 93.0);
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(140.0);
+            for p in PAGE_PRESETS {
+                if ui.selectable_label(preset_name(w, h) == p.0, crate::i18n::tr(&lang, p.0)).clicked() {
+                    size = Some(if landscape { (p.2, p.1) } else { (p.1, p.2) });
+                    ui.close();
+                }
+            }
+        });
+    });
+    place(ui, sub(b, 126.0, 0.0, 52.0, FIELD_H), |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if icon_toggle(ui, "orient-portrait", !landscape, crate::i18n::tr(&lang, "Portrait")).clicked() && landscape {
+            size = Some((h, w));
+        }
+        if icon_toggle(ui, "orient-landscape", landscape, crate::i18n::tr(&lang, "Landscape")).clicked() && !landscape {
+            size = Some((h, w));
+        }
+    });
+    ui.add_space(3.0);
+    let b = block(ui, 2.0 * FIELD_H + 5.0);
+    for (row, (label, v, key)) in [("W:", w, "width"), ("H:", h, "height")].into_iter().enumerate() {
+        let y = row as f32 * 26.0;
+        place(ui, sub(b, 0.0, y, 20.0, FIELD_H), |ui| widgets::caption_w(ui, label, 20.0));
+        let nv = place(ui, sub(b, 21.0, y, 72.0, FIELD_H), |ui| {
+            NumField::measure(&format!("page_{key}"), Some(v), u).width(72.0).spinner().range(1.0, 15552.0).show(ui)
+        });
+        if let Some(nv) = nv {
+            size = Some(if key == "width" { (nv, h) } else { (w, nv) });
+        }
+    }
+    if let Some((nw, nh)) = size {
+        let _ = app.run("layout.pageSize", json!({"pages": [n], "width": nw, "height": nh, "anchor": app.ui.ref_point.min(8)}));
+    }
+    ui.add_space(6.0);
+    let fw = full_width(ui);
+    if outline_button(ui, crate::i18n::tr(&lang, "Margins and Columns"), fw).clicked() {
+        crate::canvas::go_to_page(app, page);
+        crate::menus::activate(app, "layout.marginsAndColumns", &Value::Null);
+    }
+    divider(ui);
+    section(ui, crate::i18n::tr(&lang, "Quick Actions"), true);
+    if outline_button(ui, crate::i18n::tr(&lang, "Import File"), fw).clicked() {
+        let _ = app.run("app.placeDialog", json!({}));
+    }
 }
 
 fn document_sections(app: &mut DesignApp, ui: &mut Ui) {
@@ -354,7 +462,9 @@ fn document_sections(app: &mut DesignApp, ui: &mut Ui) {
     }
     ui.add_space(3.0);
     if outline_button(ui, crate::i18n::tr(&app.ui.language, "Edit Page"), fw).clicked() {
-        crate::dialogs::open_document_setup(app);
+        // As in InDesign: the Page tool on this page; Properties shows the page's own settings.
+        app.select_tool("page");
+        let _ = app.run("layout.selectPage", json!({"page": cur + 1}));
     }
     divider(ui);
     // Rulers & Grids / Guides: icon toggle rows.
@@ -2540,6 +2650,36 @@ mod tests {
         h.input_mut().max_texture_side = Some(8192);
         h.run_steps(3);
         h
+    }
+
+    /// As InDesign's: Edit Page takes the Page tool to the page in view, and Properties sets that
+    /// page alone; Back returns to the document.
+    #[test]
+    fn edit_page_shows_the_page_and_sets_its_size_alone() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 3, "facingPages": false})).unwrap();
+        app.ui.dock_tab = "properties".into();
+        let mut h = crate::test_window::open(app, vec2(1400.0, 900.0));
+        crate::canvas::go_to_page(&mut h.state_mut().app, 1);
+        h.run_steps(3);
+        h.get_by_label("Edit Page").click();
+        h.run_steps(3);
+        let st = h.state().app.session.active().unwrap();
+        assert_eq!((h.state().app.session.tool_id(), st.selection.page), ("page", Some(1)));
+        assert!(h.query_by_label("Document Setup").is_none(), "no dialog");
+        let _ = h.get_by_label("Page Size");
+        let _ = h.get_by_label("Margins and Columns");
+        h.get_by_label("Landscape").click();
+        h.run_steps(3);
+        let doc = &h.state().app.session.active().unwrap().doc;
+        let size = |abs: usize| doc.page(abs).map(|p| (p.width, p.height)).unwrap();
+        assert_eq!(size(1), (792.0, 612.0), "the page turns");
+        assert_eq!((size(0), size(2)), ((612.0, 792.0), (612.0, 792.0)), "the others don't");
+        h.get_by_label("Back").click();
+        h.run_steps(3);
+        let st = h.state().app.session.active().unwrap();
+        assert_eq!((h.state().app.session.tool_id(), st.selection.page), ("selection", None));
+        let _ = h.get_by_label("Edit Page");
     }
 
     #[test]

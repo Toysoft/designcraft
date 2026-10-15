@@ -334,6 +334,8 @@ pub fn outline_button(ui: &mut Ui, label: &str, width: f32) -> Response {
     }
     p.rect_stroke(r, 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     crate::rtl::paint(p, r.center(), egui::Align2::CENTER_CENTER, label, label_font(), t.text);
+    // Screen readers (and tests) find it by its label.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     resp
 }
 
