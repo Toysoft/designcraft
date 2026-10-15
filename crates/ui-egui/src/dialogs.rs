@@ -1058,7 +1058,14 @@ fn document_setup(app: &crate::DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
         for (k, l) in [("bleed", "Bleed:"), ("slug", "Slug:")] {
             crate::rtl::label(ui, crate::i18n::tr(&app.ui.language, l));
             for e in ["Top", "Bottom", "Inside", "Outside"] {
-                text_field(ui, d, &format!("{k}{e}"), 60.0);
+                // Sized, not just desired: in a grid a text field takes no more than its column's
+                // last width, which the captions above set ("0.12" for 0.125 in).
+                let key = format!("{k}{e}");
+                let mut v = d.s(&key);
+                let h = ui.spacing().interact_size.y;
+                if ui.add_sized([72.0, h], egui::TextEdit::singleline(&mut v).horizontal_align(egui::Align::Min)).changed() {
+                    d.fields.insert(key, Value::String(v));
+                }
             }
             ui.end_row();
         }
@@ -6792,6 +6799,27 @@ mod tests {
     fn guide_counts(app: &DesignApp) -> Vec<usize> {
         let doc = &app.session.active().unwrap().doc;
         (0..doc.page_count()).map(|abs| doc.page(abs).unwrap().guides.len()).collect()
+    }
+
+    /// Document Setup's Bleed and Slug fields show a whole value ("0.125 in"); they took the width
+    /// of the captions above them and cut it to "0.12".
+    #[test]
+    fn document_setup_bleed_fields_fit_their_values() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"bleed": 9.0})).unwrap();
+        std::sync::Arc::make_mut(&mut app.session.doc_mut().unwrap().doc).settings.horizontal_units = Unit::Inches;
+        open_document_setup(&mut app);
+        let mut h = crate::test_window::open(app, egui::vec2(1400.0, 900.0));
+        h.run_steps(4);
+        let fields: Vec<egui::Rect> =
+            h.get_all_by_value("0.125 in").filter(|n| n.accesskit_node().role() == egui::accesskit::Role::TextInput).map(|n| n.rect()).collect();
+        assert_eq!(fields.len(), 4, "the four bleed edges");
+        let font = egui::FontId::proportional(13.0);
+        let text = h.ctx.fonts_mut(|f| f.layout_no_wrap("0.125 in".into(), font, egui::Color32::WHITE)).size().x;
+        for r in fields {
+            assert!(r.width() >= text + 8.0, "{} wide for {text}", r.width());
+        }
     }
 
     #[test]
