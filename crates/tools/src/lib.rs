@@ -419,6 +419,30 @@ pub trait Tool: Send {
     fn wants_text(&self, _cx: &ToolContext) -> bool {
         false
     }
+    /// IME composition (marked text) at the text caret: `text` replaces the previous marked text
+    /// (or the selected text when a composition starts); an empty `text` ends the composition with
+    /// nothing typed. `active_chars` is the clause being converted (empty: the IME's cursor), in
+    /// characters of `text`. The result arrives through [`Tool::ime_commit`].
+    fn ime_preedit(&mut self, _cx: &ToolContext, _text: &str, _active_chars: Option<std::ops::Range<usize>>) -> Vec<Action> {
+        vec![]
+    }
+    /// The IME committed `text`: it replaces the marked text and is typed as one step.
+    fn ime_commit(&mut self, _cx: &ToolContext, _text: &str) -> Vec<Action> {
+        vec![]
+    }
+    /// End a composition from outside the IME (a click, another command): the marked text stays
+    /// as typed.
+    fn ime_end(&mut self, _cx: &ToolContext) -> Vec<Action> {
+        vec![]
+    }
+    /// Is uncommitted IME text being shown? Keys, shortcuts and Undo wait while it is.
+    fn composing(&self) -> bool {
+        false
+    }
+    /// Where the IME candidate window goes: a caret line (top, bottom) in canvas space.
+    fn ime_caret(&self, _cx: &ToolContext) -> Option<(Point, Point)> {
+        None
+    }
 }
 
 pub fn create(id: &str) -> Box<dyn Tool> {

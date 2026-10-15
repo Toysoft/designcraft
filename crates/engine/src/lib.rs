@@ -78,6 +78,8 @@ pub struct Interaction {
     pub doc: Arc<Document>,
     pub selection: Selection,
     pub preview: Option<(String, Value)>,
+    /// The document's revision when the gesture began: a cancel puts it back.
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +88,8 @@ pub struct DocState {
     pub selection: Selection,
     pub history: History,
     pub path: Option<String>,
+    /// Names the document state for caches keyed `(uid, revision)` (see
+    /// [`DocState::bump_revision`]).
     pub revision: u64,
     pub saved_revision: u64,
     /// The document as last saved (dirty = the current document is a different allocation).
@@ -129,19 +133,25 @@ impl Drop for FontScope {
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 impl DocState {
     pub fn new(doc: Document, path: Option<String>) -> Self {
         let active_layer = doc.default_layer();
         let doc = Arc::new(doc);
+        let revision = next_revision();
         DocState {
             saved_doc: doc.clone(),
             doc,
             selection: Selection::default(),
             history: History { limit: 1000, ..Default::default() },
             path,
-            revision: 1,
-            saved_revision: 1,
+            revision,
+            saved_revision: revision,
             active_layer,
             interaction: None,
             editing_parents: false,
@@ -151,6 +161,12 @@ impl DocState {
             preview_record: None,
             fonts: None,
         }
+    }
+    /// The document changed: it gets a revision no document state had before. A cancelled
+    /// gesture puts back the revision it began at, so the numbers its previews used are never
+    /// handed out again (a cache entry for one would show the cancelled preview).
+    pub fn bump_revision(&mut self) {
+        self.revision = next_revision();
     }
     pub fn is_dirty(&self) -> bool {
         !Arc::ptr_eq(&self.doc, &self.saved_doc)
@@ -295,9 +311,6 @@ pub struct Session {
     pub(crate) text_drag: bool,
     /// Character formatting chosen at a bare caret, for the text typed there next.
     pub(crate) typing_format: Option<cmd::text::TypingFormat>,
-    /// Text an input method is composing (a dead key's accent), shown in the story as an
-    /// interaction preview until it commits: (document uid, byte length before the caret).
-    pub(crate) composition: Option<(u64, usize)>,
     /// The open Object Library (File › New / Open Library).
     pub library: Option<cmd::library::Library>,
     /// The open book (File › Open Book).
@@ -335,7 +348,6 @@ impl Session {
             transforms: Default::default(),
             text_drag: false,
             typing_format: None,
-            composition: None,
             library: None,
             conveyor: Vec::new(),
             book: None,
@@ -400,12 +412,19 @@ impl Session {
 
     pub fn set_active(&mut self, i: usize) {
         if i < self.docs.len() && self.active != Some(i) {
+            // The composition belongs to the document it shows in.
+            if let Err(e) = self.end_composition() {
+                log::warn!("ending the IME composition: {e}");
+            }
             self.reset_find_scope();
             self.stop_data_preview();
             self.active = Some(i);
         }
     }
     pub fn add_document(&mut self, d: DocState) -> usize {
+        if let Err(e) = self.end_composition() {
+            log::warn!("ending the IME composition: {e}");
+        }
         self.reset_find_scope();
         self.stop_data_preview();
         self.docs.push(d);
@@ -418,7 +437,7 @@ impl Session {
         st.preview_record = None;
         let Some(stash) = st.preview_stash.take() else { return };
         st.doc = stash;
-        st.revision = st.revision.saturating_add(1);
+        st.bump_revision();
     }
     pub fn close_document(&mut self, i: usize) {
         if self.active == Some(i) {
@@ -440,15 +459,17 @@ impl Session {
     /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
     /// document as it was (see [`guard`]).
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
+        // A command from outside the IME ends its composition first, keeping the marked text as
+        // typed: Undo then takes back that typing, and nothing runs on top of the preview the
+        // composition would drop. Queries and recovery saves leave it alone.
+        if self.tool.composing() && id != "file.recovery.save" && find_command(id).is_some_and(|c| c.journal || c.undoable) {
+            self.end_composition()?;
+        }
         self.guarded(id, |s| s.execute_unguarded(id, params))
     }
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.into()))?;
-        // Text still being composed isn't part of the story: any other edit drops it first.
-        if id != "text.compose" && (spec.undoable || spec.journal) {
-            self.end_composition();
-        }
         if let Err(e) = (spec.enabled)(self) {
             // A command that takes `ids` acts on the objects the call names, so it needs no
             // selection: with a text caret or nothing selected, `{"ids": [5]}` still runs.
@@ -549,7 +570,7 @@ impl Session {
         }
         if let Some(st) = self.active_mut() {
             st.doc = Arc::new(d);
-            st.revision += 1;
+            st.bump_revision();
         }
     }
 
@@ -592,7 +613,7 @@ impl Session {
         doc.sync_endnote_story();
         st.doc = Arc::new(doc);
         st.selection = sel;
-        st.revision += 1;
+        st.bump_revision();
         self.reset_find_scope();
         Ok(r)
     }
@@ -614,6 +635,8 @@ mod tests;
 mod tests_file_guard;
 #[cfg(test)]
 mod tests_idml;
+#[cfg(test)]
+mod tests_ime;
 #[cfg(test)]
 mod tests_roots;
 #[cfg(test)]

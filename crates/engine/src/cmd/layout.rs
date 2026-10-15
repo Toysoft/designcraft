@@ -250,7 +250,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let st = s.doc_mut()?;
             st.editing_parents = p.get("on").and_then(Value::as_bool).unwrap_or(!st.editing_parents);
             st.selection = Default::default();
-            st.revision += 1;
+            st.bump_revision();
             ok()
         }),
         cmd!(
@@ -499,7 +499,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 st.selection = designcraft_doc::Selection::items(ids);
             }
             st.selection.page = page;
-            st.revision += 1;
+            st.bump_revision();
             Ok(json!({"page": page.map(|p| p + 1)}))
         }
         ),
@@ -578,7 +578,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let st = s.doc_mut()?;
             let ids: Vec<_> = st.doc.spreads.iter().flat_map(|sp| sp.items.iter().filter(|i| i.layer == id && !i.locked).map(|i| i.id)).collect();
             st.selection = designcraft_doc::Selection::items(ids);
-            st.revision += 1;
+            st.bump_revision();
             ok()
         }),
         cmd!("layer.new", "New Layer…", [], None, "{name?}", has_doc, |s, p| {
@@ -733,7 +733,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 return Err(bad("layer.activate", "no such layer"));
             }
             st.active_layer = id;
-            st.revision += 1;
+            st.bump_revision();
             ok()
         }),
     ]

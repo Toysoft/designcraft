@@ -797,7 +797,7 @@ fn open_with_publisher(s: &mut Session, dir: &Path, mut publish: impl FnMut(&Pat
         st.fonts = fonts;
         // Unsaved: the copy on disk (if any) is older than what was recovered.
         st.saved_doc = std::sync::Arc::new((*st.doc).clone());
-        st.revision += 1;
+        st.bump_revision();
         let index = s.add_document(st);
         opened.push(index);
         // New uids are published without replacement, and the original is consumed only after

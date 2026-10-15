@@ -21,7 +21,7 @@ pub fn specs() -> Vec<CommandSpec> {
             if p.get("select").and_then(Value::as_bool).unwrap_or(true) && !ids.is_empty() {
                 let st = s.doc_mut()?;
                 st.selection = designcraft_doc::Selection::items(ids.clone());
-                st.revision += 1;
+                st.bump_revision();
             }
             Ok(json!({"ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()}))
         }),
@@ -424,7 +424,7 @@ fn find_next(s: &mut Session, p: &Value) -> Result<Value> {
     let frame = st.doc.story(sid).and_then(|x| x.frames.first().copied());
     let stm = s.doc_mut()?;
     stm.selection = Selection::text(TextSel { story: sid, anchor: a, focus: b, frame, cell: None });
-    stm.revision += 1;
+    stm.bump_revision();
     context.acknowledge(stm);
     s.find_context = Some(context);
     Ok(json!({"story": sid.0, "start": a, "end": b}))
@@ -837,7 +837,7 @@ mod tests {
         s.execute("text.selectWord", &json!({"frame": frame.0, "point": [point.x, point.y]})).unwrap();
         assert!(!s.text_drag, "explicit word reselection does not start a text drag");
         assert_eq!(s.doc().unwrap().selection, selected, "same full selection, including frame");
-        assert_eq!(s.doc().unwrap().revision, revision + 1);
+        assert!(s.doc().unwrap().revision > revision, "a new revision");
         assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().doc));
         assert_eq!(s.doc().unwrap().history.undo.len(), history);
         assert!(s.find_context.is_none());
@@ -916,7 +916,7 @@ mod tests {
                 frame: None,
                 cell: None,
             });
-            st.revision += 1;
+            st.bump_revision();
             for command in ["find.find", "find.next", "find.change"] {
                 let before = s.doc().unwrap().doc.clone();
                 let err = s.execute(command, &json!({"find": "x", "change": "y", "scope": "selection"})).unwrap_err();
@@ -976,7 +976,7 @@ mod tests {
         // and would itself restore the template before selecting.
         let st = s.doc_mut().unwrap();
         st.selection = designcraft_doc::Selection::text(designcraft_doc::TextSel { story: sid, anchor: 0, focus: 7, frame: None, cell: None });
-        st.revision += 1;
+        st.bump_revision();
         let p = json!({"find": "red", "change": "blue", "scope": "selection"});
         assert_eq!(s.execute("find.find", &p).unwrap().as_array().unwrap().len(), 2);
         let history = s.doc().unwrap().history.undo.len();

@@ -560,6 +560,14 @@ pub struct DesignApp {
     /// (no native menu: without it the paste keys produce no paste event), or what it held then
     /// (native menu). It is never pasted as text: Paste with it pastes the copied objects.
     object_clip_text: Option<String>,
+    /// The marked text the system IME last sent (`None` once it commits or clears). When the
+    /// composition ends some other way (a click, a tool switch), the IME is told to drop it.
+    pub(crate) ime_marked: Option<String>,
+    /// The system IME must drop its marked text (see [`Self::take_ime_discard`]).
+    pub(crate) ime_discard: bool,
+    /// The canvas asked for the system IME in the last frame (the web build's text input has the
+    /// keyboard then).
+    pub(crate) canvas_ime: bool,
     /// Quit was chosen: close the window on the next frame, as its close button does.
     quit_requested: bool,
     /// Close the window without asking about unsaved changes (the control channel's `app.quit`).
@@ -618,6 +626,9 @@ impl DesignApp {
             egui_ctx: None,
             in_control: false,
             object_clip_text: None,
+            ime_marked: None,
+            ime_discard: false,
+            canvas_ime: false,
             quit_requested: false,
             quit_without_asking: false,
             quitting: None,
@@ -663,6 +674,21 @@ impl DesignApp {
 
     pub fn status(&mut self, s: impl Into<String>) {
         self.ui.status = s.into();
+    }
+
+    /// Did an IME composition end outside the IME this frame (a click, a tool switch)? egui's
+    /// `should_interrupt_composition` toggles winit's IME, which doesn't reach the macOS input
+    /// context: it keeps the marked text and types it again into the next composition, so the
+    /// host discards it there.
+    pub fn take_ime_discard(&mut self) -> bool {
+        std::mem::take(&mut self.ime_discard)
+    }
+
+    /// Did the canvas ask for the system IME in the last frame (a Type tool caret)? The web
+    /// build's hidden text input has the keyboard then, so text events hold what the browser
+    /// typed (see [`drop_key_name_text`]).
+    pub fn canvas_ime(&self) -> bool {
+        self.canvas_ime
     }
 
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
@@ -1244,6 +1270,7 @@ impl DesignApp {
     /// Lay out the whole window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.canvas_ime = false;
         if !self.fonts_ready {
             ctx.request_repaint();
             return;
@@ -1468,19 +1495,50 @@ pub fn now_ms() -> f64 {
     }
 }
 
-/// Is `text` the name of a key ("AltGraph", "Dead", "AudioVolumeUp") instead of typed text?
-/// Browsers report a key press as a string: the character it types, or a name made of ASCII
-/// letters and digits that starts with a capital. One key press never types such a word.
+/// Named `KeyboardEvent.key` values (W3C UI Events) that a browser reports for a key that types
+/// nothing, separated by spaces. eframe's web backend sends the ones it doesn't know as text.
+const KEY_NAMES: &str = "\
+    Unidentified Alt AltGraph CapsLock Control Fn FnLock Hyper Meta NumLock ScrollLock Shift Super Symbol SymbolLock OS Win Enter \
+    Tab ArrowDown ArrowLeft ArrowRight ArrowUp End Home PageDown PageUp Backspace Clear Copy CrSel Cut Delete EraseEof ExSel \
+    Insert Paste Redo Undo Accept Again Attn Cancel ContextMenu Esc Escape Execute Find Finish Help Pause Play Props Select \
+    ZoomIn ZoomOut BrightnessDown BrightnessUp Eject LogOff Power PowerOff PrintScreen Hibernate Standby WakeUp AllCandidates \
+    Alphanumeric CodeInput Compose Convert Dead FinalMode GroupFirst GroupLast GroupNext GroupPrevious ModeChange NextCandidate \
+    NonConvert PreviousCandidate Process SingleCandidate HangulMode HanjaMode JunjaMode Eisu Hankaku Hiragana HiraganaKatakana \
+    KanaMode KanjiMode Katakana Romaji Zenkaku ZenkakuHankaku Soft1 Soft2 Soft3 Soft4 ChannelDown ChannelUp Close MailForward \
+    MailReply MailSend MediaClose MediaFastForward MediaPause MediaPlay MediaPlayPause MediaRecord MediaRewind MediaStop \
+    MediaTrackNext MediaTrackPrevious New Open Print Save SpellCheck Key11 Key12 AudioBalanceLeft AudioBalanceRight \
+    AudioBassBoostDown AudioBassBoostToggle AudioBassBoostUp AudioFaderFront AudioFaderRear AudioSurroundModeNext AudioTrebleDown \
+    AudioTrebleUp AudioVolumeDown AudioVolumeUp AudioVolumeMute MicrophoneToggle MicrophoneVolumeDown MicrophoneVolumeUp \
+    MicrophoneVolumeMute SpeechCorrectionList SpeechInputToggle LaunchApplication1 LaunchApplication2 LaunchCalendar \
+    LaunchContacts LaunchMail LaunchMediaPlayer LaunchMusicPlayer LaunchPhone LaunchScreenSaver LaunchSpreadsheet \
+    LaunchWebBrowser LaunchWebCam LaunchWordProcessor BrowserBack BrowserFavorites BrowserForward BrowserHome BrowserRefresh \
+    BrowserSearch BrowserStop AppSwitch Call Camera CameraFocus EndCall GoBack GoHome HeadsetHook LastNumberRedial Notification \
+    MannerMode VoiceDial TV TV3DMode TVAntennaCable TVAudioDescription TVAudioDescriptionMixDown TVAudioDescriptionMixUp \
+    TVContentsMenu TVDataService TVInput TVInputComponent1 TVInputComponent2 TVInputComposite1 TVInputComposite2 TVInputHDMI1 \
+    TVInputHDMI2 TVInputHDMI3 TVInputHDMI4 TVInputVGA1 TVMediaContext TVNetwork TVNumberEntry TVPower TVRadioService TVSatellite \
+    TVSatelliteBS TVSatelliteCS TVSatelliteToggle TVTerrestrialAnalog TVTerrestrialDigital TVTimer AVRInput AVRPower ColorF0Red \
+    ColorF1Green ColorF2Yellow ColorF3Blue ColorF4Grey ColorF5Brown ClosedCaptionToggle Dimmer DisplaySwap DVR Exit \
+    FavoriteClear0 FavoriteClear1 FavoriteClear2 FavoriteClear3 FavoriteRecall0 FavoriteRecall1 FavoriteRecall2 FavoriteRecall3 \
+    FavoriteStore0 FavoriteStore1 FavoriteStore2 FavoriteStore3 Guide GuideNextDay GuidePreviousDay Info InstantReplay Link \
+    ListProgram LiveContent Lock MediaApps MediaAudioTrack MediaLast MediaSkipBackward MediaSkipForward MediaStepBackward \
+    MediaStepForward MediaTopMenu NavigateIn NavigateNext NavigateOut NavigatePrevious NextFavoriteChannel NextUserProfile \
+    OnDemand Pairing PinPDown PinPMove PinPToggle PinPUp PlaySpeedDown PlaySpeedReset PlaySpeedUp RandomToggle RcLowBattery \
+    RecordSpeedNext RfBypass ScanChannelsToggle ScreenModeNext Settings SplitScreenToggle STBInput STBPower Subtitle Teletext \
+    VideoModeNext Wink ZoomToggle";
+
+/// Is `text` the name of a key ("AltGraph", "Dead", "F13") instead of typed text?
 pub fn is_key_name(text: &str) -> bool {
-    text.len() > 1 && text.starts_with(|c: char| c.is_ascii_uppercase()) && text.chars().all(|c| c.is_ascii_alphanumeric())
+    let function_key = text.strip_prefix('F').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    function_key || KEY_NAMES.split_ascii_whitespace().any(|k| k == text)
 }
 
-/// Drop text events that are key names. eframe's web backend sends the name of every key it
-/// doesn't know as text, so AltGr typed "AltGraph" into the story. `text_field_focused`: an
-/// egui text field has the keyboard; its text comes from the browser's input events, which can
-/// hold whole words, and is left alone.
-pub fn drop_key_name_text(raw: &mut egui::RawInput, text_field_focused: bool) {
-    if !text_field_focused {
+/// Drop text events that are key names: eframe's web backend sends the name of every key it
+/// doesn't know as text, so AltGr typed "AltGraph" into the story. `text_input_focused`: an egui
+/// text field or the canvas's text caret has the keyboard, so the browser's hidden text input
+/// sends the text, which holds only typed text (whole words from autocompletion too) and is left
+/// alone.
+pub fn drop_key_name_text(raw: &mut egui::RawInput, text_input_focused: bool) {
+    if !text_input_focused {
         raw.events.retain(|e| !matches!(e, egui::Event::Text(t) if is_key_name(t)));
     }
 }
@@ -2024,7 +2082,14 @@ mod tests {
         let mut raw = egui::RawInput { events: events(), ..Default::default() };
         drop_key_name_text(&mut raw, false);
         assert_eq!(raw.events, vec![text("é"), text("A"), text("ß"), text("ab"), text("Æ")]);
-        // A focused text field gets its text from input events, which can be whole words.
+        assert!(is_key_name("F13") && is_key_name("Escape") && is_key_name("ZoomToggle") && !is_key_name("F") && !is_key_name("Fx"));
+        // Capitalised words (mobile autocompletion) are text.
+        let words = vec![text("Hello"), text("Tokyo"), text("OK"), text("Hi there")];
+        let mut raw = egui::RawInput { events: words.clone(), ..Default::default() };
+        drop_key_name_text(&mut raw, false);
+        assert_eq!(raw.events, words);
+        // A focused text field or a canvas text caret gets its text from the browser's input
+        // events, which hold whole words, key-name-like ones too ("Help").
         let mut raw = egui::RawInput { events: events(), ..Default::default() };
         drop_key_name_text(&mut raw, true);
         assert_eq!(raw.events, events());

@@ -58,6 +58,10 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
+        #[cfg(target_os = "macos")]
+        if self.app.take_ime_discard() {
+            discard_marked_text();
+        }
     }
     fn on_exit(&mut self) {
         // A normal exit before the third frame is not a crash.
@@ -69,6 +73,17 @@ impl eframe::App for App {
             eprintln!("designcraft: couldn't preserve documents on exit: {e}");
         }
         save_prefs(&self.app);
+    }
+}
+
+/// Tell the macOS input method to drop its composition (the Type tool kept the marked text as
+/// typed). winit's IME toggle only clears its own copy, so the IME would type it again.
+#[cfg(target_os = "macos")]
+fn discard_marked_text() {
+    if let Some(mtm) = objc2::MainThreadMarker::new()
+        && let Some(ic) = objc2_app_kit::NSTextInputContext::currentInputContext(mtm)
+    {
+        ic.discardMarkedText();
     }
 }
 

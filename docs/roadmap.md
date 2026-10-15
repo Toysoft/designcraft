@@ -57,7 +57,7 @@ set exists; depth gaps are in gaps.md.
 |---|---|---|
 | M0 | Skeleton + vertical slice | ✅ |
 | M1 | Selection, transform, layers, pages, MCP | ✅ core; handle and snapping issues (#186, #188, #337) |
-| M2 | Type I (Type tool, threading, Character/Paragraph, composer) | partial: Type tool, composer and threading ✅; Primary Text Frame pages (#165, alpha blocker); caret formatting (#289); no IME (#322) |
+| M2 | Type I (Type tool, threading, Character/Paragraph, composer) | partial: Type tool, composer and threading ✅; Primary Text Frame pages (#165, alpha blocker); caret formatting (#289); IME not checked by hand (#322) |
 | M3 | Styles (nested/GREP, bullets, keeps, span columns) | ✅; style editing reliability (#169) |
 | M4 | Color & effects | ✅ core; colour management depth |
 | M5 | Graphics & links | ✅ core; EPS preview only |

@@ -303,14 +303,14 @@ Interface strings translated, of 1,724 measured. Detail: [docs/localization-pari
 | Language | Code | Status | Translated |
 |---|---|---|---|
 | English | en | full | 100% |
-| Simplified Chinese | zh | partial (no canvas IME) | 83% |
+| Simplified Chinese | zh | partial | 83% |
 | Spanish | es | partial | 83% |
 | Hindi | hi | none | 0% |
 | Arabic | ar | partial (RTL UI and composition) | 85% |
 | French | fr | partial | 83% |
 | Portuguese (Brazil) | pt-br | partial | 61% |
 | Indonesian | id | none | 0% |
-| Japanese | ja | partial (no canvas IME) | 95% |
+| Japanese | ja | partial | 95% |
 | German | de | partial | 83% |
 | Korean | ko | none | 0% |
 | Vietnamese | vi | none | 0% |
@@ -347,6 +347,7 @@ list) · [roadmap.md](docs/roadmap.md) (milestones, plan) · [parity-checklist.m
 
 Newest first.
 
+- **2026-10-15** · Japanese, Chinese and Korean input methods type into stories with the Type tool: the marked text shows in place, underlined (the clause being converted twice), with the candidate window at the caret, and the commit is one undo step. Keys, shortcuts, the clipboard and Undo wait while the input method composes; a click, a tool switch or another command keeps the marked text as typed. Not yet checked by hand with a system input method. No readiness percentage change.
 - **2026-10-14** · The Type tool draws a new text frame over a locked empty frame, as InDesign does, instead of turning the locked frame into a text frame. No readiness percentage change.
 - **2026-10-14** · 100% black shows as pure black on screen by default, as InDesign's Appearance of Black does out of the box (Display All Blacks as Rich Black); Preferences › Appearance of Black › Display All Blacks Accurately still shows it as the dark grey it prints, and a saved choice is kept. No readiness percentage change.
 - **2026-10-14** · Pathfinder keeps the frontmost object, as InDesign does: a photo placed over shapes and intersected with them shows through the shapes (it was dropped, and the shapes kept their black fill); Add, Exclude Overlap and Minus Back take the front object's fill too, Subtract still keeps the back one. No readiness percentage change.

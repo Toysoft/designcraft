@@ -23,7 +23,7 @@ fn run(s: &mut crate::Session, p: &Value) -> Result<Value> {
             st.doc = Arc::clone(doc);
             st.selection = selection.clone();
             st.history = history.clone();
-            st.revision = st.revision.saturating_add(1);
+            st.bump_revision();
         } else if st.history.undo.len() > history.undo.len() {
             st.history.undo.truncate(history.undo.len());
         }

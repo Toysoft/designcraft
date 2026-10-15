@@ -1778,8 +1778,22 @@ pub(crate) fn export_pdf(app: &mut DesignApp, p: &Value) -> Result<Value, String
     }
 }
 
+/// Commands that act on the text being typed wait while an IME composes at the caret (its marked
+/// text isn't typed yet): Undo and Redo (the native menu takes ⌘Z ahead of the IME), the clipboard
+/// and the selection.
+pub(crate) fn waits_for_ime(app: &DesignApp, id: &str) -> bool {
+    app.session.tool_composing()
+        && (matches!(
+            id,
+            "edit.undo" | "edit.redo" | "edit.cut" | "edit.copy" | "edit.clear" | "edit.duplicate" | "edit.selectAll" | "edit.deselectAll"
+        ) || id.starts_with("edit.paste"))
+}
+
 /// Is a command enabled (for menu greying)?
 pub fn enabled(app: &DesignApp, id: &str) -> bool {
+    if waits_for_ime(app, id) {
+        return false;
+    }
     match designcraft_engine::find_command(id) {
         Some(c) => (c.enabled)(&app.session).is_ok(),
         None => true,
@@ -2012,6 +2026,9 @@ pub fn checked(app: &DesignApp, id: &str, params: &Value) -> Option<bool> {
 
 /// Enablement for menu display (UI commands need a document unless they're app/window-level).
 pub fn menu_enabled(app: &DesignApp, id: &str) -> bool {
+    if waits_for_ime(app, id) {
+        return false;
+    }
     if id.starts_with("fit.") {
         return enabled(app, "object.fit");
     }
@@ -2039,6 +2056,9 @@ pub fn close_document(app: &mut DesignApp, index: Option<usize>) {
 /// A menu item was chosen. An engine command whose label ends in "…" and that takes parameters
 /// opens a dialog built from its parameter documentation (see [`crate::dialogs::command_fields`]).
 pub fn activate(app: &mut DesignApp, id: &str, params: &Value) {
+    if waits_for_ime(app, id) {
+        return;
+    }
     let was_find = app.ui.dialog.as_ref().is_some_and(|d| d.id == "findChange");
     activate_inner(app, id, params);
     if was_find && app.ui.dialog.as_ref().is_none_or(|d| d.id != "findChange") {
@@ -2355,7 +2375,8 @@ fn parse_shortcut(sc: &str) -> Option<(egui::Modifiers, egui::Key)> {
 pub fn shortcuts(app: &mut DesignApp, ctx: &egui::Context) {
     // Only a focused text field takes the keys: the canvas (or a button) having focus after a click
     // must not swallow tool shortcuts until Esc clears it.
-    if ctx.text_edit_focused() || app.ui.dialog.is_some() || app.ui.palette.is_some() {
+    // While an IME composes at the text caret, the keyboard is its own.
+    if ctx.text_edit_focused() || app.ui.dialog.is_some() || app.ui.palette.is_some() || app.session.tool_composing() {
         return;
     }
     let typing = app.session.wants_text();

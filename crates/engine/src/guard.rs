@@ -39,7 +39,6 @@ impl Session {
         // selection, which one is active, and the journal (nested commands journal too).
         let docs = self.docs.clone();
         let active = self.active;
-        let revision = self.active().map_or(0, |d| d.revision);
         let journal = self.journal.len();
         match catch_unwind(AssertUnwindSafe(|| f(self))) {
             Ok(r) => r,
@@ -53,7 +52,7 @@ impl Session {
                 self.journal.truncate(journal);
                 if let Some(st) = self.active_mut() {
                     st.interaction = None;
-                    st.revision = revision.max(st.revision).saturating_add(1);
+                    st.bump_revision();
                 }
                 if let Some(dir) = self.recovery_dir.clone()
                     && let Err(e) = crate::recovery::save(self, &dir)

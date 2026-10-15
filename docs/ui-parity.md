@@ -40,7 +40,7 @@ basics of editing fail for too many users on Windows and Linux.
 | Threading: click out port, load text cursor, click frame | ✓ | ✗ ports drawn only; no thread/unthread command; Primary Text Frame and autoflow on Place | ✗ | **alpha blocker** (#352, #194, #165, #140) |
 | Copy / cut / paste objects and text, Paste Into / in Place | ✓ | ✓ on macOS | ~ | **failing on Windows/Linux** (#351, #348, #312, #185, #164, #201, #212) |
 | Context menus (canvas, panels, rulers) | ✓ everywhere | 9 context-menu sites, ruler units by right-click | ~ | **not opening for several users** (#238, #187, #160) |
-| IME text input on the canvas | ✓ | ✗ | ✗ | #322 |
+| IME text input on the canvas | ✓ | ✓ | ~ | not checked by hand with a system IME (#322) |
 | Font menu: search, preview, favourites, type-ahead | ✓ | ✓ | ~ | search field focus on macOS (#335, #86) |
 | Keyboard shortcuts: InDesign defaults, editor, sets | ✓ | ✓ editor; defaults from 09-shortcuts.md | ✓ | |
 | Quick Apply | ✓ | ✓ | ✓ | |
@@ -64,7 +64,7 @@ context menus, typing at a caret) are things a layout artist does every minute, 
 | Work | Opus 5.5 h |
 |---|---|
 | Copy/paste, context menus, threading clicks, caret formatting on every platform, with control-channel regression tests | 30–50 |
-| Canvas IME (port from VectorCraft) | 10–20 |
+| Canvas IME: checks by hand with system IMEs, and fixes | 10–20 |
 | Missing menu items (~150) and panels (Tabs, Navigator, Trap Presets) | 40–70 |
 | Handle/tool feel fixes (#186, #188, #337), font search focus | 10–20 |
 | Dialog depth pass against 07-dialogs.md | 30–40 |

@@ -373,7 +373,7 @@ impl eframe::App for WebShell {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let _ = self.graphics.run_if_healthy(|| {
-            designcraft_ui_egui::drop_key_name_text(raw, ctx.text_edit_focused());
+            designcraft_ui_egui::drop_key_name_text(raw, ctx.text_edit_focused() || self.app.canvas_ime());
             self.app.raw_input_hook(raw);
         });
     }

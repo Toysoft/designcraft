@@ -276,7 +276,7 @@ fn file_save(s: &mut Session, p: &Value) -> Result<Value> {
     crate::io::write_file(&path, &bytes).map_err(EngineError::Other)?;
     if paths_changed {
         st.doc = saved;
-        st.revision = st.revision.saturating_add(1);
+        st.bump_revision();
     }
     st.path = Some(path.clone());
     st.saved_revision = st.revision;
@@ -722,7 +722,7 @@ fn file_revert(s: &mut Session, _: &Value) -> Result<Value> {
         let mut fresh = DocState::new(d, Some(path.clone()));
         fresh.fonts = fonts;
         fresh.uid = uid;
-        fresh.revision = s.doc()?.revision + 1;
+        // A new state has a revision no state had before, so caches don't show the old document.
         crate::recovery::discard_document(s, index, recovery_dir.as_deref());
         *s.doc_mut()? = fresh;
         Ok(json!({"path": path}))

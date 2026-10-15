@@ -10,6 +10,8 @@
 //!   drive the active tool through the same path as the mouse
 //! - `ui.key {key, shift?, alt?, cmd?}`: synthetic keyboard input
 //! - `ui.text {text}`: insert at the explicit caret, or type into a focused UI field
+//! - `ui.ime {preedit?, active?: [start, end], commit?}`: input method events, as the system IME
+//!   sends them (marked text with its converting clause in characters, then the committed text)
 //! - `ui.move {x, y}` / `ui.click {x, y, button?, count?, shift?…}` / `ui.drag {x, y, toX, toY, steps?}`:
 //!   real egui pointer input in screen points (reaches every widget: panels, flyouts, dialogs)
 //! - `ui.set {brightness?, panel?, dockTab?, rulers?, outline?, …}`
@@ -271,6 +273,18 @@ fn handle_request(app: &mut DesignApp, ctx: &egui::Context, req: &ControlRequest
                 }
                 wrap(app.run("text.insert", json!({"text": text})))
             }
+        }
+        "ui.ime" => {
+            let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
+            if let Some(text) = s("preedit") {
+                let active = p.get("active").and_then(Value::as_array).and_then(|a| Some(n(a.first()?)?..n(a.get(1)?)?));
+                app.synthetic.push(egui::Event::Ime(egui::ImeEvent::Preedit { text: text.to_string(), active_range_chars: active }));
+            }
+            if let Some(text) = s("commit") {
+                app.synthetic.push(egui::Event::Ime(egui::ImeEvent::Commit(text.to_string())));
+            }
+            ctx.request_repaint();
+            ok(Value::Null)
         }
         "ui.set" => {
             let mut r = Ok(Value::Null);

@@ -5668,7 +5668,7 @@ mod tests {
         let revision = app.session.doc().unwrap().revision;
         app.run("text.selectWord", json!({"frame": frame.0, "point": [point.x, point.y]})).unwrap();
         assert_eq!(app.session.doc().unwrap().selection, selected);
-        assert_eq!(app.session.doc().unwrap().revision, revision + 1);
+        assert!(app.session.doc().unwrap().revision > revision, "a new revision");
         assert!(std::sync::Arc::ptr_eq(&before, &app.session.doc().unwrap().doc));
         scope_click(&mut app, &ctx, screen, "Count");
         assert_eq!(app.ui.dialog.as_ref().unwrap().s("status"), "1 match(es)");

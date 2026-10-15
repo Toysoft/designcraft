@@ -50,23 +50,11 @@ pub fn specs() -> Vec<CommandSpec> {
             let a = floor_char_boundary(text, p.get("anchor").and_then(Value::as_u64).unwrap_or(0) as usize);
             let f = floor_char_boundary(text, p.get("focus").and_then(Value::as_u64).map(|v| v as usize).unwrap_or(a));
             st.selection = Selection::text(TextSel { story: sid, anchor: a, focus: f, frame: None, cell: None });
-            st.revision += 1;
+            st.bump_revision();
             s.typing_format = None;
             ok()
         }),
         cmd!("text.insert", "Type", [], None, "{text, raw?: bool (no typographer's quotes)} — replaces the selected text", has_text, insert),
-        // Neither journalled nor undoable: what is composed is a preview until it's typed.
-        CommandSpec {
-            id: "text.compose",
-            label: "Compose Text",
-            menu: &[],
-            shortcut: None,
-            params: "{text} — input-method text being composed (a dead key's accent), shown at the caret in the text's format until text.insert types the result; \"\" drops it",
-            enabled: has_doc,
-            run: compose_text,
-            journal: false,
-            undoable: false,
-        },
         cmd!("text.delete", "Delete Text", [], None, "{forward?: bool, word?: bool}", has_text, delete),
         cmd!(noundo "text.move", "Move Caret", [], None, "{dir: left|right|up|down|lineStart|lineEnd|storyStart|storyEnd, extend?, word?}", has_text, move_caret),
         cmd!(noundo "text.exitToFrame", "Select Frame", [], None, "{}", has_doc, |s, _| {
@@ -76,7 +64,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 st.selection.items = f.into_iter().collect();
             }
             st.selection.cells = None;
-            st.revision += 1;
+            st.bump_revision();
             ok()
         }),
         cmd!(
@@ -388,7 +376,7 @@ fn select_at(s: &mut Session, p: &Value, unit: &str) -> Result<Value> {
     let st = s.doc_mut()?;
     st.selection = Selection::text(TextSel { story: sid, anchor: a, focus: e, frame: Some(frame), cell });
     // Explicit reselection invalidates the Find scope even when the range is unchanged.
-    st.revision = st.revision.wrapping_add(1);
+    st.bump_revision();
     Ok(json!({"story": sid.0, "anchor": a, "focus": e}))
 }
 
@@ -474,7 +462,7 @@ fn place(s: &mut Session, p: &Value, extend: bool) -> Result<Value> {
     {
         let range = designcraft_doc::CellRange::new(a.row, a.col, c.row, c.col);
         st.selection.cells = Some(designcraft_doc::TableSel { story: sid, table: c.table, range });
-        st.revision += 1;
+        st.bump_revision();
         return Ok(json!({"story": sid.0, "cells": range}));
     }
     let t = match (extend, st.selection.text) {
@@ -482,7 +470,7 @@ fn place(s: &mut Session, p: &Value, extend: bool) -> Result<Value> {
         _ => TextSel { story: sid, anchor: b, focus: b, frame: Some(frame), cell },
     };
     st.selection = Selection::text(t);
-    st.revision += 1;
+    st.bump_revision();
     Ok(json!({"story": sid.0, "pos": b, "cell": cell}))
 }
 
@@ -518,30 +506,6 @@ fn release(s: &mut Session, p: &Value) -> Result<Value> {
         sel.text = Some(TextSel { story: sid, anchor: at, focus: end, frame: Some(frame), cell });
         Ok(json!({"moved": piece.text.len(), "at": at}))
     })
-}
-
-/// `text.compose`: show input-method text at the caret, typed in the format the next
-/// character would get, without making it part of the story. Replaces what was composed before.
-fn compose_text(s: &mut Session, p: &Value) -> Result<Value> {
-    let text = super::text_param(p, "text");
-    s.end_composition();
-    if text.is_empty() {
-        return ok();
-    }
-    has_text(s).map_err(|e| bad("text.compose", &e))?;
-    // The preview types the text; the format chosen at the caret is still for the real typing.
-    let typing = s.typing_format.clone();
-    s.begin_interaction("Type")?;
-    let r = s.preview("text.insert", json!({"text": text, "raw": true}));
-    s.typing_format = typing;
-    if let Err(e) = r {
-        s.cancel_interaction();
-        return Err(e);
-    }
-    let uid = s.doc()?.uid;
-    s.composition = Some((uid, text.len()));
-    let pos = s.doc()?.selection.text.map_or(0, |t| t.focus);
-    Ok(json!({"range": [pos.saturating_sub(text.len()), pos]}))
 }
 
 fn insert(s: &mut Session, p: &Value) -> Result<Value> {
@@ -634,7 +598,8 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
         sel.text = Some(TextSel { anchor: pos, focus: pos, ..t });
         Ok(json!({"pos": pos}))
     });
-    if result.is_ok() {
+    // A preview (IME marked text) leaves the typing format to the text typed in the end.
+    if result.is_ok() && s.active().is_none_or(|d| d.interaction.is_none()) {
         s.typing_format = None;
     }
     result
@@ -825,7 +790,7 @@ fn select_around(s: &mut Session, p: &Value, id: &str, bounds: fn(&str, usize) -
     let text = st.doc.text_story(sid, cell).map(|x| x.text.clone()).unwrap_or_default();
     let (anchor, focus) = bounds(&text, floor_char_boundary(&text, b));
     st.selection = Selection::text(TextSel { story: sid, anchor, focus, frame: Some(frame), cell });
-    st.revision += 1;
+    st.bump_revision();
     Ok(json!({"story": sid.0, "anchor": anchor, "focus": focus}))
 }
 
@@ -953,7 +918,7 @@ fn move_caret(s: &mut Session, p: &Value) -> Result<Value> {
     s.typing_format = None;
     let stm = s.doc_mut()?;
     stm.selection.text = Some(if extend { TextSel { focus: new, ..t } } else { TextSel { anchor: new, focus: new, ..t } });
-    stm.revision += 1;
+    stm.bump_revision();
     Ok(json!({"pos": new}))
 }
 
@@ -2951,70 +2916,6 @@ mod gradient_text_tests {
             let (rr, rb) = coloured_ink(img, x1 + 1 - q, x1 + 1);
             assert!(lr > lb + 50.0, "{what}: the left ink is red ({lr:.0}, {lb:.0})");
             assert!(rb > rr + 50.0, "{what}: the right ink is blue ({rr:.0}, {rb:.0})");
-        }
-    }
-}
-
-#[cfg(test)]
-mod compose_tests {
-    use serde_json::json;
-
-    use crate::Session;
-
-    /// A story "Ta" with the caret after "T" and 30 pt chosen for the next typing.
-    fn session() -> (Session, u64) {
-        let mut s = Session::new();
-        s.execute("file.new", &json!({})).unwrap();
-        let r = s.execute("frame.create", &json!({"rect": [72, 72, 500, 200], "content": "text", "text": "Ta"})).unwrap();
-        let sid = r["story"].as_u64().unwrap();
-        s.set_tool("type");
-        s.execute("text.select", &json!({"story": sid, "anchor": 1})).unwrap();
-        s.execute("type.char", &json!({"attrs": {"size": 30}})).unwrap();
-        (s, sid)
-    }
-
-    fn text(s: &Session, sid: u64) -> String {
-        s.doc().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap().text.clone()
-    }
-
-    /// ⌥E shows the accent in the story, in the format it will be typed in, then I types "í":
-    /// one undo step, and the accent was never part of the document.
-    #[test]
-    fn composed_text_shows_in_the_typing_format_until_it_is_typed() {
-        let (mut s, sid) = session();
-        let r = s.execute("text.compose", &json!({"text": "´"})).unwrap();
-        assert_eq!(r["range"], json!([1, 3]));
-        assert_eq!(text(&s, sid), "T´a");
-        let size_at = |s: &Session, b| s.doc().unwrap().doc.story(designcraft_doc::StoryId(sid)).unwrap().char_format_at(b).over.size;
-        assert_eq!(size_at(&s, 2), Some(30.0), "the accent is shown in the format chosen at the caret");
-        assert_eq!(s.composition().map(|c| c.2), Some(1..3));
-        s.execute("text.compose", &json!({"text": "¨"})).unwrap();
-        assert_eq!(text(&s, sid), "T¨a", "a new composition replaces the last one");
-        s.execute("text.compose", &json!({"text": ""})).unwrap();
-        assert_eq!(text(&s, sid), "Ta");
-        assert!(s.composition().is_none());
-        s.execute("text.insert", &json!({"text": "í"})).unwrap();
-        assert_eq!(text(&s, sid), "Tía");
-        assert_eq!(size_at(&s, 2), Some(30.0), "the typing format survived the composition");
-        s.execute("edit.undo", &json!({})).unwrap();
-        assert_eq!(text(&s, sid), "Ta");
-    }
-
-    /// Anything else that edits, a tool change or a drag drops the uncommitted accent.
-    #[test]
-    fn other_edits_drop_the_composed_text() {
-        for act in 0..3 {
-            let (mut s, sid) = session();
-            s.execute("text.compose", &json!({"text": "´"})).unwrap();
-            match act {
-                0 => {
-                    s.execute("text.move", &json!({"dir": "right"})).unwrap();
-                }
-                1 => s.set_tool("selection"),
-                _ => s.begin_interaction("Move").unwrap(),
-            }
-            assert_eq!(text(&s, sid), "Ta", "case {act}");
-            assert!(s.composition().is_none());
         }
     }
 }

@@ -99,9 +99,9 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 
 ## High
 
-### 8. Canvas text input has no IME (U, L)
-- **Missing:** composition input for Chinese, Japanese and Korean on the canvas (#322).
-  VectorCraft has an implementation to port.
+### 8. Canvas IME not checked with real input methods (U, L)
+- **Have:** IME composition in the Type tool on macOS, Windows, Linux and the web (#322).
+- **Missing:** a check by hand with a system IME on each platform, and the fixes it finds.
 - **Estimate:** 10–20 h. **Doc:** [localization-parity.md](localization-parity.md)
 
 ### 9. PDF output presets and standards (FF)
