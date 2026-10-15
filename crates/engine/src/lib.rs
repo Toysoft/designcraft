@@ -293,6 +293,9 @@ pub struct Session {
     pub(crate) transforms: (Vec<(String, Value)>, Vec<designcraft_doc::ItemId>, bool),
     /// Drag and drop text editing: the press landed in the selected text.
     pub(crate) text_drag: bool,
+    /// The word, line, paragraph or story the last `text.selectAt` selected: a drag that follows a
+    /// double, triple or quadruple click extends from it by whole units (#981).
+    pub(crate) text_unit: Option<designcraft_doc::TextSel>,
     /// Character formatting chosen at a bare caret, for the text typed there next.
     pub(crate) typing_format: Option<cmd::text::TypingFormat>,
     /// Text an input method is composing (a dead key's accent), shown in the story as an
@@ -334,6 +337,7 @@ impl Session {
             loaded: None,
             transforms: Default::default(),
             text_drag: false,
+            text_unit: None,
             typing_format: None,
             composition: None,
             library: None,

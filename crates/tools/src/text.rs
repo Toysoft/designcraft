@@ -19,8 +19,9 @@ pub struct TypeTool {
     cell_drag: Option<(u64, Point)>,
     /// Snap guides while drawing a frame.
     guides: Vec<Overlay>,
-    /// The press selected a word, line, paragraph or story (several clicks): drags keep it.
-    unit_selected: bool,
+    /// The press selected a word, line, paragraph or story (several clicks): a drag extends the
+    /// selection by that unit (#981).
+    unit: Option<&'static str>,
 }
 
 /// Are whole rows or whole columns of a table selected?
@@ -49,7 +50,7 @@ impl Tool for TypeTool {
                 self.drawing = false;
                 self.selecting = None;
                 self.cell_drag = None;
-                self.unit_selected = false;
+                self.unit = None;
                 // Text frames take the caret (locked ones too, as in InDesign); an empty frame
                 // becomes one, unless it's locked: then the press draws a new text frame over it.
                 if let Some((_, id)) = cx.hit(ev.pos)
@@ -68,13 +69,13 @@ impl Tool for TypeTool {
                     // Two presses select a word (or a run of spaces), three a line, four a
                     // paragraph, five the story.
                     if clicks >= 2 {
-                        self.unit_selected = true;
                         let unit = match clicks {
                             2 => "word",
                             3 => "line",
                             4 => "paragraph",
                             _ => "story",
                         };
+                        self.unit = Some(unit);
                         return vec![Action::Exec("text.selectAt".into(), json!({"frame": id.0, "point": [sp.x, sp.y], "unit": unit}))];
                     }
                     let cmd = if ev.mods.shift { "text.extendTo" } else { "text.placeCaret" };
@@ -84,12 +85,17 @@ impl Tool for TypeTool {
             }
             PointerKind::Drag => {
                 let Some(a) = self.start else { return vec![] };
-                if self.cell_drag.is_some() || self.unit_selected {
+                if self.cell_drag.is_some() {
                     return vec![];
                 }
                 if let Some(fid) = self.selecting {
                     let sp = cx.layout.spread_at(ev.pos).map(|(_, p)| p).unwrap_or(ev.pos);
-                    return vec![Action::Exec("text.extendTo".into(), json!({"frame": fid, "point": [sp.x, sp.y]}))];
+                    let mut p = json!({"frame": fid, "point": [sp.x, sp.y]});
+                    // After several clicks the drag grows the selection by whole units.
+                    if let Some(unit) = self.unit {
+                        p["unit"] = json!(unit);
+                    }
+                    return vec![Action::Exec("text.extendTo".into(), p)];
                 }
                 if (ev.pos - a).hypot() < cx.tol(3.0) && !self.drawing {
                     return vec![];

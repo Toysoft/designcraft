@@ -1028,8 +1028,18 @@ fn clicks_in_a_row_edit_and_select_text() {
     }
     // A double click sent as such (control channel) selects a word too.
     assert_eq!(unit(t.pointer(&cx, &PointerEvent::new(PointerKind::DoubleClick, x, y))).as_deref(), Some("word"));
-    // Moving a little while pressed keeps the unit selected.
-    assert!(t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, x + 2.0, y)).is_empty());
+    // Moving while pressed extends the selection by the unit the clicks chose (#981).
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, x + 40.0, y));
+    assert!(matches!(&a[..], [Action::Exec(id, p)] if id == "text.extendTo" && p["unit"] == "word" && p["frame"] == fid.0), "{a:?}");
+    t.pointer(&cx, &PointerEvent::new(PointerKind::Up, x + 40.0, y));
+    t.pointer(&cx, &press(3));
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, x + 40.0, y));
+    assert!(matches!(&a[..], [Action::Exec(id, p)] if id == "text.extendTo" && p["unit"] == "line"), "{a:?}");
+    // One click, then a drag: a character at a time, as before.
+    t.pointer(&cx, &PointerEvent::new(PointerKind::Up, x + 40.0, y));
+    t.pointer(&cx, &press(1));
+    let a = t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, x + 40.0, y));
+    assert!(matches!(&a[..], [Action::Exec(id, p)] if id == "text.extendTo" && p.get("unit").is_none()), "{a:?}");
 }
 
 #[test]
