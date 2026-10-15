@@ -844,6 +844,17 @@ pub const CLASSIC_GROUPS: &[&[&str]] = &[
     &["gradient"],
 ];
 
+/// The Typography preset's available panels in the order observed in InDesign's workspace.
+/// CC Libraries and the separate Story panel have no corresponding DesignCraft panel.
+pub const TYPOGRAPHY_GROUPS: &[&[&str]] = &[
+    &["pages", "layers", "swatches"],
+    &["glyphs", "textWrap"],
+    &["stroke", "gradient"],
+    &["hyperlinks", "effects"],
+    &["paragraph", "paragraphStyles"],
+    &["character", "characterStyles"],
+];
+
 pub fn ui_label(id: &str) -> Option<(&'static str, Option<&'static str>)> {
     UI_COMMANDS.iter().find(|c| c.0 == id).map(|c| (c.1, c.2))
 }
@@ -1627,11 +1638,14 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
             app.ui.control_bar = matches!(name, "Advanced" | "Typography" | "Printing and Proofing" | "Book" | "Essentials Classic");
             // Essentials Classic: the Control panel and an icon column of grouped panels, no
             // Properties stack.
-            let classic = name == "Essentials Classic";
-            app.ui.icon_groups = classic.then(|| CLASSIC_GROUPS.iter().map(|g| g.iter().map(|p| p.to_string()).collect()).collect());
-            app.ui.dock_expanded = !classic;
+            let groups = match name {
+                "Essentials Classic" => Some(CLASSIC_GROUPS),
+                "Typography" => Some(TYPOGRAPHY_GROUPS),
+                _ => None,
+            };
+            app.ui.icon_groups = groups.map(|groups| groups.iter().map(|g| g.iter().map(|p| p.to_string()).collect()).collect());
+            app.ui.dock_expanded = groups.is_none();
             let dock_tab = match name {
-                "Typography" => Some("properties"),
                 "Interactive for PDF" | "Digital Publishing" => Some("pages"),
                 _ => None,
             };
@@ -1640,7 +1654,6 @@ fn run_ui_inner(app: &mut DesignApp, id: &str, p: &Value) -> Option<Result<Value
                 app.ui.dock_expanded = true;
             }
             app.ui.open_panel = match name {
-                "Typography" => Some("paragraphStyles".into()),
                 "Printing and Proofing" => Some("swatches".into()),
                 "Interactive for PDF" => Some("buttons".into()),
                 "Digital Publishing" => Some("liquid".into()),
@@ -3954,6 +3967,31 @@ mod tests {
         assert_eq!((app.ui.icon_groups.as_ref(), app.ui.dock_expanded, app.ui.control_bar), (None, true, false));
         run_ui(&mut app, "window.workspace", &json!({"name": "Mine"})).unwrap().unwrap();
         assert_eq!(app.ui.icon_groups, Some(groups));
+    }
+
+    #[test]
+    fn typography_workspace_opens_its_panels_from_named_icon_groups_and_resets() {
+        let mut app = crate::DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        run_ui(&mut app, "window.workspace", &json!({"name":"Typography"})).unwrap().unwrap();
+        assert!(app.ui.control_bar);
+        assert!(!app.ui.dock_expanded);
+        assert!(app.ui.open_panel.is_none());
+        let groups = app.ui.icon_groups.clone().unwrap();
+        assert_eq!(groups[0], ["pages", "layers", "swatches"]);
+        assert_eq!(groups[4], ["paragraph", "paragraphStyles"]);
+        assert_eq!(groups[5], ["character", "characterStyles"]);
+        for panel in ["pages", "paragraphStyles", "characterStyles"] {
+            run_ui(&mut app, "window.panel", &json!({"panel":panel})).unwrap().unwrap();
+            assert_eq!(app.ui.open_panel.as_deref(), Some(panel));
+            assert!(!app.ui.dock_expanded);
+        }
+        run_ui(&mut app, "window.resetWorkspace", &json!({})).unwrap().unwrap();
+        assert_eq!(app.ui.icon_groups, Some(groups));
+        assert!(app.ui.open_panel.is_none());
+        assert!(!app.ui.dock_expanded);
+        run_ui(&mut app, "window.workspace", &json!({"name":"Essentials"})).unwrap().unwrap();
+        assert!(app.ui.icon_groups.is_none());
+        assert!(app.ui.dock_expanded);
     }
 
     #[test]

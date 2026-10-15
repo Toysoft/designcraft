@@ -61,6 +61,13 @@ context menus, typing at a caret) are things a layout artist does every minute, 
 
 ## Remaining effort
 
+Typography now starts and resets with the Control panel and named panel groups along the right
+edge, including Paragraph/Paragraph Styles and Character/Character Styles. It does not open
+Properties or a Styles flyout over the new page. This matches the available panels at 0:05–0:15
+in [Jessica Garrity's styles tutorial](https://www.youtube.com/watch?v=pG9JkAPLgs8).
+CC Libraries and a separate Story panel are absent; these are not needed for the tutorial's
+style operations. The flyout tabs and detailed controls remain separate UI parity work.
+
 | Work | Opus 5.5 h |
 |---|---|
 | Copy/paste, context menus, threading clicks, caret formatting on every platform, with control-channel regression tests | 30–50 |
